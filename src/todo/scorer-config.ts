@@ -63,6 +63,22 @@ export interface ScorerWeights {
    * not outrank a delivery that is already late.
    */
   manualCapture: number;
+  /**
+   * Penalty applied to a work-sourced candidate (`linear` / `weekly_priorities`)
+   * on one of the user's rest days.
+   *
+   * Negative, and deliberately smaller in magnitude than `overdue` (35): a rest
+   * day should reshuffle the day, not black out work entirely. Something already
+   * late still surfaces — and in fact anything overdue or due within 24h skips
+   * this penalty outright, because the one work item a user *does* want to hear
+   * about on a Saturday is the one that is already burning.
+   *
+   * Tuned against `manualCapture` (20): a life todo the user typed by hand
+   * outranks an untouched, undated Linear issue on a rest day, which is the
+   * whole point, while a High-priority issue (12) plus an OKR link (12) can
+   * still climb back over it if it genuinely matters.
+   */
+  restDayWorkDamping: number;
 }
 
 export const DEFAULT_SCORER_WEIGHTS: ScorerWeights = {
@@ -80,6 +96,7 @@ export const DEFAULT_SCORER_WEIGHTS: ScorerWeights = {
   okrWeeklyHit: 6,
   customerFacing: 10,
   manualCapture: 20,
+  restDayWorkDamping: -18,
 };
 
 export const DEFAULT_TOP_N = 10;

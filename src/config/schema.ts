@@ -27,6 +27,36 @@ const strategyAlignment = z
     reference_sources: ['linear', 'vault', 'feishu', 'calendar', 'github'],
   });
 
+/**
+ * The user's weekly rhythm. See `src/user/rhythm.ts` for why this is split into a
+ * structured half (here) and a prose half (`rhythm.md` in the memory vault).
+ *
+ * Defaults to enabled with the conventional Sat/Sun weekend: before this existed
+ * every day was planned as a work day, so shipping it off would leave the
+ * complaint that motivated it unfixed for everyone who never opens Settings. A
+ * user who works weekends sets `rest_days: []` or flips `enabled: false`.
+ */
+const userRhythm = z
+  .object({
+    enabled: z.boolean().default(true),
+    /** Rhythm notes file, relative to the memory repository. */
+    file: z.string().default('rhythm.md'),
+    /** Three-letter weekday codes, e.g. `['SAT', 'SUN']`. Unknown entries are ignored. */
+    rest_days: z.array(z.string()).default(['SAT', 'SUN']),
+    /**
+     * How many work-sourced tasks may still appear on a rest day. 1, not 0:
+     * an overdue delivery on a Saturday is exactly the thing a user does want to
+     * be told about, and a hard zero would hide it.
+     */
+    work_task_cap_on_rest_days: z.number().int().min(0).max(20).default(1),
+  })
+  .default({
+    enabled: true,
+    file: 'rhythm.md',
+    rest_days: ['SAT', 'SUN'],
+    work_task_cap_on_rest_days: 1,
+  });
+
 const feishuProfile = enabled.extend({
   id: z.string().default('default'),
   label: z.string().default('Default'),
@@ -54,6 +84,7 @@ export const AppConfigSchema = z.object({
   user: z.object({
     display_name: z.string().default('User'),
     timezone: z.string().default('UTC'),
+    rhythm: userRhythm,
   }),
   llm: z.object({
     provider: z.enum(['codex', 'openai', 'claude', 'anthropic']).default('codex'),

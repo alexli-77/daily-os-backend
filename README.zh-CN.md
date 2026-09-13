@@ -338,6 +338,14 @@ Memory repository 区域用于配置 Daily OS 的长期记忆库。`memory.repos
 `decision-policy.yaml`、`decision-policy.md` 是用户本地记忆，缺失时会自动生成，
 不应提交到 Git。第一天不要要求用户填写复杂权重，而是通过对话逐步磨合规则。
 
+作息（`Rhythm` 页）决定哪几天按休息日排。结构化部分在 `config.yaml` 的 `user.rhythm`：
+`rest_days` 默认 `["SAT", "SUN"]`，`work_task_cap_on_rest_days` 默认 1。休息日里来自
+Linear / 每周要务的候选会被降权（`breakdown.restDayDamping`），但**已逾期或当天到期的不降**，
+用户自己手记的 todo 也不降。排不成配置项的规则写在 memory repository 的 `rhythm.md`
+（模板 `rhythm.example.md`，运行时文件同样被 git 忽略），模型做计划时原样读，
+优先级高于内置默认句。周末照常工作的人把 `rest_days` 设成 `[]` 或 `enabled: false` 即可。
+`Rhythm` 页顶部显示的是**解析结果**（今天被判成工作日还是休息日），和排计划用的是同一个判断。
+
 `Logs` 页会显示本地 UI/API 请求状态和 action 执行生命周期。日志保存在
 `data/logs/ui-network.jsonl`，不记录请求正文、响应正文或密钥，并自动只保留最近 7 天。
 

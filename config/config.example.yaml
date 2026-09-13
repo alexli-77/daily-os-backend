@@ -6,6 +6,16 @@ assistant:
 user:
   display_name: "User"
   timezone: "America/Toronto"
+  # 你的一周作息。控制台 Rhythm 页可以改，并且会显示今天被判成工作日还是休息日。
+  rhythm:
+    enabled: true
+    # 排不成配置项的规则写在这个文件里（相对记忆仓库），模型做计划时原样读。
+    file: "rhythm.md"
+    # 三字母星期代码。周末不休的人设成 []，或把 enabled 关掉。
+    rest_days: ["SAT", "SUN"]
+    # 休息日最多留几条工作来源（Linear / 每周要务）的任务。
+    # 逾期或当天到期的不受这个上限压制；手记 todo 不算工作来源。
+    work_task_cap_on_rest_days: 1
 
 llm:
   # 程序化调度请使用 API-key provider（anthropic / openai）。
