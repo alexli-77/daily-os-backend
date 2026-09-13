@@ -2,6 +2,7 @@
 config/config.yaml
 memory-vault/default/decision-policy.md
 memory-vault/default/decision-policy.yaml
+memory-vault/default/rhythm.md
 data/**
 !data/.gitkeep
 !data/memory/

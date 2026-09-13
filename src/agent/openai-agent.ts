@@ -7,6 +7,7 @@ import type { MemoryBundle } from '../storage/memory.js';
 import { billingFromConfig, checkBudget, estimateCostUsd, recordUsage } from './token-meter.js';
 import { bundledAsset } from '../utils/install-root.js';
 import { fitEvidenceToBudget } from '../workflows/evidence-budget.js';
+import { renderRhythmPromptSection, resolveDayShape } from '../user/rhythm.js';
 import { describeAgentTimeout, resolveAgentTimeoutMs } from './runtime-env.js';
 
 export interface AgentInput {
@@ -72,11 +73,18 @@ export function buildUserPrompt(input: AgentInput): string {
   // was too big for Codex was exactly as too big for Claude.
   const { evidence, notes } = fitEvidenceToBudget(input.evidence, input.workflow);
   for (const note of notes) console.warn(`[evidence] ${note}`);
+  // The date line used to be the bare `2026-09-13`, which left the model to
+  // derive the weekday itself — a calculation models get wrong often enough that
+  // "don't plan seven work items on my Saturday" could not be stated as a rule,
+  // because nothing downstream reliably knew it was Saturday. Spell it out.
+  const shape = resolveDayShape(input.config, input.date);
+  const rhythmSection = renderRhythmPromptSection(input.config, input.date);
   return [
     `# Workflow\n${workflowPrompt}`,
     `# User\n${JSON.stringify(input.config.user, null, 2)}`,
     `# Planning Configuration\n${JSON.stringify(input.config.planning, null, 2)}`,
-    `# Date\n${input.date}`,
+    `# Date\n${input.date} ${shape.weekdayLabel}${shape.enabled ? `（${shape.dayTypeLabel}）` : ''}`,
+    ...(rhythmSection ? [`# 作息\n${rhythmSection}`] : []),
     `# Memory\n${JSON.stringify(input.memory, null, 2)}`,
     // Compact rather than indented. Two-space indentation on a JSON document
     // this size is tens of thousands of characters of whitespace that carries

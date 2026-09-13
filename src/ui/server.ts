@@ -10,7 +10,7 @@ import { loadConfig } from '../config/load-config.js';
 import { formatDoctor, runDoctor } from '../cli/doctor.js';
 import { collectEvidence } from '../workflows/evidence.js';
 import { runWorkflow } from '../workflows/run-workflow.js';
-import { todayInTimezone } from '../utils/date.js';
+import { addDays, todayInTimezone } from '../utils/date.js';
 import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
 import { sendFeishuMessage } from '../connectors/lark-cli.js';
 import { readLatestWorkflowOutput } from '../storage/memory.js';
@@ -24,6 +24,14 @@ import { appendUiLog, clearUiLogs, readUiLogs } from '../storage/ui-log.js';
 import { appVersion } from '../utils/version.js';
 import { startDecisionOnboarding } from '../decision/onboarding.js';
 import { ensureDecisionPolicyFiles } from '../decision/policy.js';
+import {
+  defaultRhythmMarkdown,
+  ensureRhythmFile,
+  normalizeRestDays,
+  readRhythmNotes,
+  resolveDayShape,
+  rhythmNotesAreTemplate,
+} from '../user/rhythm.js';
 import { BIWEEKLY_STRATEGY_FILE, defaultBiweeklyStrategy, expandPath, runConfiguredSkill } from '../skills/runner.js';
 import { defaultSkillInstallDir, installSkillRepo, readSkillRepoState, updateSkillRepo } from '../skills/update.js';
 import { generateCycleReview, isLifeReviewOsEntry } from '../skills/life-review-os.js';
@@ -476,6 +484,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/capture') return sendJson(response, await captureTodo(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/todo-inbox') return sendJson(response, await updateTodoInbox(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/decision-policy') return sendJson(response, await saveDecisionPolicy(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/rhythm') return sendJson(response, await saveRhythm(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/strategy') return sendJson(response, await saveStrategy(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/okr') return sendJson(response, await saveOkr(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/okr/format') return sendJson(response, formatOkr(await readJson(request)));
@@ -1184,6 +1193,7 @@ async function buildState(options: UiServerOptions): Promise<Record<string, unkn
     service: await getLaunchAgentStatus(),
     backgroundSuggestions: readBackgroundSuggestionsState(config),
     decisionPolicy: readDecisionPolicyState(config),
+    rhythm: readRhythmState(config),
     strategy: readStrategyState(config),
     // Local git reads only — no fetch. This runs on every console load, and the
     // page must not wait on the network to render.
@@ -1311,6 +1321,32 @@ function readDecisionPolicyState(config: AppConfig): Record<string, unknown> {
 }
 
 /**
+ * The user's rhythm, as the console needs it.
+ *
+ * `today` is the point of the whole page. Showing only the settings would leave
+ * the user to work out for themselves that "rest_days: [SAT, SUN]" means this
+ * particular Saturday gets one work item — which is exactly the inference this
+ * feature exists to stop asking people to make. Resolved through the same
+ * `resolveDayShape` the planner uses, so what the page claims and what the plan
+ * does cannot drift.
+ */
+function readRhythmState(config: AppConfig): Record<string, unknown> {
+  const files = ensureRhythmFile(config);
+  const notes = readRhythmNotes(config);
+  const today = todayInTimezone(config);
+  return {
+    repositoryPath: files.repositoryPath,
+    notesPath: files.notesPath,
+    notesMd: notes,
+    isTemplate: rhythmNotesAreTemplate(notes),
+    defaultMd: defaultRhythmMarkdown(),
+    restDays: normalizeRestDays(config.user.rhythm.rest_days),
+    today: resolveDayShape(config, today),
+    tomorrow: resolveDayShape(config, addDays(today, 1)),
+  };
+}
+
+/**
  * Today's plan, as data.
  *
  * Deliberately the same three calls `renderPlanColumn` makes, in the same
@@ -1417,6 +1453,18 @@ async function updateTodoInbox(options: UiServerOptions, body: unknown): Promise
     });
   }
   return { ok: true, text: result.reply || 'Todo inbox updated.', items: result.items || [], state: await buildState(options) };
+}
+
+async function saveRhythm(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const files = ensureRhythmFile(config);
+  const markdown = String(request.notesMd ?? '').replace(/\r\n/g, '\n');
+  fs.mkdirSync(path.dirname(files.notesPath), { recursive: true });
+  fs.writeFileSync(files.notesPath, markdown, 'utf8');
+  return { ok: true, text: `Saved rhythm notes: ${files.notesPath}`, state: await buildState(options) };
 }
 
 async function saveDecisionPolicy(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
@@ -2652,6 +2700,7 @@ const HTML = String.raw`<!doctype html>
       <nav class="nav" aria-label="Sections">
         <button class="nav-button active" data-section="overview">Overview</button>
         <button class="nav-button" data-section="guide">Guide</button>
+        <button class="nav-button" data-section="rhythm">Rhythm</button>
         <button class="nav-button" data-section="decision">Decision Policy</button>
         <button class="nav-button" data-section="strategy">Review Strategy</button>
         <button class="nav-button" data-section="okr">OKR</button>
@@ -2765,6 +2814,7 @@ const HTML = String.raw`<!doctype html>
                   <tbody>
                     <tr><td>Overview</td><td>跑检查、测试 Feishu、采集证据、手动触发常用动作。</td></tr>
                     <tr><td>Todo Inbox</td><td>管理你手动记录的日常 todo。</td></tr>
+                    <tr><td>Rhythm</td><td>设置哪几天是休息日，以及写自己的周作息表。页面顶部会显示今天被判成工作日还是休息日。</td></tr>
                     <tr><td>Decision Policy</td><td>编辑 Daily OS 做决策时读取的 markdown 规则。</td></tr>
                     <tr><td>Sources</td><td>配置 Feishu 文档、聊天、vault、Linear、GitHub。</td></tr>
                     <tr><td>Workflows</td><td>配置 daily plan、daily review、weekly review，以及 optional calendar-planning-os。</td></tr>
@@ -2873,6 +2923,83 @@ npm run service:install</code></pre>
                   <p class="hint">「计划条目规则」文件为空或删掉时，回退到这份内置副本。可以照抄回去做重置。</p>
                 </div>
                 <pre class="decision-example"><code id="strategy-default"></code></pre>
+              </section>
+            </div>
+          </section>
+
+          <section class="panel" id="section-rhythm">
+            <div class="panel-head">
+              <div>
+                <h2>Rhythm</h2>
+                <p class="hint">你的一周作息。哪几天是休息日、休息日最多留几条工作，以及排不进设置项的那些规则。改完下一次计划立刻生效，不用重启。</p>
+              </div>
+              <div class="panel-actions">
+                <button type="button" class="secondary compact" data-action="rhythm_reload">Refresh</button>
+                <button type="button" data-action="rhythm_save">Save Markdown</button>
+              </div>
+            </div>
+
+            <section class="rhythm-resolved" aria-labelledby="rhythm-resolved-title">
+              <h3 id="rhythm-resolved-title">今天会被当成什么日子</h3>
+              <p class="hint">这是计划真正读到的结论，不是设置的回显。下面两条和排计划用的是同一个判断。</p>
+              <div class="rhythm-today" id="rhythm-today"></div>
+              <p class="hint" id="rhythm-tomorrow"></p>
+            </section>
+
+            <fieldset class="rhythm-settings">
+              <legend>休息日设置</legend>
+              <label class="inline"><input type="checkbox" id="rhythm-enabled" /> 启用作息规则</label>
+              <p class="hint">关掉之后每天都按工作日排，跟这个功能上线前一样。</p>
+              <div class="rhythm-days" id="rhythm-days">
+                <label class="inline"><input type="checkbox" id="rhythm-day-MON" data-rhythm-day="MON" /> 周一</label>
+                <label class="inline"><input type="checkbox" id="rhythm-day-TUE" data-rhythm-day="TUE" /> 周二</label>
+                <label class="inline"><input type="checkbox" id="rhythm-day-WED" data-rhythm-day="WED" /> 周三</label>
+                <label class="inline"><input type="checkbox" id="rhythm-day-THU" data-rhythm-day="THU" /> 周四</label>
+                <label class="inline"><input type="checkbox" id="rhythm-day-FRI" data-rhythm-day="FRI" /> 周五</label>
+                <label class="inline"><input type="checkbox" id="rhythm-day-SAT" data-rhythm-day="SAT" /> 周六</label>
+                <label class="inline"><input type="checkbox" id="rhythm-day-SUN" data-rhythm-day="SUN" /> 周日</label>
+              </div>
+              <label>休息日的工作任务上限<input id="rhythm-work-cap" type="number" min="0" max="20" step="1" /></label>
+              <p class="hint">只限制来自 Linear / 每周要务的条目。自己手记的 todo 不受影响——休息日照样可以有「给家里做顿饭」。已经逾期或今天到期的工作项不受上限压制，仍会出现。</p>
+              <p class="hint">这三项跟其他设置一起保存，点页面右上角的 Save。下面的 markdown 有自己的 Save Markdown 按钮。</p>
+            </fieldset>
+
+            <div class="decision-page">
+              <section class="decision-editor" aria-labelledby="rhythm-editor-title">
+                <div>
+                  <h3 id="rhythm-editor-title">rhythm.md</h3>
+                  <p class="hint">排不成设置项的规则写这里，大白话就行。模型做计划时原样读。</p>
+                  <p class="hint" id="rhythm-notes-path"></p>
+                  <p class="hint" id="rhythm-repository"></p>
+                </div>
+                <textarea id="rhythm-md" spellcheck="false" placeholder="# 作息"></textarea>
+                <p class="hint" id="rhythm-status"></p>
+              </section>
+              <section class="decision-example-panel" aria-labelledby="rhythm-example-title">
+                <div>
+                  <h3 id="rhythm-example-title">示例</h3>
+                  <p class="hint">照着改，或者整段拷过去当起点。</p>
+                </div>
+                <pre class="decision-example"><code># 作息
+
+## 工作日
+
+- 工作时间 09:30-18:30，19:00 之后不要再排工作任务。
+- 上午留给需要安静的活，会议尽量排下午。
+
+## 休息日
+
+- 只处理已经逾期的事，其余时间留给生活。
+- 不要把下周的活提前拿到周末做。
+
+## 固定占用
+
+- 周二、周四 19:00-21:00 教球，不可占用。
+- 周日 20:00 周复盘。
+
+## 其他
+
+- 连续加班三天后，第四天按休息日排。</code></pre>
               </section>
             </div>
           </section>
@@ -3947,6 +4074,47 @@ legend {
   font-size: .86rem;
   line-height: 1.5;
 }
+.rhythm-resolved,
+.rhythm-settings {
+  display: grid;
+  gap: .6rem;
+  border: 1px solid var(--border);
+  border-radius: .5rem;
+  background: #fbfcfb;
+  padding: .85rem;
+  margin-bottom: 1rem;
+}
+.rhythm-settings {
+  border-color: var(--border);
+}
+.rhythm-settings legend {
+  font-size: .95rem;
+  font-weight: 700;
+  padding: 0 .35rem;
+}
+.rhythm-today {
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.rhythm-today .rhythm-rest {
+  color: var(--accent-2);
+}
+.rhythm-today .rhythm-work {
+  color: var(--accent);
+}
+.rhythm-today .rhythm-off {
+  color: var(--muted);
+  font-weight: 400;
+}
+.rhythm-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem 1rem;
+}
+.rhythm-settings input[type="number"] {
+  max-width: 6rem;
+}
 @media (max-width: 1080px) {
   .decision-page {
     grid-template-columns: minmax(0, 1fr);
@@ -4303,6 +4471,12 @@ function render() {
   const config = state.config;
   $('paths').textContent = state.configPath + '  |  ' + state.envPath;
 
+  checked('rhythm-enabled', config.user.rhythm?.enabled);
+  set('rhythm-work-cap', config.user.rhythm?.work_task_cap_on_rest_days ?? 1);
+  const restDays = (config.user.rhythm?.rest_days || []).map((day) => String(day).trim().toUpperCase().slice(0, 3));
+  document.querySelectorAll('[data-rhythm-day]').forEach((input) => {
+    input.checked = restDays.includes(input.dataset.rhythmDay);
+  });
   set('user-display-name', config.user.display_name);
   set('user-timezone', config.user.timezone);
   set('assistant-language', config.assistant.language);
@@ -4318,6 +4492,7 @@ function render() {
   }
   renderTodoInbox(openTodos);
   renderDecisionPolicy(state.decisionPolicy);
+  renderRhythm(state.rhythm);
   renderStrategy(state.strategy);
   renderOkr(state.okr);
   renderSkillRepo(state.skillRepo);
@@ -4580,6 +4755,47 @@ async function saveStrategyFromPage() {
   showToast('Review strategy saved', 'success');
 }
 
+function renderRhythm(rhythm) {
+  if (!rhythm) return;
+  set('rhythm-md', rhythm.notesMd || '');
+  const notesPath = $('rhythm-notes-path');
+  if (notesPath) notesPath.textContent = rhythm.notesPath || '';
+  const repository = $('rhythm-repository');
+  if (repository) repository.textContent = rhythm.repositoryPath ? 'Memory repository: ' + rhythm.repositoryPath : '';
+
+  const today = rhythm.today || {};
+  const box = $('rhythm-today');
+  if (box) {
+    if (!today.enabled) {
+      box.innerHTML = '<span class="rhythm-off">作息规则已关闭——今天和每一天都按工作日排。</span>';
+    } else {
+      // Lead with the verdict, then the consequence. A user who reads only the
+      // first line should already know whether today is protected.
+      const cls = today.isRestDay ? 'rhythm-rest' : 'rhythm-work';
+      const head = escapeHtml((today.date || '') + ' ' + (today.weekdayLabel || '') + ' · ' + (today.dayTypeLabel || ''));
+      const detail = today.isRestDay
+        ? (today.workTaskCap === 0
+            ? '今天不排工作任务。'
+            : '工作任务最多 ' + today.workTaskCap + ' 条，且只留给已经逾期或今天必须交付的项。')
+        : '按工作日排，条数由 Decision Policy 和默认规则决定。';
+      box.innerHTML = '<span class="' + cls + '">' + head + '</span><br><span class="rhythm-off">' + escapeHtml(detail) + '</span>';
+    }
+  }
+
+  const tomorrow = rhythm.tomorrow || {};
+  const tomorrowLine = $('rhythm-tomorrow');
+  if (tomorrowLine) {
+    tomorrowLine.textContent = tomorrow.enabled
+      ? '明天 ' + (tomorrow.date || '') + ' ' + (tomorrow.weekdayLabel || '') + ' · ' + (tomorrow.dayTypeLabel || '')
+      : '';
+  }
+
+  if (rhythm.isTemplate) {
+    const status = $('rhythm-status');
+    if (status && !status.textContent) status.textContent = 'rhythm.md 还是空模板——写点东西进去，它才会影响计划。';
+  }
+}
+
 function renderDecisionPolicy(policy) {
   if (!policy) return;
   set('decision-policy-md', policy.policyMd || '');
@@ -4670,6 +4886,12 @@ async function saveAll() {
   const next = structuredClone(state.config);
   next.user.display_name = value('user-display-name');
   next.user.timezone = value('user-timezone');
+  if (!next.user.rhythm) next.user.rhythm = { enabled: true, file: 'rhythm.md', rest_days: [], work_task_cap_on_rest_days: 1 };
+  next.user.rhythm.enabled = isChecked('rhythm-enabled');
+  next.user.rhythm.rest_days = Array.from(document.querySelectorAll('[data-rhythm-day]'))
+    .filter((input) => input.checked)
+    .map((input) => input.dataset.rhythmDay);
+  next.user.rhythm.work_task_cap_on_rest_days = Math.max(0, Math.min(20, Number(value('rhythm-work-cap') || 0)));
   next.assistant.language = value('assistant-language');
   next.llm.provider = value('llm-provider');
   next.llm.model = value('llm-model');
@@ -5068,6 +5290,27 @@ async function runAction(action) {
       const status = $('strategy-status');
       if (status) status.textContent = message;
       showToast('Review strategy save failed: ' + message, 'error', false);
+    }
+    return;
+  }
+  if (action === 'rhythm_reload') {
+    await loadState();
+    showToast('Rhythm reloaded', 'success');
+    return;
+  }
+  if (action === 'rhythm_save') {
+    const status = $('rhythm-status');
+    try {
+      if (status) status.textContent = 'Saving...';
+      const result = await post('/api/rhythm', { notesMd: value('rhythm-md') });
+      if (result.state) state = result.state;
+      render();
+      if (status) status.textContent = result.text || 'Saved rhythm.md';
+      showToast('Rhythm saved', 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (status) status.textContent = message;
+      showToast('Rhythm save failed: ' + message, 'error', false);
     }
     return;
   }

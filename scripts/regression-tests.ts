@@ -209,6 +209,11 @@ try {
     // The prompt has a size budget now: the GitHub projection, the per-workflow
     // drops, and the degradation order that replaced a hard 180s timeout.
     'scripts/tests/evidence-budget.test.ts',
+    // The planner knows what day of the week it is. Before this, `# Date` was a
+    // bare `2026-09-12` and the scorer had no calendar-week dimension at all, so
+    // Saturday got the same seven-item work plan as Tuesday and there was no
+    // setting to change that.
+    'scripts/tests/rhythm.test.ts',
   ]);
   console.log('Regression tests passed.');
 } finally {

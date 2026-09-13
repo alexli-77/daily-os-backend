@@ -418,6 +418,19 @@ includes `decision-policy.example.yaml`, `decision-policy.example.md`, and
 and must not be committed. Users should refine these through conversation
 rather than editing weights on day one.
 
+The `Rhythm` page decides which days are planned as rest days. The structured
+half lives in `config.yaml` under `user.rhythm`: `rest_days` defaults to
+`["SAT", "SUN"]` and `work_task_cap_on_rest_days` to 1. On a rest day,
+candidates from Linear and weekly priorities are damped
+(`breakdown.restDayDamping`) — but anything **overdue or due today is exempt**,
+and the user's own hand-captured todos are never damped. Rules that do not fit a
+config field go in `rhythm.md` in the memory repository (template
+`rhythm.example.md`; the runtime file is likewise git-ignored). The model reads
+it verbatim and it outranks the built-in defaults. Someone who works weekends
+sets `rest_days: []` or `enabled: false`. The top of the `Rhythm` page shows the
+*resolved* verdict for today — the same one the planner uses, not a read-back of
+the settings.
+
 The `Logs` tab shows local UI/API request status and action lifecycle events.
 Logs are stored in `data/logs/ui-network.jsonl`, do not include request bodies,
 response bodies, or secrets, and are automatically pruned to the last 7 days.

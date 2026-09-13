@@ -4,6 +4,7 @@ import type { AppConfig } from '../config/schema.js';
 import type { Evidence, EvidenceSource } from '../workflows/types.js';
 import { DEFAULT_TOP_N, loadScorerWeights, type ScorerWeights } from './scorer-config.js';
 import { getCarryOverDaysById, getCompletedCandidateIds } from './feedback.js';
+import { resolveDayShape, type DayShape } from '../user/rhythm.js';
 
 /**
  * LEO-209 — programmatic todo scorer.
@@ -44,7 +45,18 @@ export interface ScoreBreakdown {
   okr?: number;
   customerFacing?: number;
   manualCapture?: number;
+  /** Negative. Work-sourced candidate on a rest day — see `ScorerWeights.restDayWorkDamping`. */
+  restDayDamping?: number;
 }
+
+/**
+ * Sources that represent work somebody else is waiting on.
+ *
+ * `todo_inbox` and `vault` are excluded on purpose: those are the user's own
+ * lines, and on a Saturday "给大汪汪做饭" arrives through exactly the same pipe as
+ * a work task. Damping them would suppress the rest day rather than protect it.
+ */
+const WORK_SOURCES: ReadonlySet<TodoSource> = new Set<TodoSource>(['linear', 'weekly_priorities']);
 
 export interface ScoredTodoCandidate extends TodoCandidate {
   rank: number;
@@ -80,6 +92,15 @@ export interface ScoreAndRankOptions {
    * Injectable for tests; falls back to the ledger in `buildScoredTodos`.
    */
   completedCandidateIds?: Set<string>;
+  /**
+   * What kind of day this is for the user. On a rest day, work-sourced
+   * candidates are damped so the ranking the model receives is already shaped
+   * like a weekend instead of leaving the model to notice on its own.
+   *
+   * Injectable for tests; `buildScoredTodos` resolves it from config + date.
+   * Omitted entirely means "no rhythm applied" — a work day.
+   */
+  dayShape?: DayShape;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -97,8 +118,15 @@ export function buildScoredTodos(
   evidence: Evidence,
   date: string,
   options: ScoreAndRankOptions = {},
-): { generated_at: string; weights: ScorerWeights; top: ScoredTodoCandidate[]; total_candidates: number } {
+): {
+  generated_at: string;
+  weights: ScorerWeights;
+  top: ScoredTodoCandidate[];
+  total_candidates: number;
+  day_shape: DayShape;
+} {
   const weights = options.weights ?? loadScorerWeights();
+  const dayShape = options.dayShape ?? resolveDayShape(config, date);
   const now = options.now ?? new Date(`${date}T00:00:00`);
   const all = normalizeCandidates({ config, evidence, date, now });
   // Drop anything the user already ticked complete: a completed todo must never be
@@ -115,12 +143,16 @@ export function buildScoredTodos(
         return days && days > (candidate.carryOverDays ?? 0) ? { ...candidate, carryOverDays: days } : candidate;
       })
     : candidates;
-  const top = scoreAndRank(enriched, { ...options, weights, now });
+  const top = scoreAndRank(enriched, { ...options, weights, now, dayShape });
   return {
     generated_at: new Date().toISOString(),
     weights,
     top,
     total_candidates: candidates.length,
+    // Emitted alongside the ranking so the prompt's 作息 section and the numbers
+    // it is explaining come from one resolution, and so the console can show the
+    // user what today actually resolved to rather than only what they configured.
+    day_shape: dayShape,
   };
 }
 
@@ -153,7 +185,7 @@ export function scoreAndRank(candidates: TodoCandidate[], options: ScoreAndRankO
   const now = options.now ?? new Date();
   const topN = options.topN ?? DEFAULT_TOP_N;
   const scored = candidates.map((candidate) => {
-    const { score, breakdown } = scoreCandidate(candidate, weights, now);
+    const { score, breakdown } = scoreCandidate(candidate, weights, now, options.dayShape);
     return { ...candidate, score, breakdown, rank: 0, candidateId: candidate.id };
   });
   scored.sort((left, right) => right.score - left.score || left.title.localeCompare(right.title));
@@ -166,20 +198,32 @@ export function scoreAndRank(candidates: TodoCandidate[], options: ScoreAndRankO
  * score = overdue?35 | dueWithin24h?25 | dueWithin72h?12 +
  *         linear(Urgent20/High12) + linearState(InProgress15/InReview8) +
  *         calendarProximity(<=120min?15) + min(carryOverDays*5,15) +
- *         okr(linked12 | weeklyHit6) + customerFacing?10
+ *         okr(linked12 | weeklyHit6) + customerFacing?10 +
+ *         restDayDamping(work source on a rest day, not urgent ? -18)
  */
 export function scoreCandidate(
   candidate: TodoCandidate,
   weights: ScorerWeights,
   now: Date = new Date(),
+  dayShape?: DayShape,
 ): { score: number; breakdown: ScoreBreakdown } {
   const breakdown: ScoreBreakdown = {};
 
   const dueMs = parseDateMs(candidate.dueDate);
+  // Urgency is computed once and reused by the rest-day damping below: an item
+  // that is already late, or lands today, is the exception that survives a rest
+  // day. Deriving it twice from `dueMs` is how the two would eventually drift.
+  let urgent = false;
   if (dueMs !== null) {
-    if (dueMs < now.getTime()) breakdown.overdue = weights.overdue;
-    else if (dueMs - now.getTime() <= DAY_MS) breakdown.dueWithin24h = weights.dueWithin24h;
-    else if (dueMs - now.getTime() <= 3 * DAY_MS) breakdown.dueWithin72h = weights.dueWithin72h;
+    if (dueMs < now.getTime()) {
+      breakdown.overdue = weights.overdue;
+      urgent = true;
+    } else if (dueMs - now.getTime() <= DAY_MS) {
+      breakdown.dueWithin24h = weights.dueWithin24h;
+      urgent = true;
+    } else if (dueMs - now.getTime() <= 3 * DAY_MS) {
+      breakdown.dueWithin72h = weights.dueWithin72h;
+    }
   }
 
   const linearPoints = linearPriorityPoints(candidate, weights);
@@ -202,6 +246,10 @@ export function scoreCandidate(
   if (candidate.isCustomerFacing) breakdown.customerFacing = weights.customerFacing;
 
   if (candidate.source === 'todo_inbox') breakdown.manualCapture = weights.manualCapture;
+
+  if (dayShape?.isRestDay && WORK_SOURCES.has(candidate.source) && !urgent) {
+    breakdown.restDayDamping = weights.restDayWorkDamping;
+  }
 
   const score = Object.values(breakdown).reduce((sum, value) => sum + (value ?? 0), 0);
   return { score, breakdown };
