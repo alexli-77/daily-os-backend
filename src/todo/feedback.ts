@@ -11,7 +11,27 @@ import { writeFileAtomic } from '../utils/atomic-write.js';
  * reweight. Appends are atomic (read-modify-writeFileAtomic) so a crash mid
  * write never corrupts the ledger.
  */
-export type TodoFeedbackEvent = 'present' | 'complete' | 'defer' | 'reorder' | 'carry_over' | 'update' | 'reopen';
+/**
+ * `partial` — "I worked on this, it is not finished".
+ *
+ * The third thing that actually happens to a plan row, and until now the only
+ * one with nowhere to go: a row was either ticked, pushed to tomorrow, or left
+ * looking untouched. Half-finished work had to be filed as one of the other two,
+ * and both are wrong in a way that costs something — `complete` removes it from
+ * tomorrow's candidate pool forever, `defer` says the day's work never happened.
+ *
+ * It is *not* a terminal state. Everything that asks "is this still open" must
+ * answer yes for a partial row; see `getCompletedCandidateIds`.
+ */
+export type TodoFeedbackEvent =
+  | 'present'
+  | 'complete'
+  | 'partial'
+  | 'defer'
+  | 'reorder'
+  | 'carry_over'
+  | 'update'
+  | 'reopen';
 
 export interface TodoFeedbackEntry {
   ts: string;
@@ -109,7 +129,13 @@ export function getCompletedCandidateIds(config: AppConfig): Set<string> {
   for (const entry of listTodoFeedback(config)) {
     if (!entry.candidateId) continue;
     if (entry.event === 'complete') out.add(entry.candidateId);
-    else if (entry.event === 'reopen') out.delete(entry.candidateId);
+    // `partial` clears completion for the same reason `reopen` does, and the
+    // order matters: ticking a row and then downgrading it to "actually I only
+    // got halfway" is a correction, and without this line the row would stay
+    // permanently excluded from planning while the user believes they have
+    // marked it unfinished. Completion is terminal; being *told* it is not
+    // complete has to be able to undo that.
+    else if (entry.event === 'reopen' || entry.event === 'partial') out.delete(entry.candidateId);
   }
   return out;
 }

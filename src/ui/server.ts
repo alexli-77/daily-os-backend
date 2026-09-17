@@ -854,8 +854,8 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     // Todos restore path, and already honoured by `getCompletedCandidateIds` —
     // only this gate refused it, which made ticking a plan row the one action in
     // the product with no way back. A mis-click is not a decision.
-    if (event !== 'complete' && event !== 'defer' && event !== 'update' && event !== 'reopen') {
-      return { ok: false, error: 'event must be complete, defer, update or reopen.' };
+    if (event !== 'complete' && event !== 'partial' && event !== 'defer' && event !== 'update' && event !== 'reopen') {
+      return { ok: false, error: 'event must be complete, partial, defer, update or reopen.' };
     }
     const note = typeof request.note === 'string' ? request.note.trim() : '';
     const rank = Number(request.rank) || 0;
@@ -890,7 +890,9 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
       text:
         event === 'complete'
           ? '已标记完成'
-          : event === 'defer'
+          : event === 'partial'
+            ? '已标记部分完成'
+            : event === 'defer'
             ? '已延期'
             : event === 'reopen'
               ? '已恢复'
@@ -1379,7 +1381,7 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   const userRank = new Map<string, number>();
   for (const entry of listTodoFeedback(config)) {
     if (entry.date !== today) continue;
-    if (entry.event === 'complete' || entry.event === 'defer' || entry.event === 'update') {
+    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
     if (entry.event === 'reorder') userRank.set(entry.candidateId, entry.rank);

@@ -145,11 +145,26 @@ export function parseDailyReviewReconciliation(content: string): DailyReviewReco
  * the model's `carry_over` list restricted to items that are still `open` (a
  * done/progressed item is never carried forward, even if the model lists it).
  */
+/**
+ * The carry-over ids the model proposed, minus anything it also called finished.
+ *
+ * `progressed` is allowed through alongside `open`. The guard exists to stop a
+ * row being carried and reported `done` in the same breath — half-finished work
+ * is the *most* carry-worthy thing on the list, and filtering it out meant the
+ * model had to downgrade a genuinely advanced task to `open` to keep it for
+ * tomorrow, i.e. lie about the day to preserve the task.
+ *
+ * This became load-bearing with the `partial` feedback event: a row the user
+ * marks "worked on it, not done" is required to reconcile as `progressed`, so
+ * an `open`-only filter would have silently dropped every one of them.
+ */
 export function selectCarryOverCandidateIds(recon: DailyReviewReconciliation): string[] {
-  const openIds = new Set(
-    recon.reconciliation.filter((item) => item.status === 'open' && item.candidateId).map((item) => item.candidateId),
+  const unfinishedIds = new Set(
+    recon.reconciliation
+      .filter((item) => (item.status === 'open' || item.status === 'progressed') && item.candidateId)
+      .map((item) => item.candidateId),
   );
-  return recon.carryOver.filter((id) => openIds.has(id));
+  return recon.carryOver.filter((id) => unfinishedIds.has(id));
 }
 
 function normalizeReconStatus(value: unknown): DailyReviewReconStatus {
