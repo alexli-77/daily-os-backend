@@ -502,8 +502,68 @@ function renderToday(ctx: PageContext): string {
   <div class="two-col">
     <section class="card col"><h2>Today's plan</h2>${planCol}</section>
     <section class="card col"><h2>My todos</h2>${myTodoCol}</section>
-  </div>`;
+  </div>
+  <section class="card" id="team-today"><h2>团队今天</h2><p class="muted" id="team-today-status">读取中…</p><div id="team-today-members"></div></section>
+  <script>window.__LINEAR_WS__=${JSON.stringify(ctx.config.sources.linear.workspace)};</script>
+  <script>${TEAM_TODAY_JS}</script>`;
 }
+
+/**
+ * Teammates' today lists. Fetched after load rather than server-rendered: the
+ * team view reader is async (it resolves the session module lazily) and the
+ * Today page renderer is not, and one round trip to the local cache is cheaper
+ * than making every page render async for a panel most installs leave empty.
+ */
+const TEAM_TODAY_JS = String.raw`
+(function () {
+  var status = document.getElementById('team-today-status');
+  var box = document.getElementById('team-today-members');
+  if (!status || !box) return;
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+    });
+  }
+  function tag(candidateId) {
+    if (!candidateId) return '';
+    if (candidateId.indexOf('linear:') === 0) {
+      var id = candidateId.slice(7);
+      var ws = window.__LINEAR_WS__ || '';
+      var href = ws ? 'https://linear.app/' + encodeURIComponent(ws) + '/issue/' + encodeURIComponent(id) : 'https://linear.app/issue/' + encodeURIComponent(id);
+      return '<a class="tag tag-link" href="' + esc(href) + '" target="_blank" rel="noopener">' + esc(id) + '</a>';
+    }
+    return '<span class="tag">' + esc(candidateId) + '</span>';
+  }
+  function renderMember(member) {
+    var head = '<h3>' + esc(member.label) + '</h3>';
+    if (!member.plan) return '<div class="team-today-member">' + head + '<p class="muted">还没有收到 TA 的今日计划。</p></div>';
+    var payload = member.plan.payload || {};
+    var todos = payload.todos || [];
+    var feedback = payload.feedback || {};
+    var note = member.stale ? '<p class="muted small">来自 ' + esc(member.plan.date) + ' 的 plan（TA 今天还没跑）。</p>' : '';
+    if (!todos.length) return '<div class="team-today-member">' + head + note + '<p class="muted">这份 plan 没有待办条目。</p></div>';
+    var rows = todos.map(function (todo) {
+      var state = todo.candidateId ? feedback[todo.candidateId] : '';
+      var label = state === 'complete' ? 'done' : state === 'defer' ? 'deferred' : state === 'update' ? 'updated' : '';
+      return '<li class="todo-item' + (state === 'complete' ? ' state-checked' : '') + '">' +
+        '<div class="todo-text"><span class="plan-rank">' + esc(todo.rank) + '</span> ' + esc(todo.text) + '</div>' +
+        '<div class="todo-meta">' + tag(todo.candidateId || '') + (label ? '<span class="muted small">' + label + '</span>' : '') + '</div>' +
+        '</li>';
+    }).join('');
+    return '<div class="team-today-member">' + head + note + '<ul class="todo-list">' + rows + '</ul></div>';
+  }
+  fetch('/api/team/today', { credentials: 'same-origin' })
+    .then(function (response) { return response.json(); })
+    .then(function (data) {
+      if (!data || !data.ok) { status.textContent = '读取失败。'; return; }
+      if (data.status !== 'ready') { status.textContent = data.reason || '团队同步未启用。'; return; }
+      if (!data.members.length) { status.textContent = '团队里还没有其他成员。'; return; }
+      status.textContent = data.syncedAt ? '只读 · 最近同步 ' + new Date(data.syncedAt).toLocaleString() : '只读';
+      box.innerHTML = data.members.map(renderMember).join('');
+    })
+    .catch(function () { status.textContent = '读取失败。'; });
+})();
+`;
 
 /** Today's plan — the todos the daily_plan workflow generated (read-only view). */
 function renderPlanColumn(ctx: PageContext): string {

@@ -2,16 +2,21 @@ import crypto from 'node:crypto';
 import type { AppConfig } from '../config/schema.js';
 import { listCycles, parseCycleId, readCycle, serializeCycleMarkdown } from '../cycles/file.js';
 import {
+  isPlanDate,
   isUuid,
   listCachedCycles,
+  listCachedDailyPlans,
   listCachedOwners,
   readTeamCacheState,
   resetTeamCache,
   teamCacheDir,
   writeCachedCycle,
+  writeCachedDailyPlan,
   writeTeamCacheState,
 } from './cache.js';
-import type { CachedCycle, TeamCacheState } from './cache.js';
+import type { CachedCycle, CachedDailyPlan, TeamCacheState } from './cache.js';
+import { buildTodayPlanSnapshot } from '../todo/today-plan.js';
+import { addDays, todayInTimezone } from '../utils/date.js';
 import {
   resolveTeamSessionProvider,
   safeIsSupabaseConfigured,
@@ -61,6 +66,15 @@ import type { TeamMember, TeamSession, TeamSessionProvider } from './session-bri
  * make every one of our own saves trigger a full teammate re-download.
  * `members` is joined at read time from a separate, tiny table — cycles has no
  * `member_id` column on purpose.
+ *
+ * ## Daily plans ride the same tick
+ *
+ * `daily_plans` is a second table with the same key shape and the same
+ * policies, carrying a snapshot of the owner's "today" list (the todos plus
+ * their own complete / defer state). It is pushed and pulled by the same tick,
+ * with its own watermark and its own probe, so the cost of an idle minute is two
+ * single-row requests instead of one. Only the last two days are fetched: the
+ * point is "what is she doing today", not a history.
  */
 
 /** Where a sync attempt got to. Anything but `ok` means sync is paused. */
@@ -78,6 +92,10 @@ export interface TeamSyncResult {
   pulled: number;
   /** Own cycles uploaded this tick. */
   pushed: number;
+  /** Teammate daily plans written to the cache this tick. */
+  plansPulled: number;
+  /** Own daily plan uploaded this tick (0 or 1). */
+  plansPushed: number;
   syncedAt: string;
 }
 
@@ -90,6 +108,7 @@ export interface TeamSyncDeps {
 
 /** PostgREST paths, in one place: `supabaseFetch` only prefixes the origin. */
 const CYCLES_PATH = '/rest/v1/cycles';
+const DAILY_PLANS_PATH = '/rest/v1/daily_plans';
 
 // --- one sync tick -----------------------------------------------------------
 
@@ -119,18 +138,32 @@ export async function syncTeamOnce(config: AppConfig, deps: TeamSyncDeps = {}): 
   try {
     const pushed = await pushChangedCycles(config, provider, session, state);
     const { checked, changed, pulled } = await pullTeammateCycles(config, provider, session, state, now);
+    // Daily plans are a later addition on a table the project may not have
+    // yet. A failure there is reported, not allowed to stop cycles syncing:
+    // someone who has not applied the second migration keeps what they had.
+    let planError = '';
+    let plansPushed = 0;
+    let plans = { changed: false, pulled: 0 };
+    try {
+      plansPushed = await pushTodayPlan(config, provider, session, state);
+      plans = await pullTeammatePlans(config, provider, session, state, now);
+    } catch (error) {
+      planError = describePlanError(error);
+    }
     state.lastCheckedAt = now.toISOString();
-    state.lastError = '';
-    if (changed || pushed > 0) state.syncedAt = now.toISOString();
+    state.lastError = planError;
+    if (changed || plans.changed || pushed > 0 || plansPushed > 0) state.syncedAt = now.toISOString();
     if (!state.syncedAt) state.syncedAt = now.toISOString();
     writeTeamCacheState(state);
     return {
       status: 'ok',
-      reason: '',
+      reason: planError,
       checked,
-      changed,
+      changed: changed || plans.changed,
       pulled,
       pushed,
+      plansPulled: plans.pulled,
+      plansPushed,
       syncedAt: state.syncedAt,
     };
   } catch (error) {
@@ -138,7 +171,7 @@ export async function syncTeamOnce(config: AppConfig, deps: TeamSyncDeps = {}): 
     state.lastCheckedAt = now.toISOString();
     state.lastError = message;
     writeTeamCacheState(state);
-    return { status: 'error', reason: message, checked: true, changed: false, pulled: 0, pushed: 0, syncedAt: state.syncedAt };
+    return { status: 'error', reason: message, checked: true, changed: false, pulled: 0, pushed: 0, plansPulled: 0, plansPushed: 0, syncedAt: state.syncedAt };
   }
 }
 
@@ -164,12 +197,12 @@ export async function pushLocalCycle(config: AppConfig, cycleId: string, deps: T
     state.lastError = '';
     if (pushed) state.syncedAt = now.toISOString();
     writeTeamCacheState(state);
-    return { status: 'ok', reason: '', checked: true, changed: false, pulled: 0, pushed: pushed ? 1 : 0, syncedAt: state.syncedAt };
+    return { status: 'ok', reason: '', checked: true, changed: false, pulled: 0, pushed: pushed ? 1 : 0, plansPulled: 0, plansPushed: 0, syncedAt: state.syncedAt };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     state.lastError = message;
     writeTeamCacheState(state);
-    return { status: 'error', reason: message, checked: true, changed: false, pulled: 0, pushed: 0, syncedAt: state.syncedAt };
+    return { status: 'error', reason: message, checked: true, changed: false, pulled: 0, pushed: 0, plansPulled: 0, plansPushed: 0, syncedAt: state.syncedAt };
   }
 }
 
@@ -315,6 +348,99 @@ async function readMembers(config: AppConfig, provider: TeamSessionProvider, fal
   }
 }
 
+// --- daily plans -------------------------------------------------------------
+
+/**
+ * Upload today's plan snapshot when it differs from what we last sent. One row
+ * per day, keyed by the plan's own date, so a stale plan (yesterday's, because
+ * today's run hasn't happened) is pushed under yesterday and the teammate's
+ * view says so rather than showing it as today's.
+ */
+async function pushTodayPlan(
+  config: AppConfig,
+  provider: TeamSessionProvider,
+  session: TeamSession,
+  state: TeamCacheState,
+): Promise<number> {
+  const snapshot = buildTodayPlanSnapshot(config);
+  if (!snapshot || !isPlanDate(snapshot.date)) return 0;
+
+  const payload = { generated_at: snapshot.generated_at, todos: snapshot.todos, feedback: snapshot.feedback };
+  const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  if (state.pushedPlans[snapshot.date] === hash) return 0;
+
+  assertOwnedBySelf(session, session.userId);
+  const response = await provider.supabaseFetch(config, `${DAILY_PLANS_PATH}?on_conflict=team_id,owner,plan_date`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      prefer: 'resolution=merge-duplicates,return=minimal',
+    },
+    body: JSON.stringify([{ team_id: session.teamId, owner: session.userId, plan_date: snapshot.date, payload }]),
+  });
+  await assertOk(response, `push daily plan ${snapshot.date}`);
+  // Only today's hash matters; a date that has rolled over is never pushed again.
+  state.pushedPlans = { [snapshot.date]: hash };
+  return 1;
+}
+
+/**
+ * PostgREST answers a query against a table it does not know with 404 and
+ * `PGRST205`. For this table that means one thing — the second migration has
+ * not been run on this project — so say that instead of quoting the response.
+ */
+function describePlanError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/PGRST205|Could not find the table/i.test(message)) {
+    return '今日计划同步未启用：Supabase 里还没有 daily_plans 表。在项目的 SQL Editor 里执行 supabase/migrations/20260919000000_daily_plans.sql 即可，周期同步不受影响。';
+  }
+  return message;
+}
+
+async function pullTeammatePlans(
+  config: AppConfig,
+  provider: TeamSessionProvider,
+  session: TeamSession,
+  state: TeamCacheState,
+  now: Date,
+): Promise<{ changed: boolean; pulled: number }> {
+  const probe = await provider.supabaseFetch(
+    config,
+    `${DAILY_PLANS_PATH}?select=updated_at&owner=neq.${encodeURIComponent(session.userId)}&order=updated_at.desc&limit=1`,
+  );
+  await assertOk(probe, 'poll daily plans updated_at');
+  const first = (await readJsonArray(probe))[0] as Record<string, unknown> | undefined;
+  const watermark = first ? String(first.updated_at || '') : '';
+  if (watermark === state.planWatermark) return { changed: false, pulled: 0 };
+
+  // Yesterday too, so a teammate whose morning run hasn't happened yet still
+  // shows their last plan, flagged stale, instead of nothing.
+  const since = addDays(todayInTimezone(config), -1);
+  const response = await provider.supabaseFetch(
+    config,
+    `${DAILY_PLANS_PATH}?select=owner,plan_date,payload,updated_at&owner=neq.${encodeURIComponent(session.userId)}&plan_date=gte.${since}&order=updated_at.desc`,
+  );
+  await assertOk(response, 'pull daily plans');
+  const rows = await readJsonArray(response);
+
+  let pulled = 0;
+  for (const row of rows) {
+    const record = row as Record<string, unknown>;
+    const owner = String(record.owner || '');
+    const date = String(record.plan_date || '');
+    const payload = record.payload;
+    if (!isUuid(owner) || owner === session.userId) continue;
+    if (!isPlanDate(date) || !payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+    writeCachedDailyPlan(session.userId, owner, date, String(record.updated_at || ''), payload as Record<string, unknown>);
+    pulled += 1;
+  }
+
+  state.planWatermark = watermark;
+  state.syncedAt = now.toISOString();
+  state.members = await readMembers(config, provider, state.members);
+  return { changed: true, pulled };
+}
+
 // --- read-only view for the console -----------------------------------------
 
 export interface TeamViewMember {
@@ -362,28 +488,8 @@ export async function readTeamViewState(config: AppConfig, deps: TeamSyncDeps = 
 
   const { session } = gate;
   const state = readTeamCacheState();
-  const byId = new Map(state.members.map((member) => [member.userId, member]));
-  // Union of "in the team" and "has cached data": a teammate who left is still
-  // worth rendering as long as we hold their files, and a teammate who just
-  // joined should appear before their first cycle arrives.
-  const ids = new Set<string>([...state.members.map((member) => member.userId), ...listCachedOwners()]);
-  ids.delete(session.userId);
-
-  const members: TeamViewMember[] = [...ids].map((userId) => {
-    const member = byId.get(userId);
-    const displayName = member?.displayName || '';
-    const memberId = member?.memberId || '';
-    return {
-      userId,
-      memberId,
-      displayName,
-      label: displayName || memberId || `成员 ${userId.slice(0, 8)}`,
-      cycles: listCachedCycles(userId),
-    };
-  });
-  members.sort((left, right) => left.label.localeCompare(right.label));
-
-  const self = byId.get(session.userId);
+  const members: TeamViewMember[] = listTeammates(session, state).map((member) => ({ ...member, cycles: listCachedCycles(member.userId) }));
+  const self = state.members.find((member) => member.userId === session.userId);
   return {
     status: 'ready',
     reason: '',
@@ -398,6 +504,82 @@ export async function readTeamViewState(config: AppConfig, deps: TeamSyncDeps = 
     lastCheckedAt: state.lastCheckedAt,
     lastError: state.lastError,
   };
+}
+
+export interface TeamTodayMember {
+  userId: string;
+  memberId: string;
+  displayName: string;
+  label: string;
+  /** Newest cached plan, or null when nothing has arrived for this teammate. */
+  plan: CachedDailyPlan | null;
+  /** The cached plan is from an earlier day than our today. */
+  stale: boolean;
+}
+
+export interface TeamTodayState {
+  status: TeamViewState['status'];
+  reason: string;
+  today: string;
+  /** Teammates only; the page renders "我" from the local plan. */
+  members: TeamTodayMember[];
+  syncedAt: string;
+  lastCheckedAt: string;
+  lastError: string;
+}
+
+/**
+ * Teammates' "today" lists for the Today page, from disk only, same contract
+ * as `readTeamViewState`. A teammate who has joined but not pushed a plan yet
+ * is listed with `plan: null` so the page can say so instead of hiding them.
+ */
+export async function readTeamTodayState(config: AppConfig, deps: TeamSyncDeps = {}): Promise<TeamTodayState> {
+  const today = todayInTimezone(config);
+  const gate = await resolveSyncGate(config, deps);
+  if (!gate.ok) {
+    return {
+      status: gate.status === 'error' ? 'disabled' : gate.status,
+      reason: gate.reason,
+      today,
+      members: [],
+      syncedAt: '',
+      lastCheckedAt: '',
+      lastError: '',
+    };
+  }
+
+  const state = readTeamCacheState();
+  const members = listTeammates(gate.session, state).map((member) => {
+    const plan = listCachedDailyPlans(member.userId)[0] || null;
+    return { ...member, plan, stale: Boolean(plan && plan.date !== today) };
+  });
+  return {
+    status: 'ready',
+    reason: '',
+    today,
+    members,
+    syncedAt: state.syncedAt,
+    lastCheckedAt: state.lastCheckedAt,
+    lastError: state.lastError,
+  };
+}
+
+/**
+ * Union of "in the team" and "has cached data": a teammate who left is still
+ * worth rendering as long as we hold their files, and a teammate who just
+ * joined should appear before their first cycle arrives.
+ */
+function listTeammates(session: TeamSession, state: TeamCacheState): Array<Omit<TeamViewMember, 'cycles'>> {
+  const byId = new Map(state.members.map((member) => [member.userId, member]));
+  const ids = new Set<string>([...state.members.map((member) => member.userId), ...listCachedOwners()]);
+  ids.delete(session.userId);
+  const members = [...ids].map((userId) => {
+    const member = byId.get(userId);
+    const displayName = member?.displayName || '';
+    const memberId = member?.memberId || '';
+    return { userId, memberId, displayName, label: displayName || memberId || `成员 ${userId.slice(0, 8)}` };
+  });
+  return members.sort((left, right) => left.label.localeCompare(right.label));
 }
 
 // --- write guard -------------------------------------------------------------
@@ -504,7 +686,7 @@ async function resolveSyncGate(config: AppConfig, deps: TeamSyncDeps): Promise<S
 }
 
 function idleResult(status: TeamSyncStatus, reason: string): TeamSyncResult {
-  return { status, reason, checked: false, changed: false, pulled: 0, pushed: 0, syncedAt: '' };
+  return { status, reason, checked: false, changed: false, pulled: 0, pushed: 0, plansPulled: 0, plansPushed: 0, syncedAt: '' };
 }
 
 async function assertOk(response: Response, what: string): Promise<void> {
