@@ -83,11 +83,35 @@ produce the same schema.
 
 `daily_plans` is keyed `(team_id, owner, plan_date)` and holds a JSON snapshot
 of what `/api/today/plan` returns on the owner's machine: the ranked todos plus
-that person's own complete / defer state for the day. The client pushes it on
-the same 60 s tick as cycles whenever the snapshot's hash changes, and pulls
-teammates' rows for today and yesterday into `data/team-cache/<owner
-uuid>/daily/<date>.json`. The Today page and `GET /api/team/today` read that
-cache; nothing reads a row back into the owner's own data.
+that person's own complete / defer state for the day. The client pushes it
+within about a second of the snapshot changing — ticking a row, or a finished
+`daily_plan` run — and again on the 60 s tick as a backstop, in both cases only
+when the snapshot's hash has actually moved. It pulls teammates' rows for today
+and yesterday into `data/team-cache/<owner uuid>/daily/<date>.json`. The Today
+page and `GET /api/team/today` read that cache; nothing reads a row back into
+the owner's own data.
+
+Cycle rows are pushed the same way, driven by an `fs.watch` on the cycles
+directory, so an edit made in Obsidian or by the planner leaves the machine as
+quickly as one made in the console.
+
+A pulled row is applied only when its server `updated_at` is strictly newer than
+the version already cached, so a duplicate or out-of-order delivery is a no-op
+rather than a rollback. That version is the one the `touch_updated_at` trigger
+stamps: client clocks do not participate, which is also why the trigger must not
+be removed.
+
+### Retention
+
+`daily_plans` is a rolling window, not a history:
+
+- locally, cached **teammate** plan files older than 7 days are deleted on each
+  tick;
+- remotely, the client deletes its **own** rows older than 30 days, at most once
+  a day, using `daily_plans_delete_own`.
+
+`cycles` has no retention on either side, deliberately — those rows are the
+team's shared review history.
 
 Until this migration has been run, PostgREST answers the table with `PGRST205`.
 The client treats that as "daily plan sync not enabled": cycles keep syncing and

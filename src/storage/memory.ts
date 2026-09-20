@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import type { AppConfig, WorkflowName } from '../config/schema.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
+import { emitLocalChange } from '../utils/change-events.js';
 
 // Resolve the default vault relative to the working directory, not the code
 // location. daily-os-macos #3: the packaged service lives inside the app bundle
@@ -72,6 +73,11 @@ export function writeLatestWorkflowOutput(config: AppConfig, workflow: WorkflowN
     ...(evidenceTrace ? { evidence_trace: evidenceTrace } : {}),
   };
   writeFileAtomic(filePath, JSON.stringify(payload, null, 2));
+  // A finished `daily_plan` run *is* the today-plan snapshot; every other
+  // workflow leaves it untouched, so only that one is worth announcing.
+  // `buildTodayPlanSnapshot` reads this file back, hence the emit after the
+  // write rather than before.
+  if (workflow === 'daily_plan') emitLocalChange('today_plan');
   return filePath;
 }
 
