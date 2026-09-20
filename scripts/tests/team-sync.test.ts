@@ -132,13 +132,30 @@ function makeStub(options: StubOptions = {}) {
     calls: [] as Array<{ method: string; path: string; body?: unknown }>,
     failNext: null as Error | null,
     memberListError: null as Error | null,
+    /** Hold each request open this long, so overlapping work would be visible. */
+    delayMs: 0,
+    /** Requests in flight right now, and the high-water mark. */
+    concurrent: 0,
+    maxConcurrent: 0,
     isSupabaseConfigured: (): boolean => stub.configured,
     readTeamSession: () => stub.session,
     listTeamMembers: async () => {
       if (stub.memberListError) throw stub.memberListError;
       return stub.members;
     },
-    supabaseFetch: async (_config: unknown, requestPath: string, init?: RequestInit): Promise<Response> => {
+    supabaseFetch: async (config: unknown, requestPath: string, init?: RequestInit): Promise<Response> => {
+      stub.concurrent += 1;
+      stub.maxConcurrent = Math.max(stub.maxConcurrent, stub.concurrent);
+      try {
+        if (stub.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, stub.delayMs));
+        return await handle(config, requestPath, init);
+      } finally {
+        stub.concurrent -= 1;
+      }
+    },
+  };
+
+  async function handle(_config: unknown, requestPath: string, init?: RequestInit): Promise<Response> {
       const method = String(init?.method || 'GET').toUpperCase();
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       stub.calls.push({ method, path: requestPath, body });
@@ -174,6 +191,24 @@ function makeStub(options: StubOptions = {}) {
         return new Response('', { status: 201 });
       }
 
+      if (method === 'DELETE') {
+        const owner = (params.get('owner') || '').startsWith('eq.') ? (params.get('owner') as string).slice(3) : '';
+        const beforeFilter = params.get('plan_date') || '';
+        const before = beforeFilter.startsWith('lt.') ? beforeFilter.slice(3) : '';
+        // Mirrors `daily_plans_delete_own`: only your own rows, and a client
+        // that forgets to say whose rows it means gets nothing, not everyone's.
+        if (!stub.session || owner !== stub.session.userId) {
+          return new Response(JSON.stringify({ message: 'violates row-level security policy' }), { status: 403 });
+        }
+        for (let index = table.length - 1; index >= 0; index -= 1) {
+          const row = table[index];
+          if (row.owner !== owner) continue;
+          if (before && String((row as Record<string, unknown>).plan_date || '') >= before) continue;
+          table.splice(index, 1);
+        }
+        return new Response(null, { status: 204 });
+      }
+
       const ownerFilter = params.get('owner') || '';
       const excluded = ownerFilter.startsWith('neq.') ? ownerFilter.slice(4) : '';
       const dateFilter = params.get('plan_date') || '';
@@ -190,8 +225,8 @@ function makeStub(options: StubOptions = {}) {
         return out;
       });
       return new Response(JSON.stringify(projected), { status: 200, headers: { 'content-type': 'application/json' } });
-    },
-  };
+  }
+
   return stub;
 }
 
@@ -208,6 +243,63 @@ function probeRequests(stub: Stub): Array<{ method: string; path: string }> {
 }
 function planPushes(stub: Stub): Array<{ method: string; path: string; body?: any }> {
   return stub.calls.filter((call) => call.method === 'POST' && call.path.startsWith('/rest/v1/daily_plans'));
+}
+function cyclePushes(stub: Stub): Array<{ method: string; path: string; body?: any }> {
+  return stub.calls.filter((call) => call.method === 'POST' && call.path.startsWith('/rest/v1/cycles'));
+}
+/** One per `syncTeamOnce`: the cheap single-row probe on `cycles`. */
+function cycleProbes(stub: Stub): Array<{ method: string; path: string }> {
+  return stub.calls.filter((call) => call.method === 'GET' && call.path.startsWith('/rest/v1/cycles') && call.path.includes('limit=1'));
+}
+function planDeletes(stub: Stub): Array<{ method: string; path: string }> {
+  return stub.calls.filter((call) => call.method === 'DELETE' && call.path.startsWith('/rest/v1/daily_plans'));
+}
+
+/**
+ * The events `fs.watch` would deliver, delivered on demand. "A burst produces
+ * one push" is a claim about the debouncer, and driving the real watcher would
+ * make it a claim about how quickly the OS coalesces inotify events instead.
+ */
+function makeFakeWatch() {
+  const dirs: string[] = [];
+  let listener: ((filename: string) => void) | null = null;
+  return {
+    dirs,
+    emit: (filename: string): void => listener?.(filename),
+    watchDir: (dir: string, onChange: (filename: string) => void) => {
+      dirs.push(dir);
+      listener = onChange;
+      return {
+        close: () => {
+          listener = null;
+        },
+      };
+    },
+  };
+}
+
+/** The same trick for the in-process local-change bus. */
+function makeFakeBus() {
+  let listener: ((kind: 'today_plan') => void) | null = null;
+  return {
+    emit: (): void => listener?.('today_plan'),
+    subscribe: (next: (kind: 'today_plan') => void) => {
+      listener = next;
+      return () => {
+        listener = null;
+      };
+    },
+  };
+}
+
+/** Poll a predicate. Only used where a real OS watcher is in the loop. */
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return predicate();
 }
 
 // --- suites ------------------------------------------------------------------
@@ -247,6 +339,12 @@ async function main(): Promise<void> {
     await testWriteGuards();
     await testUiServer();
     await testConsoleRendering();
+    // These four run last on purpose: they wipe and reseed data/team-cache,
+    // which the suites above share.
+    await testInstantPush();
+    await testSingleFlight();
+    await testVersionedApply();
+    await testRetention();
   } finally {
     bridge.setTeamSessionProviderForTests(null);
     process.chdir(originalCwd);
@@ -352,7 +450,11 @@ async function main(): Promise<void> {
     });
     stub.calls.length = 0;
     const third = await sync.syncTeamOnce(config);
-    check('a moved watermark pulls again', third.changed && third.pulled === 2, JSON.stringify(third));
+    // Two rows come back in the body, but only the new one is *applied*: the
+    // other is the byte-for-byte row we already hold at the same server
+    // version, and re-writing it would be a no-op with a disk write attached.
+    // See the versioned-apply suite for why that is the rule and not a saving.
+    check('a moved watermark pulls again', third.changed && third.pulled === 1, JSON.stringify(third));
     check('a moved watermark fetches markdown exactly once', bodyRequests(stub).length === 1, JSON.stringify(bodyRequests(stub)));
   }
 
@@ -634,9 +736,19 @@ async function main(): Promise<void> {
     auth.resetSessionCacheForTests();
     auth.addUser('admin', 'admin-password-1', 'admin');
 
+    // Newer than everything the earlier suites cached. Applying a pulled row is
+    // versioned by the server clock now, so a fixture that wants to be seen has
+    // to actually be the newest — the daily-plan suite above pulls rows stamped
+    // with the real `today`, which a hardcoded 2026-09-02 would lose to.
     const stub = makeStub({
       rows: [
-        { owner: MATE_ID, cycle_id: MATE_CYCLE_ID, mode: 'biweekly', markdown: cycleFile('8.24-9.6', '- 企鹅在控制台里的要务'), updated_at: '2026-09-02T10:00:00.000Z' },
+        {
+          owner: MATE_ID,
+          cycle_id: MATE_CYCLE_ID,
+          mode: 'biweekly',
+          markdown: cycleFile('8.24-9.6', '- 企鹅在控制台里的要务'),
+          updated_at: `${addDays(todayInTimezone(config), 1)}T10:00:00.000Z`,
+        },
       ],
     });
     bridge.setTeamSessionProviderForTests(stub);
@@ -695,6 +807,28 @@ async function main(): Promise<void> {
       check(
         'the saved section was uploaded under my own uuid',
         stub.rows.some((row) => row.owner === SELF_ID && row.cycle_id === MINE_ID && row.markdown.includes('通过控制台写的 retro')),
+        JSON.stringify(stub.rows.map((row) => `${row.owner}:${row.cycle_id}`)),
+      );
+
+      // Regression, and a bug that predates this change: the save handler
+      // called `pushLocalCycle` directly, so a save landing during the 60s
+      // tick had both paths read-modify-writing `state.json` independently —
+      // whichever finished last silently dropped the other's work (a freshly
+      // pulled watermark, or the push hash that stops a re-upload every
+      // minute). Both go through the loop's queue now. With every request held
+      // open, two jobs running at once would be visible as an overlap.
+      stub.delayMs = 10;
+      stub.maxConcurrent = 0;
+      const [, concurrentSave] = await Promise.all([
+        fetch(`${base}/api/team/sync`, { method: 'POST', headers: authed, body: '{}' }),
+        saveSection({ id: MINE_ID, section: 'review', content: '与同步并发的保存' }),
+      ]);
+      stub.delayMs = 0;
+      check('a save and a sync tick are never in flight together', stub.maxConcurrent === 1, String(stub.maxConcurrent));
+      check('the concurrent save still succeeded locally', concurrentSave.body?.ok === true, JSON.stringify(concurrentSave.body).slice(0, 160));
+      check(
+        'and it still reached the remote',
+        stub.rows.some((row) => row.owner === SELF_ID && row.markdown.includes('与同步并发的保存')),
         JSON.stringify(stub.rows.map((row) => `${row.owner}:${row.cycle_id}`)),
       );
 
@@ -858,6 +992,401 @@ async function main(): Promise<void> {
     page.render();
     check('a sync failure is surfaced on the page', page.el('cycle-team-status').textContent.includes('fetch failed'), page.el('cycle-team-status').textContent);
     check('a sync failure still lets me read the cached teammate data', page.el('cycle-members').hidden === false);
+  }
+
+  // --- 9. push on change ------------------------------------------------------
+
+  /**
+   * The latency half. An edit should leave the machine in about a second
+   * whether it was made in the console, in Obsidian, or by the planner
+   * subprocess — without turning "I held down cmd+S" into a request storm.
+   */
+  async function testInstantPush(): Promise<void> {
+    console.log('\n--- push on change ---');
+    fs.rmSync(teamCache(), { recursive: true, force: true });
+    const minePath = path.join(cycles, `${MINE_ID}.md`);
+    const today = todayInTimezone(config);
+    // Long enough that the backstop tick can never fire inside a suite: every
+    // push asserted below has to come from a watcher or the change bus.
+    const noTicks = 3_600_000;
+
+    const watch = makeFakeWatch();
+    const bus = makeFakeBus();
+    const stub = makeStub({ rows: [] });
+    bridge.setTeamSessionProviderForTests(stub);
+    const loop = sync.startTeamSync(() => config, { intervalMs: noTicks, debounceMs: 20, watchDir: watch.watchDir, subscribe: bus.subscribe });
+    try {
+      await loop.flush(); // the tick startTeamSync fires on start
+      check('the watcher is pointed at the cycles directory', watch.dirs.length === 1 && watch.dirs[0] === cycleFileModule.cyclesDir(config), JSON.stringify(watch.dirs));
+
+      // One editor save fires 2-4 events; a git checkout fires one per file.
+      stub.calls.length = 0;
+      for (let index = 0; index < 6; index += 1) {
+        fs.writeFileSync(minePath, cycleFile('8.24-9.6', `- **MIT** 第 ${index} 次编辑`, `2026-09-1${index}T08:00:00.000Z`), 'utf8');
+        watch.emit(`${MINE_ID}.md`);
+      }
+      await loop.flush();
+      const pushes = cyclePushes(stub);
+      check('a burst of file events produces exactly one push', pushes.length === 1, JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)));
+      check(
+        'the content is read at send time, so several edits collapse to the last',
+        String(pushes[0]?.body?.[0]?.markdown || '').includes('第 5 次编辑'),
+        String(pushes[0]?.body?.[0]?.markdown || '').slice(0, 160),
+      );
+      check('and no intermediate state was ever sent', !JSON.stringify(stub.calls).includes('第 2 次编辑'));
+
+      // The noise a real fs.watch also reports.
+      stub.calls.length = 0;
+      watch.emit(`.${MINE_ID}.md.4321.1788888888888.tmp`); // writeFileAtomic's sibling
+      watch.emit('README.md');
+      watch.emit('.DS_Store');
+      watch.emit('');
+      await loop.flush();
+      check(
+        'temp files and non-cycle names push nothing',
+        cyclePushes(stub).length === 0,
+        JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)),
+      );
+
+      // An event for a file whose bytes did not move: the hash gate still holds.
+      stub.calls.length = 0;
+      watch.emit(`${MINE_ID}.md`);
+      await loop.flush();
+      check('an unchanged file is not re-sent just because it was touched', cyclePushes(stub).length === 0, JSON.stringify(stub.calls));
+
+      // Regression (found writing this suite): a flush with nothing pending
+      // used to wedge the runner for good. `drain()` stored its own promise
+      // *after* the async body had already run to completion and cleared the
+      // in-flight marker, so on an empty queue the marker stayed set forever
+      // and every later push was silently swallowed — no error, no request,
+      // sync just quietly stopped working until the process restarted.
+      await loop.flush();
+      await loop.flush();
+      stub.calls.length = 0;
+      fs.writeFileSync(minePath, cycleFile('8.24-9.6', '- **MIT** 空转之后写的', '2026-09-18T08:00:00.000Z'), 'utf8');
+      watch.emit(`${MINE_ID}.md`);
+      await loop.flush();
+      check('a flush with an empty queue does not wedge the runner', cyclePushes(stub).length === 1, JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)));
+
+      // The plan side, through the injected bus.
+      memory.writeLatestWorkflowOutput(
+        config,
+        'daily_plan',
+        today,
+        JSON.stringify({ todos: [{ rank: 1, text: '起床', candidateId: 'inbox:a' }, { rank: 2, text: '写论文', candidateId: 'inbox:b' }] }),
+      );
+      await loop.flush();
+      stub.calls.length = 0;
+      feedback.recordTodoFeedback(config, { date: today, event: 'complete', candidateId: 'inbox:a', rank: 1 });
+      bus.emit();
+      feedback.recordTodoFeedback(config, { date: today, event: 'defer', candidateId: 'inbox:b', rank: 2 });
+      bus.emit();
+      feedback.recordTodoFeedback(config, { date: today, event: 'reopen', candidateId: 'inbox:b', rank: 2 });
+      bus.emit();
+      await loop.flush();
+      const plans = planPushes(stub);
+      check('three change events in one window produce exactly one plan push', plans.length === 1, JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)));
+      check(
+        'the snapshot is rebuilt at send time, so the last state is what goes out',
+        plans[0]?.body?.[0]?.payload?.feedback?.['inbox:a'] === 'complete' && plans[0]?.body?.[0]?.payload?.feedback?.['inbox:b'] === undefined,
+        JSON.stringify(plans[0]?.body?.[0]?.payload?.feedback),
+      );
+    } finally {
+      loop.stop();
+    }
+
+    // The real wiring, with no bus injected: the todo ledger and the workflow
+    // writer announce for themselves. This is the seam that keeps feedback.ts
+    // and memory.ts from ever importing Supabase.
+    const realStub = makeStub({ rows: [], plans: [] });
+    bridge.setTeamSessionProviderForTests(realStub);
+    const realLoop = sync.startTeamSync(() => config, { intervalMs: noTicks, debounceMs: 20, watchDir: watch.watchDir });
+    try {
+      await realLoop.flush();
+      realStub.calls.length = 0;
+      feedback.recordTodoFeedback(config, { date: today, event: 'complete', candidateId: 'inbox:b', rank: 2 });
+      await realLoop.flush();
+      check('recordTodoFeedback pushes the plan without a tick', planPushes(realStub).length === 1, JSON.stringify(realStub.calls.map((call) => `${call.method} ${call.path}`)));
+
+      realStub.calls.length = 0;
+      memory.writeLatestWorkflowOutput(config, 'daily_plan', today, JSON.stringify({ todos: [{ rank: 1, text: '新的第一件事', candidateId: 'inbox:c' }] }));
+      await realLoop.flush();
+      const afterRun = planPushes(realStub);
+      check('a daily_plan workflow output pushes the plan without a tick', afterRun.length === 1, JSON.stringify(realStub.calls.map((call) => `${call.method} ${call.path}`)));
+      check('and it carries the new plan', JSON.stringify(afterRun[0]?.body?.[0]?.payload?.todos).includes('新的第一件事'), JSON.stringify(afterRun[0]?.body?.[0]?.payload?.todos));
+
+      realStub.calls.length = 0;
+      memory.writeLatestWorkflowOutput(config, 'daily_review', today, '## 今日回顾');
+      await realLoop.flush();
+      check('a workflow output that is not a daily_plan pushes nothing', planPushes(realStub).length === 0, JSON.stringify(realStub.calls.map((call) => `${call.method} ${call.path}`)));
+
+      // Put the plan output back for the suites below.
+      memory.writeLatestWorkflowOutput(config, 'daily_plan', today, JSON.stringify({ todos: [{ rank: 1, text: '新的第一件事', candidateId: 'inbox:c' }] }));
+      await realLoop.flush();
+    } finally {
+      realLoop.stop();
+    }
+
+    // End to end through the real fs.watch: an edit made outside this process
+    // — Obsidian, the planner, a git checkout — leaves without a tick.
+    const watchedStub = makeStub({ rows: [] });
+    bridge.setTeamSessionProviderForTests(watchedStub);
+    const watched = sync.startTeamSync(() => config, { intervalMs: noTicks, debounceMs: 20 });
+    try {
+      await watched.flush();
+      watchedStub.calls.length = 0;
+      fs.writeFileSync(minePath, cycleFile('8.24-9.6', '- **MIT** 在 Obsidian 里改的', '2026-09-19T08:00:00.000Z'), 'utf8');
+      const arrived = await waitFor(() => cyclePushes(watchedStub).length > 0);
+      check('a real file edit is pushed without waiting for a tick', arrived, JSON.stringify(watchedStub.calls.map((call) => `${call.method} ${call.path}`)));
+      check(
+        'and what arrived is the edit, not a stale body',
+        watchedStub.rows.some((row) => row.owner === SELF_ID && row.markdown.includes('在 Obsidian 里改的')),
+        JSON.stringify(watchedStub.rows.map((row) => `${row.owner}:${row.cycle_id}`)),
+      );
+    } finally {
+      watched.stop();
+    }
+
+    // A watcher that cannot start — no inotify, an fd limit, a cycles directory
+    // that does not exist yet — is a degraded mode, not a crash.
+    const brokenWatch = (): { close: () => void } => {
+      throw new Error('EMFILE: too many open files, watch');
+    };
+    const tickOnlyStub = makeStub({ rows: [] });
+    bridge.setTeamSessionProviderForTests(tickOnlyStub);
+    let startupError = '';
+    let tickOnly: ReturnType<typeof sync.startTeamSync> | null = null;
+    try {
+      tickOnly = sync.startTeamSync(() => config, { intervalMs: noTicks, debounceMs: 20, watchDir: brokenWatch });
+    } catch (error) {
+      startupError = error instanceof Error ? error.message : String(error);
+    }
+    check('a watcher that cannot start does not throw', startupError === '' && Boolean(tickOnly), startupError);
+    if (tickOnly) {
+      try {
+        const degraded = await tickOnly.runNow();
+        check('and sync degrades to tick-only rather than stopping', degraded.status === 'ok', JSON.stringify(degraded));
+        check('local editing is unaffected by a dead watcher', cycleFileModule.readCycle(config, MINE_ID)?.id === MINE_ID);
+      } finally {
+        tickOnly.stop();
+      }
+    }
+  }
+
+  // --- 10. single flight ------------------------------------------------------
+
+  /**
+   * `state.json` has exactly one writer. Everything — the tick, the watcher,
+   * the change bus, the console's 同步 button and its save handler — queues
+   * behind the same runner.
+   */
+  async function testSingleFlight(): Promise<void> {
+    console.log('\n--- single flight ---');
+    const minePath = path.join(cycles, `${MINE_ID}.md`);
+    const stub = makeStub({ rows: [] });
+    bridge.setTeamSessionProviderForTests(stub);
+    const loop = sync.startTeamSync(() => config, { intervalMs: 3_600_000, debounceMs: 20, watchDir: makeFakeWatch().watchDir });
+    try {
+      await loop.flush();
+      stub.calls.length = 0;
+      stub.maxConcurrent = 0;
+      // Hold every request open, so two jobs running at once would be visible.
+      stub.delayMs = 5;
+
+      const first = loop.runNow();
+      // Both of these are requested while the first is still in flight. They
+      // must collapse into one further run: not two, and not zero.
+      const second = loop.runNow();
+      const third = loop.runNow();
+      const results = await Promise.all([first, second, third]);
+      check('every overlapping caller gets a real result', results.every((result) => result.status === 'ok'), JSON.stringify(results.map((result) => result.status)));
+      check('three overlapping tick requests run exactly twice', cycleProbes(stub).length === 2, JSON.stringify(cycleProbes(stub).map((call) => call.path)));
+      check('no two sync jobs are ever in flight together', stub.maxConcurrent === 1, String(stub.maxConcurrent));
+
+      // Work that arrives mid-tick must not be dropped.
+      fs.writeFileSync(minePath, cycleFile('8.24-9.6', '- **MIT** 同步进行中写的', '2026-09-20T08:00:00.000Z'), 'utf8');
+      stub.calls.length = 0;
+      stub.maxConcurrent = 0;
+      const tick = loop.runNow();
+      const push = loop.pushCycle(MINE_ID);
+      await Promise.all([tick, push]);
+      await loop.flush();
+      check(
+        'a push requested during a tick is not lost',
+        stub.rows.some((row) => row.owner === SELF_ID && row.markdown.includes('同步进行中写的')),
+        JSON.stringify(stub.rows.map((row) => `${row.owner}:${row.cycle_id}`)),
+      );
+      check('and it is sent once, not twice', cyclePushes(stub).length === 1, JSON.stringify(cyclePushes(stub).map((call) => call.path)));
+      check('the overlapping push did not overlap', stub.maxConcurrent === 1, String(stub.maxConcurrent));
+
+      stub.delayMs = 0;
+      const state = JSON.parse(fs.readFileSync(path.join(teamCache(), 'state.json'), 'utf8')) as Record<string, unknown>;
+      check('state.json came out of the storm intact', typeof state.watermark === 'string' && typeof state.pushed === 'object', JSON.stringify(Object.keys(state)));
+    } finally {
+      loop.stop();
+    }
+  }
+
+  // --- 11. last writer wins, by the server clock ------------------------------
+
+  /**
+   * The correctness half. Arrival order is not authorship order: a retry, a
+   * slow response overtaken by a fast one, and (in phase 2) a Realtime frame
+   * racing a poll all deliver old rows after new ones.
+   */
+  async function testVersionedApply(): Promise<void> {
+    console.log('\n--- versioned apply ---');
+    fs.rmSync(teamCache(), { recursive: true, force: true });
+    const cachedMarkdown = (): string => fs.readFileSync(path.join(teamCache(), MATE_ID, `${MATE_CYCLE_ID}.md`), 'utf8');
+    const V1 = '2026-09-10T10:00:00.000000+00:00';
+    const V2 = '2026-09-10T10:05:00.000000+00:00';
+    const mateRow = (text: string, updatedAt: string): RemoteRow => ({
+      owner: MATE_ID,
+      cycle_id: MATE_CYCLE_ID,
+      mode: 'biweekly',
+      markdown: cycleFile('8.24-9.6', `- ${text}`),
+      updated_at: updatedAt,
+    });
+
+    const stub = makeStub({ rows: [mateRow('新版本', V2)] });
+    bridge.setTeamSessionProviderForTests(stub);
+    const applied = await sync.syncTeamOnce(config);
+    check('the first delivery of a row is applied', applied.pulled === 1 && cachedMarkdown().includes('新版本'), JSON.stringify(applied));
+
+    // The same row, older. A retry that overtook a newer write, a rollback, a
+    // second machine catching up: they all look exactly like this.
+    stub.rows = [mateRow('旧版本', V1)];
+    const older = await sync.syncTeamOnce(config);
+    check('an older remote row does not overwrite a newer cached one', cachedMarkdown().includes('新版本'), cachedMarkdown().slice(0, 100));
+    check('and it is not reported as pulled', older.pulled === 0, JSON.stringify(older));
+
+    // Exactly the version we already hold, delivered a second time.
+    stub.rows = [mateRow('重复投递', V2)];
+    const duplicate = await sync.syncTeamOnce(config);
+    check('a duplicate delivery of the cached version is a no-op', duplicate.pulled === 0 && cachedMarkdown().includes('新版本'), cachedMarkdown().slice(0, 100));
+
+    // ...and this is versioning, not "never write again".
+    stub.rows = [mateRow('更新的版本', '2026-09-10T10:06:00+00:00')];
+    const newer = await sync.syncTeamOnce(config);
+    check('a strictly newer row is still applied', newer.pulled === 1 && cachedMarkdown().includes('更新的版本'), cachedMarkdown().slice(0, 100));
+
+    // The rule that must survive all of the above: the watermark tracks the
+    // table, not what we chose to apply, so a pull that applied nothing does
+    // not re-fetch the same bodies on the next tick forever.
+    stub.rows = [mateRow('又一个旧版本', V1)];
+    const rejected = await sync.syncTeamOnce(config);
+    check('a rejected row still costs only the one body fetch', rejected.pulled === 0, JSON.stringify(rejected));
+    stub.calls.length = 0;
+    const settled = await sync.syncTeamOnce(config);
+    check(
+      'a pull that applied nothing still advanced the watermark',
+      bodyRequests(stub).length === 0 && !settled.changed,
+      JSON.stringify(stub.calls.map((call) => call.path)),
+    );
+
+    // Daily plans carry their version in the cached json instead of in state.
+    const today = todayInTimezone(config);
+    const planPath = path.join(teamCache(), MATE_ID, 'daily', `${today}.json`);
+    const planStub = makeStub({
+      rows: [],
+      plans: [{ owner: MATE_ID, plan_date: today, payload: { todos: [{ rank: 1, text: '新计划', candidateId: 'x' }] }, updated_at: V2 }],
+    });
+    bridge.setTeamSessionProviderForTests(planStub);
+    await sync.syncTeamOnce(config);
+    check('the teammate plan is cached', fs.readFileSync(planPath, 'utf8').includes('新计划'));
+    planStub.plans = [{ owner: MATE_ID, plan_date: today, payload: { todos: [{ rank: 1, text: '旧计划', candidateId: 'x' }] }, updated_at: V1 }];
+    const stalePlan = await sync.syncTeamOnce(config);
+    check(
+      'an out-of-order daily plan is a no-op',
+      stalePlan.plansPulled === 0 && fs.readFileSync(planPath, 'utf8').includes('新计划'),
+      fs.readFileSync(planPath, 'utf8').slice(0, 120),
+    );
+
+    // The comparator itself. Every one of these is a way plain string or
+    // millisecond comparison gets a real PostgREST timestamp wrong.
+    check('trailing-zero trimming does not make two equal instants unequal', cache.isNewerVersion('2026-09-10T10:00:00.5+00:00', '2026-09-10T10:00:00.50+00:00') === false);
+    check('microsecond precision is kept', cache.isNewerVersion('2026-09-10T10:00:00.000002+00:00', '2026-09-10T10:00:00.000001+00:00') === true);
+    check('instants are compared across offsets, not strings', cache.isNewerVersion('2026-09-10T09:00:00+00:00', '2026-09-10T10:30:00+02:00') === true);
+    check('an unreadable incoming version cannot overwrite a good cached one', cache.isNewerVersion('not-a-date', '2026-09-10T10:00:00+00:00') === false);
+    check('a good version does beat an unreadable cached one', cache.isNewerVersion('2026-09-10T10:00:00+00:00', 'not-a-date') === true);
+    check('the first version seen beats nothing cached', cache.isNewerVersion('2026-09-10T10:00:00+00:00', '') === true);
+  }
+
+  // --- 12. retention ----------------------------------------------------------
+
+  async function testRetention(): Promise<void> {
+    console.log('\n--- retention ---');
+    fs.rmSync(teamCache(), { recursive: true, force: true });
+    const today = todayInTimezone(config);
+    const dailyDir = path.join(teamCache(), MATE_ID, 'daily');
+    const cachedCycle = path.join(teamCache(), MATE_ID, `${MATE_CYCLE_ID}.md`);
+    const statePath = path.join(teamCache(), 'state.json');
+
+    fs.mkdirSync(dailyDir, { recursive: true });
+    fs.writeFileSync(cachedCycle, cycleFile('8.24-9.6', '- 企鹅的历史周期'), 'utf8');
+    for (const date of [today, addDays(today, -6), addDays(today, -7), addDays(today, -8), addDays(today, -40)]) {
+      fs.writeFileSync(path.join(dailyDir, `${date}.json`), JSON.stringify({ date, updatedAt: `${date}T09:00:00+00:00`, payload: { todos: [] } }), 'utf8');
+    }
+    // Something in the shape a stray write would take. Retention deletes plans.
+    fs.writeFileSync(path.join(dailyDir, 'notes.txt'), 'not a plan', 'utf8');
+
+    const stub = makeStub({
+      rows: [],
+      plans: [
+        { owner: SELF_ID, plan_date: addDays(today, -29), payload: { todos: [] }, updated_at: `${today}T09:00:00+00:00` },
+        { owner: SELF_ID, plan_date: addDays(today, -31), payload: { todos: [] }, updated_at: `${today}T09:00:00+00:00` },
+        { owner: MATE_ID, plan_date: addDays(today, -400), payload: { todos: [] }, updated_at: `${today}T09:00:00+00:00` },
+      ],
+    });
+    bridge.setTeamSessionProviderForTests(stub);
+    const first = await sync.syncTeamOnce(config);
+
+    const remaining = fs.readdirSync(dailyDir).sort();
+    check(
+      'cached teammate plans older than 7 days are pruned',
+      !remaining.includes(`${addDays(today, -8)}.json`) && !remaining.includes(`${addDays(today, -40)}.json`),
+      remaining.join(','),
+    );
+    check(
+      'plans inside the 7-day window are kept',
+      [today, addDays(today, -6), addDays(today, -7)].every((date) => remaining.includes(`${date}.json`)),
+      remaining.join(','),
+    );
+    check('the prune is reported', first.plansPruned === 2, String(first.plansPruned));
+    check('the pruner leaves files that are not daily plans alone', remaining.includes('notes.txt'), remaining.join(','));
+    check('cached cycles are never pruned — they are the review history', fs.existsSync(cachedCycle), cachedCycle);
+    check('nothing outside data/team-cache was deleted', localCycleFiles().join(',') === `${MINE_ID}.md`, localCycleFiles().join(','));
+
+    const deletes = planDeletes(stub);
+    check('the first tick of the day deletes my own old remote plans', deletes.length === 1, JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)));
+    check('the delete names my own uuid rather than relying on RLS alone', deletes[0]?.path.includes(`owner=eq.${SELF_ID}`), deletes[0]?.path);
+    check('the delete uses a 30-day cutoff', deletes[0]?.path.includes(`plan_date=lt.${addDays(today, -30)}`), deletes[0]?.path);
+    check('the tick reports the purge', first.plansPurged === true, JSON.stringify(first));
+    check('rows inside the 30-day window survive', stub.plans.some((row) => row.plan_date === addDays(today, -29)), JSON.stringify(stub.plans.map((row) => row.plan_date)));
+    check('rows outside it are gone', !stub.plans.some((row) => row.plan_date === addDays(today, -31)), JSON.stringify(stub.plans.map((row) => row.plan_date)));
+    check("a teammate's old rows are left alone — they are not mine to delete", stub.plans.some((row) => row.owner === MATE_ID), JSON.stringify(stub.plans.map((row) => row.owner)));
+
+    stub.calls.length = 0;
+    const second = await sync.syncTeamOnce(config);
+    check(
+      'a second tick the same day does not delete again',
+      planDeletes(stub).length === 0 && second.plansPurged === false,
+      JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)),
+    );
+    check(
+      'cycles are never deleted remotely',
+      stub.calls.every((call) => !(call.method === 'DELETE' && call.path.startsWith('/rest/v1/cycles'))),
+      JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)),
+    );
+
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8')) as Record<string, unknown>;
+    check('the purge date is recorded in the cache state', state.lastPlanPurgeDate === today, String(state.lastPlanPurgeDate));
+    // Tomorrow, it runs again.
+    state.lastPlanPurgeDate = addDays(today, -1);
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    stub.calls.length = 0;
+    const nextDay = await sync.syncTeamOnce(config);
+    check('a new day purges again', planDeletes(stub).length === 1 && nextDay.plansPurged === true, JSON.stringify(stub.calls.map((call) => `${call.method} ${call.path}`)));
   }
 }
 

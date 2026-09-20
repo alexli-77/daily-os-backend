@@ -91,6 +91,26 @@ export interface TeamCacheState {
   planWatermark: string;
   /** `plan date -> payload hash` of the daily plans we last uploaded. */
   pushedPlans: Record<string, string>;
+  /**
+   * `<owner>/<cycle id> -> server updated_at` of the row currently in the
+   * cache. This is the *version* of a cached cycle, and it has to live here
+   * rather than in the .md file because `CachedCycle.updatedAt` is parsed out
+   * of the teammate's own frontmatter — their clock, written by their editor,
+   * and therefore not comparable across machines. The server's `updated_at` is
+   * stamped by the `touch_updated_at` trigger and is the only ordering the two
+   * of us agree on.
+   *
+   * Keeping it out of the cached markdown is deliberate too: the cache is a
+   * byte-for-byte copy of what the teammate wrote, and rewriting their
+   * frontmatter to carry our bookkeeping would make "is the cache what they
+   * pushed" unanswerable.
+   */
+  cycleVersions: Record<string, string>;
+  /**
+   * Local date of the last remote daily-plan retention pass. One DELETE a day
+   * is plenty for a 30-day window; one a minute is just waste.
+   */
+  lastPlanPurgeDate: string;
 }
 
 const EMPTY_STATE: TeamCacheState = {
@@ -103,7 +123,14 @@ const EMPTY_STATE: TeamCacheState = {
   pushed: {},
   planWatermark: '',
   pushedPlans: {},
+  cycleVersions: {},
+  lastPlanPurgeDate: '',
 };
+
+/** A fresh state object; the record fields are copied, never shared. */
+function emptyState(teamId = ''): TeamCacheState {
+  return { ...EMPTY_STATE, teamId, members: [], pushed: {}, pushedPlans: {}, cycleVersions: {} };
+}
 
 export function readTeamCacheState(): TeamCacheState {
   try {
@@ -118,10 +145,56 @@ export function readTeamCacheState(): TeamCacheState {
       pushed: asRecord(parsed.pushed),
       planWatermark: asString(parsed.planWatermark),
       pushedPlans: asRecord(parsed.pushedPlans),
+      // Absent in a state.json written before this field existed. An empty map
+      // means "no known version", which makes the first pull after an upgrade
+      // apply every row once and record its version — the right degradation.
+      cycleVersions: asRecord(parsed.cycleVersions),
+      lastPlanPurgeDate: asString(parsed.lastPlanPurgeDate),
     };
   } catch {
-    return { ...EMPTY_STATE, members: [], pushed: {}, pushedPlans: {} };
+    return emptyState();
   }
+}
+
+/** The key `cycleVersions` is filed under. Owner first: it is the coarser half. */
+export function cycleVersionKey(ownerId: string, cycleId: string): string {
+  return `${ownerId}/${cycleId}`;
+}
+
+/**
+ * Is `incoming` a strictly newer server version than `cached`?
+ *
+ * Both sides are PostgREST timestamptz strings. Plain string comparison is
+ * wrong on them — Postgres trims trailing zeros from the fractional second, so
+ * `...:00.5+00:00` and `...:00.50+00:00` are the same instant but not the same
+ * string, and two rows written under different offsets do not sort by instant
+ * at all — and `Date.parse` alone is wrong too, because it truncates to
+ * milliseconds while the column stores microseconds, which would make two
+ * writes inside the same millisecond compare equal and silently drop the
+ * second one. So: parse for the instant, then add the microsecond remainder.
+ *
+ * Unparseable is *not* resolved by falling back to string comparison, which
+ * would happily rank `not-a-date` above every real timestamp. A version we
+ * cannot read is not a version: it loses to anything cached, and loses to
+ * nothing when it is what is cached.
+ */
+export function isNewerVersion(incoming: string, cached: string): boolean {
+  if (!cached) return true;
+  if (!incoming) return false;
+  const left = toMicros(incoming);
+  if (left === null) return false;
+  const right = toMicros(cached);
+  if (right === null) return true;
+  return left > right;
+}
+
+function toMicros(value: string): number | null {
+  const millis = Date.parse(value);
+  if (Number.isNaN(millis)) return null;
+  // The fractional-second digits, if any, padded out to microseconds. Digits
+  // 4-6 are precisely what Date.parse threw away.
+  const fraction = /\.(\d+)/.exec(value)?.[1] ?? '';
+  return millis * 1000 + Number(`${fraction}000000`.slice(3, 6));
 }
 
 export function writeTeamCacheState(state: TeamCacheState): void {
@@ -140,7 +213,7 @@ export function resetTeamCache(teamId: string): TeamCacheState {
     // Best effort. A cache we cannot clear is stale data, not lost data, and
     // the next successful pull overwrites it.
   }
-  const next: TeamCacheState = { ...EMPTY_STATE, teamId, members: [], pushed: {}, pushedPlans: {} };
+  const next = emptyState(teamId);
   writeTeamCacheState(next);
   return next;
 }
@@ -276,6 +349,63 @@ export function writeCachedDailyPlan(
   const record: CachedDailyPlan = { date, updatedAt, payload };
   writeFileAtomic(filePath, `${JSON.stringify(record, null, 2)}\n`);
   return filePath;
+}
+
+/**
+ * One cached daily plan, or null. Used on the apply path to read the version
+ * of what is already on disk before deciding whether a pulled row is newer.
+ * Never throws: an unreadable file is "nothing cached", which makes the pulled
+ * row win, which is what we want for a file we cannot interpret anyway.
+ */
+export function readCachedDailyPlan(ownerId: string, date: string): CachedDailyPlan | null {
+  if (!isUuid(ownerId) || !isPlanDate(date)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(teamCachePlanDir(ownerId), `${date}.json`), 'utf8')) as Partial<CachedDailyPlan>;
+    const payload = parsed.payload && typeof parsed.payload === 'object' && !Array.isArray(parsed.payload) ? parsed.payload : null;
+    if (!payload) return null;
+    return { date, updatedAt: asString(parsed.updatedAt), payload };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Local retention: drop cached teammate daily plans older than `cutoff`
+ * (exclusive). Returns how many files were removed.
+ *
+ * Cycles are never touched — they are the review history the whole feature
+ * exists for — and neither is anything outside `data/team-cache/`. The path is
+ * rebuilt from a validated owner uuid and a validated `YYYY-MM-DD`, then
+ * checked against the cache root before the unlink, which is the same rigour
+ * `writeCachedCycle` applies on the way in. A delete deserves at least as much
+ * as a write: this one runs unattended on every tick.
+ */
+export function pruneCachedDailyPlans(cutoff: string): number {
+  if (!isPlanDate(cutoff)) return 0;
+  const root = teamCacheDir();
+  let removed = 0;
+  for (const ownerId of listCachedOwners()) {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(teamCachePlanDir(ownerId));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const date = name.slice(0, -5);
+      if (!isPlanDate(date) || date >= cutoff) continue;
+      const filePath = path.resolve(root, ownerId, 'daily', `${date}.json`);
+      if (!isInside(root, filePath)) continue;
+      try {
+        fs.rmSync(filePath, { force: true });
+        removed += 1;
+      } catch {
+        // A file we cannot delete is disk clutter, not a sync failure.
+      }
+    }
+  }
+  return removed;
 }
 
 /** One teammate's cached daily plans, newest date first. Never throws. */

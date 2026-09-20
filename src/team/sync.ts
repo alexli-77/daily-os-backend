@@ -1,12 +1,17 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import type { AppConfig } from '../config/schema.js';
-import { listCycles, parseCycleId, readCycle, serializeCycleMarkdown } from '../cycles/file.js';
+import { cyclesDir, listCycles, parseCycleId, readCycle, serializeCycleMarkdown } from '../cycles/file.js';
 import {
+  cycleVersionKey,
+  isNewerVersion,
   isPlanDate,
   isUuid,
   listCachedCycles,
   listCachedDailyPlans,
   listCachedOwners,
+  pruneCachedDailyPlans,
+  readCachedDailyPlan,
   readTeamCacheState,
   resetTeamCache,
   teamCacheDir,
@@ -17,6 +22,8 @@ import {
 import type { CachedCycle, CachedDailyPlan, TeamCacheState } from './cache.js';
 import { buildTodayPlanSnapshot } from '../todo/today-plan.js';
 import { addDays, todayInTimezone } from '../utils/date.js';
+import { onLocalChange } from '../utils/change-events.js';
+import type { LocalChangeKind } from '../utils/change-events.js';
 import {
   resolveTeamSessionProvider,
   safeIsSupabaseConfigured,
@@ -75,6 +82,52 @@ import type { TeamMember, TeamSession, TeamSessionProvider } from './session-bri
  * with its own watermark and its own probe, so the cost of an idle minute is two
  * single-row requests instead of one. Only the last two days are fetched: the
  * point is "what is she doing today", not a history.
+ *
+ * ## Push on change, not on tick
+ *
+ * The 60s tick made a local edit take up to a minute to *leave* the machine and
+ * up to another minute to arrive — two minutes of nothing happening for a save
+ * that took 8ms. The console already pushed straight after its own saves
+ * (`pushLocalCycle`); everything else — Obsidian, the planner subprocess, a
+ * `git checkout` — had to wait for the poll.
+ *
+ * So the cycles directory is watched (`fs.watch`) and the today-plan snapshot
+ * subscribes to an in-process change bus (`src/utils/change-events.ts`, emitted
+ * by the todo ledger and the workflow-output writer). Three properties make
+ * that safe rather than chatty:
+ *
+ *   * **Debounced 500ms, trailing, per key.** One editor save fires 2-4 fs
+ *     events; a drag-reorder writes several ledger rows; a branch switch
+ *     touches every file. Each collapses to one push per cycle id.
+ *   * **Content is read at send time**, never carried on the event. Five edits
+ *     inside the window produce one push of the fifth state, and the existing
+ *     content-hash gate still drops it entirely if the bytes did not move.
+ *   * **Single-flight.** Every path — tick, watcher, change bus, the console's
+ *     manual button — goes through one queue, so `state.json` has exactly one
+ *     writer. Work that arrives mid-run is coalesced into the next run instead
+ *     of starting a second one or being dropped.
+ *
+ * The tick stays, unchanged, as the backstop: it is what catches the edits made
+ * while the process was not running, while the network was down, or while a
+ * watcher that failed to start was not watching. Everything here is an
+ * optimisation on top of a loop that already worked.
+ *
+ * ## Applying a pulled row: last writer wins, by the server's clock
+ *
+ * Arrival order is not authorship order. A retried request, a slow response
+ * overtaken by a fast one, and (in phase 2) a Realtime frame racing a poll can
+ * all deliver an older row after a newer one. So applying is *versioned*: a
+ * pulled row is written to the cache only when its server `updated_at` is
+ * strictly newer than the version of what is already cached, which makes a
+ * duplicate or out-of-order delivery a no-op instead of a rollback.
+ *
+ * The version has to be the server's, not the author's. `CachedCycle.updatedAt`
+ * comes out of the teammate's frontmatter — their laptop's clock — and two
+ * machines do not agree on that. `cycles.updated_at` is stamped by the
+ * `touch_updated_at` trigger and cannot be backdated by a client, so it is the
+ * one ordering both ends share. Cached cycles carry no server column, so the
+ * versions live in `state.cycleVersions`; daily plans already store theirs in
+ * the cached json.
  */
 
 /** Where a sync attempt got to. Anything but `ok` means sync is paused. */
@@ -96,6 +149,10 @@ export interface TeamSyncResult {
   plansPulled: number;
   /** Own daily plan uploaded this tick (0 or 1). */
   plansPushed: number;
+  /** Cached teammate daily-plan files deleted by local retention this tick. */
+  plansPruned: number;
+  /** Did this tick run the once-a-day remote daily-plan retention delete. */
+  plansPurged: boolean;
   syncedAt: string;
 }
 
@@ -109,6 +166,20 @@ export interface TeamSyncDeps {
 /** PostgREST paths, in one place: `supabaseFetch` only prefixes the origin. */
 const CYCLES_PATH = '/rest/v1/cycles';
 const DAILY_PLANS_PATH = '/rest/v1/daily_plans';
+
+/**
+ * Retention, in two windows for two different costs.
+ *
+ * Locally a teammate's old "today" list is dead weight the moment the day is
+ * over — the Today page only ever reads the newest one — so a week is already
+ * generous and only exists so a Monday morning still has Friday in it.
+ * Remotely the row costs somebody else's free-tier storage, but deleting it
+ * eagerly would race a teammate who is offline and has not pulled it yet, so
+ * 30 days. Cycles are exempt from both: they are the review history this whole
+ * feature exists to share.
+ */
+const LOCAL_PLAN_RETENTION_DAYS = 7;
+const REMOTE_PLAN_RETENTION_DAYS = 30;
 
 // --- one sync tick -----------------------------------------------------------
 
@@ -143,13 +214,19 @@ export async function syncTeamOnce(config: AppConfig, deps: TeamSyncDeps = {}): 
     // someone who has not applied the second migration keeps what they had.
     let planError = '';
     let plansPushed = 0;
+    let plansPurged = false;
     let plans = { changed: false, pulled: 0 };
     try {
       plansPushed = await pushTodayPlan(config, provider, session, state);
       plans = await pullTeammatePlans(config, provider, session, state, now);
+      plansPurged = await purgeOwnRemotePlans(config, provider, session, state);
     } catch (error) {
       planError = describePlanError(error);
     }
+    // Local retention runs outside that try on purpose: it touches no network,
+    // so a project without the daily_plans table must not be the reason a
+    // teammate's stale files pile up forever.
+    const plansPruned = pruneCachedDailyPlans(addDays(todayInTimezone(config), -LOCAL_PLAN_RETENTION_DAYS));
     state.lastCheckedAt = now.toISOString();
     state.lastError = planError;
     if (changed || plans.changed || pushed > 0 || plansPushed > 0) state.syncedAt = now.toISOString();
@@ -164,6 +241,8 @@ export async function syncTeamOnce(config: AppConfig, deps: TeamSyncDeps = {}): 
       pushed,
       plansPulled: plans.pulled,
       plansPushed,
+      plansPruned,
+      plansPurged,
       syncedAt: state.syncedAt,
     };
   } catch (error) {
@@ -171,7 +250,7 @@ export async function syncTeamOnce(config: AppConfig, deps: TeamSyncDeps = {}): 
     state.lastCheckedAt = now.toISOString();
     state.lastError = message;
     writeTeamCacheState(state);
-    return { status: 'error', reason: message, checked: true, changed: false, pulled: 0, pushed: 0, plansPulled: 0, plansPushed: 0, syncedAt: state.syncedAt };
+    return { ...idleResult('error', message), checked: true, syncedAt: state.syncedAt };
   }
 }
 
@@ -197,12 +276,45 @@ export async function pushLocalCycle(config: AppConfig, cycleId: string, deps: T
     state.lastError = '';
     if (pushed) state.syncedAt = now.toISOString();
     writeTeamCacheState(state);
-    return { status: 'ok', reason: '', checked: true, changed: false, pulled: 0, pushed: pushed ? 1 : 0, plansPulled: 0, plansPushed: 0, syncedAt: state.syncedAt };
+    return { ...idleResult('ok', ''), checked: true, pushed: pushed ? 1 : 0, syncedAt: state.syncedAt };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     state.lastError = message;
     writeTeamCacheState(state);
-    return { status: 'error', reason: message, checked: true, changed: false, pulled: 0, pushed: 0, plansPulled: 0, plansPushed: 0, syncedAt: state.syncedAt };
+    return { ...idleResult('error', message), checked: true, syncedAt: state.syncedAt };
+  }
+}
+
+/**
+ * Upload today's plan snapshot now, for the same reason and with the same
+ * manners as `pushLocalCycle`: the ledger write has already succeeded, so a
+ * transport failure here is recorded and retried by the next tick, never
+ * raised at whoever ticked the checkbox.
+ *
+ * The snapshot is rebuilt here rather than passed in, so three checkboxes
+ * ticked inside one debounce window send the state after the third, not three
+ * times, and never the state as of the first.
+ */
+export async function pushLocalTodayPlan(config: AppConfig, deps: TeamSyncDeps = {}): Promise<TeamSyncResult> {
+  const now = deps.now ? deps.now() : new Date();
+  const gate = await resolveSyncGate(config, deps);
+  if (!gate.ok) return idleResult(gate.status, gate.reason);
+
+  const state = readTeamCacheState();
+  state.teamId = gate.session.teamId as string;
+  try {
+    const pushed = await pushTodayPlan(config, gate.provider, gate.session, state);
+    state.lastError = '';
+    if (pushed) state.syncedAt = now.toISOString();
+    writeTeamCacheState(state);
+    return { ...idleResult('ok', ''), checked: true, plansPushed: pushed, syncedAt: state.syncedAt };
+  } catch (error) {
+    // The same translation the tick does: a project without the second
+    // migration should be told which file to run, not shown a PostgREST code.
+    const message = describePlanError(error);
+    state.lastError = message;
+    writeTeamCacheState(state);
+    return { ...idleResult('error', message), checked: true, syncedAt: state.syncedAt };
   }
 }
 
@@ -303,13 +415,33 @@ async function pullTeammateCycles(
     // stop the other person's other twelve cycles from arriving.
     if (!isUuid(owner) || owner === session.userId) continue;
     if (!parseCycleId(cycleId) || !markdown) continue;
-    writeCachedCycle(config, session.userId, owner, cycleId, markdown);
-    pulled += 1;
+    // `highest` tracks what we have *seen*, before deciding whether to apply
+    // it, so a row that loses the version check below still cannot drag the
+    // fallback watermark backwards and get itself re-fetched forever.
     if (updatedAt > highest) highest = updatedAt;
+    // Last writer wins, and the server decides who that was. Equal or older
+    // than what is cached means this delivery is a duplicate or arrived out of
+    // order, and the honest response to both is to do nothing.
+    const versionKey = cycleVersionKey(owner, cycleId);
+    if (!isNewerVersion(updatedAt, state.cycleVersions[versionKey] || '')) continue;
+    writeCachedCycle(config, session.userId, owner, cycleId, markdown);
+    // Recorded only after the write succeeded: a throw here must not leave us
+    // believing we hold a version we never wrote.
+    state.cycleVersions[versionKey] = updatedAt;
+    pulled += 1;
   }
 
   // Advance to what the cheap query reported, not to the max row we happened to
   // accept: a row skipped as malformed would otherwise be re-fetched forever.
+  //
+  // That still holds now that the version check can skip rows too, because the
+  // two answer different questions and never feed each other. The watermark is
+  // "how far has the *table* moved", read from the probe and independent of
+  // what we did with the bodies; the version map is "what do I hold for this
+  // row". A pull that applies nothing therefore still advances, and the next
+  // tick goes back to costing one single-row request — while a row whose
+  // version did not move stays out of the cache no matter how often it is
+  // re-delivered.
   state.watermark = watermark || highest;
   state.syncedAt = now.toISOString();
   state.members = await readMembers(config, provider, state.members);
@@ -431,7 +563,13 @@ async function pullTeammatePlans(
     const payload = record.payload;
     if (!isUuid(owner) || owner === session.userId) continue;
     if (!isPlanDate(date) || !payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
-    writeCachedDailyPlan(session.userId, owner, date, String(record.updated_at || ''), payload as Record<string, unknown>);
+    // Same rule as cycles, reading the version off the cached file instead of
+    // out of `state`: a daily plan already stores the server `updated_at` it
+    // was written from, so there is nothing to duplicate into state.json.
+    const updatedAt = String(record.updated_at || '');
+    const cached = readCachedDailyPlan(owner, date);
+    if (cached && !isNewerVersion(updatedAt, cached.updatedAt)) continue;
+    writeCachedDailyPlan(session.userId, owner, date, updatedAt, payload as Record<string, unknown>);
     pulled += 1;
   }
 
@@ -439,6 +577,40 @@ async function pullTeammatePlans(
   state.syncedAt = now.toISOString();
   state.members = await readMembers(config, provider, state.members);
   return { changed: true, pulled };
+}
+
+/**
+ * Remote retention: delete our OWN `daily_plans` rows older than 30 days, at
+ * most once a day. Returns whether the delete was attempted.
+ *
+ * Only our own rows, and the filter says so as well as the policy
+ * (`daily_plans_delete_own`) — a client that computed the filter wrong should
+ * delete nothing rather than rely on RLS to catch it. Cycles are never purged.
+ *
+ * The date is recorded *before* the request, not after, so a remote that keeps
+ * failing costs one attempt a day rather than one a minute. Losing a day of
+ * retention to a transient error is not worth a DELETE per tick, and tomorrow's
+ * pass covers the same rows anyway.
+ */
+async function purgeOwnRemotePlans(
+  config: AppConfig,
+  provider: TeamSessionProvider,
+  session: TeamSession,
+  state: TeamCacheState,
+): Promise<boolean> {
+  const today = todayInTimezone(config);
+  if (state.lastPlanPurgeDate === today) return false;
+  state.lastPlanPurgeDate = today;
+
+  const cutoff = addDays(today, -REMOTE_PLAN_RETENTION_DAYS);
+  assertOwnedBySelf(session, session.userId);
+  const response = await provider.supabaseFetch(
+    config,
+    `${DAILY_PLANS_PATH}?owner=eq.${encodeURIComponent(session.userId)}&plan_date=lt.${cutoff}`,
+    { method: 'DELETE', headers: { prefer: 'return=minimal' } },
+  );
+  await assertOk(response, 'prune daily plans');
+  return true;
 }
 
 // --- read-only view for the console -----------------------------------------
@@ -612,47 +784,236 @@ function assertOwnedBySelf(session: TeamSession, ownerId: string): void {
   }
 }
 
-// --- polling loop ------------------------------------------------------------
+// --- the sync loop -----------------------------------------------------------
 
 export const TEAM_SYNC_INTERVAL_MS = 60_000;
+
+/**
+ * How long a key stays quiet before its push goes out. Long enough to swallow
+ * the 2-4 events one editor save produces and the several ledger rows one
+ * drag-reorder writes; short enough that "within a second" is still true.
+ */
+export const TEAM_SYNC_DEBOUNCE_MS = 500;
 
 export interface TeamSyncLoop {
   /** Run a tick right now (what the console's 同步 button calls). */
   runNow: () => Promise<TeamSyncResult>;
+  /**
+   * Push one cycle through the same queue as everything else. The console's
+   * save handler uses this instead of calling `pushLocalCycle` directly, so a
+   * save landing mid-tick cannot write `state.json` underneath it.
+   */
+  pushCycle: (cycleId: string) => Promise<TeamSyncResult>;
+  /**
+   * Fire every waiting debounce timer now and wait for the queue to drain.
+   * A test seam, and a way to force pending work out before shutting down —
+   * `stop()` deliberately does not call it, because a push abandoned at exit
+   * is picked up by the next process's first tick anyway.
+   */
+  flush: () => Promise<void>;
   stop: () => void;
 }
 
+export interface TeamSyncLoopDeps extends TeamSyncDeps {
+  intervalMs?: number;
+  debounceMs?: number;
+  /** Injected in tests. Defaults to a thin `fs.watch` wrapper. */
+  watchDir?: (dir: string, onChange: (filename: string) => void) => { close: () => void };
+  /** Injected in tests. Defaults to the process-wide local-change bus. */
+  subscribe?: (listener: (kind: LocalChangeKind) => void) => () => void;
+}
+
 /**
- * Start the 60s poll. `loadConfigFn` is called per tick so a config change in
- * the console takes effect without a restart.
+ * Start the sync loop: the 60s backstop poll, a watcher on the cycles
+ * directory, and a subscription to the local-change bus. `loadConfigFn` is
+ * called per job so a config change in the console takes effect without a
+ * restart.
  *
- * The timer is `unref`'d: an idle poll must never be the reason a CLI process
- * refuses to exit.
+ * Every timer is `unref`'d and the watcher is non-persistent: none of this may
+ * ever be the reason a CLI process refuses to exit.
  */
-export function startTeamSync(loadConfigFn: () => AppConfig, deps: TeamSyncDeps & { intervalMs?: number } = {}): TeamSyncLoop {
+export function startTeamSync(loadConfigFn: () => AppConfig, deps: TeamSyncLoopDeps = {}): TeamSyncLoop {
+  const debounceMs = deps.debounceMs ?? TEAM_SYNC_DEBOUNCE_MS;
+
+  // --- the single-flight queue ----------------------------------------------
+  //
+  // One job per key, at most one job running at a time, and the loop keeps
+  // going until the queue is empty. Two consequences, both required:
+  //   * a second request for a key that has not started yet is *coalesced* —
+  //     the two callers wait on one run, so a burst is one push;
+  //   * a request that arrives while that key is running is *queued* — it
+  //     becomes a fresh entry and runs after, so nothing is lost. That is the
+  //     dirty flag, expressed as a map instead of a boolean.
+  interface QueuedJob {
+    run: () => Promise<TeamSyncResult>;
+    waiters: Array<(result: TeamSyncResult) => void>;
+  }
+  const queued = new Map<string, QueuedJob>();
+  // `running` and `draining` are two variables rather than one nullable promise
+  // on purpose, and the reason is a bug this had: when the queue is already
+  // empty the async body below runs to completion *synchronously*, so its
+  // `finally` fires before the assignment that stores the promise. A single
+  // `draining: Promise | null` therefore ended up holding a resolved promise
+  // that nothing ever cleared, and every later push was silently swallowed.
+  // `running` is set before the body starts, so the ordering cannot invert.
   let running = false;
-  const tick = async (): Promise<TeamSyncResult> => {
-    // Overlapping ticks would double-push and race on state.json. A tick that
-    // outlives its interval is a slow network, and skipping is the right answer.
-    if (running) return idleResult('ok', 'sync already running');
+  let draining: Promise<void> = Promise.resolve();
+
+  function drain(): Promise<void> {
+    if (running) return draining;
     running = true;
-    try {
-      return await syncTeamOnce(loadConfigFn(), deps);
-    } catch (error) {
-      return idleResult('error', error instanceof Error ? error.message : String(error));
-    } finally {
-      running = false;
+    draining = (async () => {
+      try {
+        while (queued.size > 0) {
+          const [key, job] = queued.entries().next().value as [string, QueuedJob];
+          // Delete before running, not after: work that arrives during the run
+          // must land in a *new* entry rather than joining the one in flight.
+          queued.delete(key);
+          let result: TeamSyncResult;
+          try {
+            result = await job.run();
+          } catch (error) {
+            // Belt and braces. Every job already swallows its own failures —
+            // a push that fails must never surface as a failed local save.
+            result = idleResult('error', error instanceof Error ? error.message : String(error));
+          }
+          for (const waiter of job.waiters) waiter(result);
+        }
+      } finally {
+        running = false;
+      }
+    })();
+    return draining;
+  }
+
+  function enqueue(key: string, run: () => Promise<TeamSyncResult>): Promise<TeamSyncResult> {
+    const existing = queued.get(key);
+    if (existing) return new Promise((resolve) => existing.waiters.push(resolve));
+    const job: QueuedJob = { run, waiters: [] };
+    queued.set(key, job);
+    const result = new Promise<TeamSyncResult>((resolve) => job.waiters.push(resolve));
+    void drain();
+    return result;
+  }
+
+  // --- trailing debounce, per key -------------------------------------------
+  const timers = new Map<string, { timer: ReturnType<typeof setTimeout>; fire: () => void }>();
+  let stopped = false;
+
+  function debounce(key: string, run: () => Promise<TeamSyncResult>): void {
+    if (stopped) return;
+    clearTimeout(timers.get(key)?.timer);
+    const fire = (): void => {
+      timers.delete(key);
+      void enqueue(key, run);
+    };
+    const timer = setTimeout(fire, debounceMs);
+    timer.unref?.();
+    timers.set(key, { timer, fire });
+  }
+
+  // --- the jobs themselves ---------------------------------------------------
+  //
+  // Each reads its content at send time — `syncTeamOnce` re-lists the cycles,
+  // `pushLocalCycle` re-reads the file, `pushLocalTodayPlan` rebuilds the
+  // snapshot — so what goes out is the final state after a burst, never the
+  // state the event was fired about.
+  const tickJob = (): Promise<TeamSyncResult> => guard(() => syncTeamOnce(loadConfigFn(), deps));
+  const cycleJob = (cycleId: string) => (): Promise<TeamSyncResult> => guard(() => pushLocalCycle(loadConfigFn(), cycleId, deps));
+  const planJob = (): Promise<TeamSyncResult> => guard(() => pushLocalTodayPlan(loadConfigFn(), deps));
+
+  const runNow = (): Promise<TeamSyncResult> => enqueue('tick', tickJob);
+  const pushCycle = (cycleId: string): Promise<TeamSyncResult> => enqueue(`cycle:${cycleId}`, cycleJob(cycleId));
+  const flush = async (): Promise<void> => {
+    for (const entry of [...timers.values()]) {
+      clearTimeout(entry.timer);
+      entry.fire();
     }
+    await drain();
   };
 
   if (process.env.DAILY_OS_DISABLE_TEAM_SYNC === '1') {
-    return { runNow: tick, stop: () => {} };
+    return { runNow, pushCycle, flush, stop: () => {} };
   }
 
-  void tick();
-  const timer = setInterval(() => void tick(), deps.intervalMs ?? TEAM_SYNC_INTERVAL_MS);
+  // --- change sources --------------------------------------------------------
+  const unsubscribe = (deps.subscribe ?? onLocalChange)((kind) => {
+    if (kind === 'today_plan') debounce('plan', planJob);
+  });
+
+  let watcher: { close: () => void } | null = null;
+  try {
+    watcher = (deps.watchDir ?? watchDirectory)(cyclesDir(loadConfigFn()), (filename) => {
+      const id = filename.endsWith('.md') ? filename.slice(0, -3) : '';
+      if (id && parseCycleId(id)) {
+        debounce(`cycle:${id}`, cycleJob(id));
+        return;
+      }
+      // No filename: some platforms report the event without one. A full tick
+      // pushes whatever changed — slower than one row, never wrong. Anything
+      // else (an atomic write's `.<name>.<pid>.<ts>.tmp` sibling, an editor's
+      // swap file) is not a cycle and is ignored.
+      if (!filename) debounce('tick', tickJob);
+    });
+  } catch {
+    // A cycles directory that does not exist yet, a platform without inotify,
+    // an fd limit. The 60s tick is still the backstop, so degrade to tick-only
+    // rather than taking down the console with it.
+    watcher = null;
+  }
+
+  void runNow();
+  const timer = setInterval(() => void runNow(), deps.intervalMs ?? TEAM_SYNC_INTERVAL_MS);
   timer.unref?.();
-  return { runNow: tick, stop: () => clearInterval(timer) };
+  return {
+    runNow,
+    pushCycle,
+    flush,
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+      for (const entry of timers.values()) clearTimeout(entry.timer);
+      timers.clear();
+      unsubscribe();
+      watcher?.close();
+    },
+  };
+}
+
+/** Never throws: a job's failure is a status, not an exception. */
+async function guard(run: () => Promise<TeamSyncResult>): Promise<TeamSyncResult> {
+  try {
+    return await run();
+  } catch (error) {
+    return idleResult('error', error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * `fs.watch` on one directory, non-recursive (cycle files are flat) and
+ * non-persistent. An `error` event is swallowed by closing the watcher: the
+ * loop carries on polling, which is exactly the degraded mode we want.
+ */
+function watchDirectory(dir: string, onChange: (filename: string) => void): { close: () => void } {
+  const watcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
+    onChange(typeof filename === 'string' ? filename : '');
+  });
+  watcher.on('error', () => {
+    try {
+      watcher.close();
+    } catch {
+      // Already closed. Nothing to do and nothing to report.
+    }
+  });
+  return {
+    close: () => {
+      try {
+        watcher.close();
+      } catch {
+        // Same.
+      }
+    },
+  };
 }
 
 // --- internals ---------------------------------------------------------------
@@ -686,7 +1047,19 @@ async function resolveSyncGate(config: AppConfig, deps: TeamSyncDeps): Promise<S
 }
 
 function idleResult(status: TeamSyncStatus, reason: string): TeamSyncResult {
-  return { status, reason, checked: false, changed: false, pulled: 0, pushed: 0, plansPulled: 0, plansPushed: 0, syncedAt: '' };
+  return {
+    status,
+    reason,
+    checked: false,
+    changed: false,
+    pulled: 0,
+    pushed: 0,
+    plansPulled: 0,
+    plansPushed: 0,
+    plansPruned: 0,
+    plansPurged: false,
+    syncedAt: '',
+  };
 }
 
 async function assertOk(response: Response, what: string): Promise<void> {

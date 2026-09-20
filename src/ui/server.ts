@@ -1608,7 +1608,9 @@ async function saveCycleSection(options: UiServerOptions, body: unknown): Promis
   // the save. The local write is the thing that succeeded; sync is a transport
   // that retries on the next poll. Awaited only so the state we return already
   // reflects the attempt.
-  const sync = await pushLocalCycle(config, id).catch((error: unknown) => ({
+  // Through the loop when there is one, so this push is serialized against the
+  // 60s tick and the file watcher instead of racing them for state.json.
+  const sync = await (teamSyncLoop ? teamSyncLoop.pushCycle(id) : pushLocalCycle(config, id)).catch((error: unknown) => ({
     status: 'error' as const,
     reason: error instanceof Error ? error.message : String(error),
   }));

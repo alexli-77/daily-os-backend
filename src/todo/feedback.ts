@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
+import { emitLocalChange } from '../utils/change-events.js';
 
 /**
  * LEO-209 — todo feedback ledger.
@@ -64,6 +65,10 @@ function ledgerPath(_config: AppConfig): string {
 export function recordTodoFeedback(config: AppConfig, entry: Omit<TodoFeedbackEntry, 'ts'> & { ts?: string }): void {
   const full: TodoFeedbackEntry = { ts: entry.ts ?? new Date().toISOString(), ...entry };
   appendEntries(config, [full]);
+  // Ticking a row changes what a teammate sees on their Today page. Announce
+  // it so team sync can push within a second instead of at the next 60s tick;
+  // nobody is listening when sync is off, and the emit cannot throw either way.
+  emitLocalChange('today_plan');
 }
 
 /**
