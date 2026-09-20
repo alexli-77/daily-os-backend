@@ -43,6 +43,7 @@ project today.
 | File | What it is |
 | --- | --- |
 | `migrations/20260907000000_init.sql` | Tables, helper functions, triggers, and every RLS policy. Idempotent — safe to re-run. |
+| `migrations/20260919000000_daily_plans.sql` | The `daily_plans` table: each member's "today" list, same key shape and policies as `cycles`. Run it after the init migration. Idempotent. |
 | `../scripts/verify-supabase-schema.mjs` | Asserts the policies actually hold, against a real project. |
 
 ## Applying the migration
@@ -77,6 +78,20 @@ supabase db push
 
 The migration is intentionally plain SQL with no CLI-only syntax, so both paths
 produce the same schema.
+
+### Daily plans (second migration)
+
+`daily_plans` is keyed `(team_id, owner, plan_date)` and holds a JSON snapshot
+of what `/api/today/plan` returns on the owner's machine: the ranked todos plus
+that person's own complete / defer state for the day. The client pushes it on
+the same 60 s tick as cycles whenever the snapshot's hash changes, and pulls
+teammates' rows for today and yesterday into `data/team-cache/<owner
+uuid>/daily/<date>.json`. The Today page and `GET /api/team/today` read that
+cache; nothing reads a row back into the owner's own data.
+
+Until this migration has been run, PostgREST answers the table with `PGRST205`.
+The client treats that as "daily plan sync not enabled": cycles keep syncing and
+the Today page says which file to run.
 
 ## Creating the first team and its members
 
@@ -156,6 +171,7 @@ never from a sequence or anything derived from the team name.
 | `teams` | Only your own team's row. | Nobody, directly. `create_team()` / `rotate_invite_code()` only. |
 | `members` | Your own row, plus everyone in your team. | Your own row: `member_id` and `display_name` are yours to change. `team_id` is pinned — only `join_team()` / `leave_team()` move it. No deletes. |
 | `cycles` | Every row belonging to your team. | Only rows where `owner = auth.uid()` **and** `team_id` is your team. |
+| `daily_plans` | Every row belonging to your team. | Same as `cycles`. |
 
 Both conditions on `cycles` writes are load-bearing, and they cover different
 things.

@@ -88,6 +88,13 @@ interface RemoteRow {
   updated_at: string;
 }
 
+interface PlanRow {
+  owner: string;
+  plan_date: string;
+  payload: Record<string, unknown>;
+  updated_at: string;
+}
+
 interface StubOptions {
   configured?: boolean;
   session?: {
@@ -98,6 +105,9 @@ interface StubOptions {
     memberId: string;
   } | null;
   rows?: RemoteRow[];
+  plans?: PlanRow[];
+  /** false = the project never ran the daily_plans migration. */
+  plansTable?: boolean;
   members?: Array<{ userId: string; memberId: string; displayName: string }>;
 }
 
@@ -114,6 +124,7 @@ function makeStub(options: StubOptions = {}) {
         ? { userId: SELF_ID, email: 'leon@example.com', accessToken: 'token', teamId: TEAM_ID, memberId: 'leon' }
         : options.session,
     rows: options.rows ? [...options.rows] : [],
+    plans: options.plans ? [...options.plans] : [],
     members: options.members || [
       { userId: SELF_ID, memberId: 'leon', displayName: 'Leon' },
       { userId: MATE_ID, memberId: 'penguin', displayName: '企鹅' },
@@ -139,26 +150,37 @@ function makeStub(options: StubOptions = {}) {
 
       const query = requestPath.slice(requestPath.indexOf('?') + 1);
       const params = new URLSearchParams(query);
+      // Two tables, same rules. `daily_plans` is keyed by plan_date where
+      // `cycles` is keyed by cycle_id; everything else about them is identical.
+      const isPlans = requestPath.startsWith('/rest/v1/daily_plans');
+      if (isPlans && options.plansTable === false) {
+        return new Response(JSON.stringify({ code: 'PGRST205', message: "Could not find the table 'public.daily_plans' in the schema cache" }), { status: 404 });
+      }
+      const table = (isPlans ? stub.plans : stub.rows) as Array<Record<string, unknown> & { owner: string; updated_at: string }>;
+      const keyColumn = isPlans ? 'plan_date' : 'cycle_id';
 
       if (method === 'POST') {
-        const payload = (Array.isArray(body) ? body : [body]) as RemoteRow[];
+        const payload = (Array.isArray(body) ? body : [body]) as Array<Record<string, unknown> & { owner: string }>;
         for (const row of payload) {
           // Mirrors `cycles_insert_own` / `cycles_update_own`.
           if (!stub.session || row.owner !== stub.session.userId) {
             return new Response(JSON.stringify({ message: 'new row violates row-level security policy' }), { status: 403 });
           }
-          const index = stub.rows.findIndex((existing) => existing.owner === row.owner && existing.cycle_id === row.cycle_id);
-          const stored: RemoteRow = { ...row, updated_at: new Date().toISOString() };
-          if (index >= 0) stub.rows[index] = stored;
-          else stub.rows.push(stored);
+          const index = table.findIndex((existing) => existing.owner === row.owner && existing[keyColumn] === row[keyColumn]);
+          const stored = { ...row, updated_at: new Date().toISOString() };
+          if (index >= 0) table[index] = stored;
+          else table.push(stored);
         }
         return new Response('', { status: 201 });
       }
 
       const ownerFilter = params.get('owner') || '';
       const excluded = ownerFilter.startsWith('neq.') ? ownerFilter.slice(4) : '';
-      const visible = stub.rows
+      const dateFilter = params.get('plan_date') || '';
+      const since = dateFilter.startsWith('gte.') ? dateFilter.slice(4) : '';
+      const visible = table
         .filter((row) => !excluded || row.owner !== excluded)
+        .filter((row) => !since || String(row.plan_date || '') >= since)
         .sort((left, right) => (left.updated_at < right.updated_at ? 1 : -1));
       const select = (params.get('select') || '').split(',');
       const limited = params.get('limit') === '1' ? visible.slice(0, 1) : visible;
@@ -178,8 +200,14 @@ type Stub = ReturnType<typeof makeStub>;
 function bodyRequests(stub: Stub): Array<{ method: string; path: string }> {
   return stub.calls.filter((call) => call.method === 'GET' && call.path.includes('markdown'));
 }
+function planBodyRequests(stub: Stub): Array<{ method: string; path: string }> {
+  return stub.calls.filter((call) => call.method === 'GET' && call.path.includes('payload'));
+}
 function probeRequests(stub: Stub): Array<{ method: string; path: string }> {
-  return stub.calls.filter((call) => call.method === 'GET' && !call.path.includes('markdown'));
+  return stub.calls.filter((call) => call.method === 'GET' && !call.path.includes('markdown') && !call.path.includes('payload'));
+}
+function planPushes(stub: Stub): Array<{ method: string; path: string; body?: any }> {
+  return stub.calls.filter((call) => call.method === 'POST' && call.path.startsWith('/rest/v1/daily_plans'));
 }
 
 // --- suites ------------------------------------------------------------------
@@ -201,6 +229,9 @@ async function main(): Promise<void> {
   const cache = await import('../../src/team/cache.js');
   const { loadConfig } = await import('../../src/config/load-config.js');
   const cycleFileModule = await import('../../src/cycles/file.js');
+  const memory = await import('../../src/storage/memory.js');
+  const feedback = await import('../../src/todo/feedback.js');
+  const { todayInTimezone, addDays } = await import('../../src/utils/date.js');
 
   const config = loadConfig('config/config.yaml');
   const teamCache = (): string => path.join(tmp, 'data', 'team-cache');
@@ -212,6 +243,7 @@ async function main(): Promise<void> {
     await testPullAndCacheLayout();
     await testLocalWinsOverRemote();
     await testRenameKeepsCache();
+    await testDailyPlans();
     await testWriteGuards();
     await testUiServer();
     await testConsoleRendering();
@@ -291,10 +323,12 @@ async function main(): Promise<void> {
     const second = await sync.syncTeamOnce(config);
     check('an unchanged remote reports no change', second.status === 'ok' && !second.changed && second.pulled === 0, JSON.stringify(second));
     check('an unchanged remote fetches no markdown', bodyRequests(stub).length === 0, JSON.stringify(bodyRequests(stub)));
-    check('an unchanged remote costs exactly one probe request', probeRequests(stub).length === 1, JSON.stringify(probeRequests(stub)));
-    const probe = probeRequests(stub)[0].path;
-    check('the probe reads one row of one column', probe.includes('select=updated_at') && probe.includes('limit=1'), probe);
-    check('the probe never joins members', !probe.includes('members'), probe);
+    check('an unchanged remote fetches no plan payloads', planBodyRequests(stub).length === 0, JSON.stringify(planBodyRequests(stub)));
+    check('an unchanged remote costs exactly one probe request per table', probeRequests(stub).length === 2, JSON.stringify(probeRequests(stub)));
+    for (const { path: probe } of probeRequests(stub)) {
+      check('the probe reads one row of one column', probe.includes('select=updated_at') && probe.includes('limit=1'), probe);
+      check('the probe never joins members', !probe.includes('members'), probe);
+    }
 
     // Our own push moves the team's max(updated_at). The probe excludes our own
     // rows precisely so that does not force a teammate re-download.
@@ -443,6 +477,117 @@ async function main(): Promise<void> {
     );
   }
 
+  // --- 5b. daily plans --------------------------------------------------------
+
+  async function testDailyPlans(): Promise<void> {
+    console.log('\n--- daily plans ---');
+    const today = todayInTimezone(config);
+    const yesterday = addDays(today, -1);
+    const matePlan = (date: string, text: string): PlanRow => ({
+      owner: MATE_ID,
+      plan_date: date,
+      payload: { generated_at: `${date}T00:30:00.000Z`, todos: [{ rank: 1, text, candidateId: 'linear:CUTTO-1' }], feedback: { 'linear:CUTTO-1': 'complete' } },
+      updated_at: `${date}T09:00:00.000Z`,
+    });
+
+    // My own plan: what the morning run wrote, plus one row I already ticked.
+    memory.writeLatestWorkflowOutput(
+      config,
+      'daily_plan',
+      today,
+      JSON.stringify({ todos: [{ rank: 1, text: '我的第一件事', candidateId: 'linear:LEO-1' }, { rank: 2, text: '第二件', candidateId: 'inbox:abc' }] }),
+    );
+    feedback.recordTodoFeedback(config, { date: today, event: 'complete', candidateId: 'linear:LEO-1', rank: 1 });
+
+    const stub = makeStub({ rows: [], plans: [matePlan(today, '企鹅今天的事')] });
+    bridge.setTeamSessionProviderForTests(stub);
+    const first = await sync.syncTeamOnce(config);
+    check('the tick pushes my plan and pulls the teammate plan', first.status === 'ok' && first.plansPushed === 1 && first.plansPulled === 1, JSON.stringify(first));
+
+    const push = planPushes(stub)[0];
+    const row = push?.body?.[0] || {};
+    check('my plan is uploaded under my own uuid and its own date', row.owner === SELF_ID && row.plan_date === today && row.team_id === TEAM_ID, JSON.stringify(row).slice(0, 200));
+    check('the uploaded payload carries the todos', (row.payload?.todos || []).length === 2, JSON.stringify(row.payload?.todos));
+    check('the uploaded payload carries my ticked state', row.payload?.feedback?.['linear:LEO-1'] === 'complete', JSON.stringify(row.payload?.feedback));
+    check('the upload is an upsert on the plan key', push.path.includes('on_conflict=team_id,owner,plan_date'), push.path);
+
+    const cachedPlanPath = path.join(teamCache(), MATE_ID, 'daily', `${today}.json`);
+    check('the teammate plan is cached under <owner uuid>/daily/<date>.json', fs.existsSync(cachedPlanPath), cachedPlanPath);
+    check('plan json never lands next to the cycle markdown', !fs.existsSync(path.join(teamCache(), MATE_ID, `${today}.json`)));
+    check('the plan cache does not show up as a cycle', cache.listCachedCycles(MATE_ID).every((doc) => doc.id !== today));
+    check('nothing escaped into 20_CYCLES/', localCycleFiles().join(',') === `${MINE_ID}.md`, localCycleFiles().join(','));
+
+    // Idle: nothing re-sent, nothing re-fetched.
+    stub.calls.length = 0;
+    const idle = await sync.syncTeamOnce(config);
+    check('an unchanged plan is not re-uploaded', idle.plansPushed === 0 && planPushes(stub).length === 0, JSON.stringify(stub.calls));
+    check('an unchanged remote fetches no plan payloads', idle.plansPulled === 0 && planBodyRequests(stub).length === 0, JSON.stringify(planBodyRequests(stub)));
+
+    // Ticking a row is a change worth pushing: that is the whole point.
+    feedback.recordTodoFeedback(config, { date: today, event: 'defer', candidateId: 'inbox:abc', rank: 2 });
+    stub.calls.length = 0;
+    const afterTick = await sync.syncTeamOnce(config);
+    check('a feedback change re-uploads the plan', afterTick.plansPushed === 1, JSON.stringify(afterTick));
+    check('the re-upload carries the new state', planPushes(stub)[0]?.body?.[0]?.payload?.feedback?.['inbox:abc'] === 'defer', JSON.stringify(planPushes(stub)[0]?.body));
+    check('my own push does not trigger a teammate plan re-download', planBodyRequests(stub).length === 0, JSON.stringify(planBodyRequests(stub)));
+
+    // The Today view.
+    const view = await sync.readTeamTodayState(config);
+    check('the today view is ready', view.status === 'ready' && view.today === today, JSON.stringify({ status: view.status, today: view.today }));
+    const mate = view.members.find((member) => member.userId === MATE_ID);
+    check('the teammate is listed with a plan', Boolean(mate?.plan), JSON.stringify(view.members.map((m) => m.label)));
+    check('the teammate plan content reaches the view', JSON.stringify(mate?.plan?.payload).includes('企鹅今天的事'));
+    check('a plan from today is not stale', mate?.stale === false, String(mate?.stale));
+    check('the view never lists me', view.members.every((member) => member.userId !== SELF_ID));
+
+    // Stale: her morning run hasn't happened, so her last plan is yesterday's.
+    fs.rmSync(path.join(teamCache(), MATE_ID, 'daily'), { recursive: true, force: true });
+    const staleStub = makeStub({ rows: [], plans: [{ ...matePlan(yesterday, '企鹅昨天的事'), updated_at: `${today}T01:00:00.000Z` }] });
+    bridge.setTeamSessionProviderForTests(staleStub);
+    await sync.syncTeamOnce(config);
+    const staleView = await sync.readTeamTodayState(config);
+    const staleMate = staleView.members.find((member) => member.userId === MATE_ID);
+    check("yesterday's plan is still shown", JSON.stringify(staleMate?.plan?.payload).includes('企鹅昨天的事'), JSON.stringify(staleMate?.plan));
+    check('and flagged stale', staleMate?.stale === true && staleMate?.plan?.date === yesterday, JSON.stringify({ stale: staleMate?.stale, date: staleMate?.plan?.date }));
+
+    // A remote row under my own uuid is never cached, even if the filter is wrong.
+    const selfRowStub = makeStub({ rows: [], plans: [matePlan(today, '企鹅今天的事'), { ...matePlan(today, '不该被缓存'), owner: SELF_ID, updated_at: `${today}T12:00:00.000Z` }] });
+    bridge.setTeamSessionProviderForTests(selfRowStub);
+    await sync.syncTeamOnce(config);
+    check('my own remote row is never written to the cache', !fs.existsSync(path.join(teamCache(), SELF_ID)));
+    check('the teammate plan is back for the console suite', fs.existsSync(cachedPlanPath));
+
+    // A project that never ran the daily_plans migration: cycles keep syncing,
+    // and the reason says which file to run rather than quoting PostgREST.
+    const noTable = makeStub({
+      rows: [{ owner: MATE_ID, cycle_id: MATE_CYCLE_ID, mode: 'biweekly', markdown: cycleFile('8.24-9.6', '- 没有 daily_plans 表时的要务'), updated_at: `${today}T14:00:00.000Z` }],
+      plansTable: false,
+    });
+    bridge.setTeamSessionProviderForTests(noTable);
+    const withoutTable = await sync.syncTeamOnce(config);
+    check('a missing daily_plans table does not stop cycle sync', withoutTable.status === 'ok' && withoutTable.pulled === 1, JSON.stringify(withoutTable));
+    check('and the reason points at the migration file', withoutTable.reason.includes('20260919000000_daily_plans.sql'), withoutTable.reason);
+    check('the missing table is surfaced on the today view', (await sync.readTeamTodayState(config)).lastError.includes('daily_plans'));
+
+    // A teammate who joined but has not pushed a plan yet is still listed.
+    const NEWCOMER_ID = '44444444-4444-4444-8444-444444444444';
+    const newcomerStub = makeStub({
+      rows: [],
+      plans: [matePlan(today, '企鹅今天的事')],
+      members: [
+        { userId: SELF_ID, memberId: 'leon', displayName: 'Leon' },
+        { userId: MATE_ID, memberId: 'penguin', displayName: '企鹅' },
+        { userId: NEWCOMER_ID, memberId: 'new', displayName: '新人' },
+      ],
+    });
+    bridge.setTeamSessionProviderForTests(newcomerStub);
+    newcomerStub.plans.push({ ...matePlan(today, '企鹅今天的事'), updated_at: `${today}T13:00:00.000Z` });
+    await sync.syncTeamOnce(config);
+    const withNewcomer = await sync.readTeamTodayState(config);
+    const newcomer = withNewcomer.members.find((member) => member.userId === NEWCOMER_ID);
+    check('a teammate with no plan yet is listed with plan: null', Boolean(newcomer) && newcomer?.plan === null, JSON.stringify(withNewcomer.members.map((m) => [m.label, Boolean(m.plan)])));
+  }
+
   // --- 6. write guards ------------------------------------------------------
 
   async function testWriteGuards(): Promise<void> {
@@ -521,6 +666,12 @@ async function main(): Promise<void> {
       check('team members carry cached cycles for the switcher', (state?.team?.view?.members?.[0]?.cycles || []).length > 0, JSON.stringify(state?.team?.view?.members?.[0]?.cycles?.length));
       check('the teammate cycle content reaches the page', JSON.stringify(state?.team?.view?.members?.[0]?.cycles || []).includes('企鹅在控制台里的要务'));
       check('my own cycles are still listed separately', (state?.cycles?.items || []).some((item: any) => item.id === MINE_ID));
+
+      const teamToday = (await (await fetch(`${base}/api/team/today`, { headers: { cookie } })).json()) as any;
+      check('/api/team/today is ready when signed in with a team', teamToday?.ok === true && teamToday?.status === 'ready', JSON.stringify(teamToday).slice(0, 200));
+      check('/api/team/today carries the teammate plan', JSON.stringify(teamToday?.members || []).includes('企鹅今天的事'), JSON.stringify(teamToday?.members).slice(0, 200));
+      const todayPage = await (await fetch(`${base}/today`, { headers: { cookie } })).text();
+      check('the Today page has the team panel', todayPage.includes('id="team-today"') && todayPage.includes('/api/team/today'));
       check(
         'the teammate cycle is not in my own cycle list',
         (state?.cycles?.items || []).every((item: any) => !JSON.stringify(item).includes('企鹅在控制台里的要务')),

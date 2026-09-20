@@ -15,6 +15,7 @@ import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
 import { sendFeishuMessage } from '../connectors/lark-cli.js';
 import { readLatestWorkflowOutput } from '../storage/memory.js';
 import { listTodoFeedback } from '../todo/feedback.js';
+import { applyUserOrder, buildTodayPlanSnapshot } from '../todo/today-plan.js';
 import { readArtifactsIndex } from '../storage/artifacts.js';
 import { buildDailyPlanTable, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, normalizePlanMinutes, type DailyPlanTodo } from '../workflows/summary.js';
 import { bundledAsset } from '../utils/install-root.js';
@@ -42,7 +43,7 @@ import { CYCLE_SECTIONS, cycleFilePath, cyclesDir, listCycles, parseCycleId, rea
 import type { CycleSection } from '../cycles/file.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
-import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
+import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
 import type { TeamSyncLoop } from '../team/sync.js';
 import { collectProgressCandidates, formatProgressCandidates } from '../progress/capture.js';
 import { analyzeChatContext, formatChatContextAnalysis } from '../chat/context-analysis.js';
@@ -492,6 +493,9 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // but it re-runs the doctor checks on every page load and refresh; this is a
     // pair of disk reads.
     if (request.method === 'GET' && url.pathname === '/api/cycles/state') return sendJson(response, await readCyclesPageState(options));
+    // Teammates' today lists, from the team cache on disk. Read-only and
+    // network-free like /api/cycles/state; the 60s sync loop is what fills it.
+    if (request.method === 'GET' && url.pathname === '/api/team/today') return sendJson(response, await readTeamTodayPage(options));
     if (request.method === 'POST' && url.pathname === '/api/cycles/section') return sendJson(response, await saveCycleSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/review') return sendJson(response, await generateCycleReviewSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/create') return sendJson(response, await createCycle(options, await readJson(request)));
@@ -806,15 +810,9 @@ async function resendLatestWorkflow(options: UiServerOptions): Promise<Record<st
  * Leaving the model's original numbers on a reordered list would make two rows
  * claim the same position.
  */
-export function applyUserOrder(todos: DailyPlanTodo[], userRank: Map<string, number>): DailyPlanTodo[] {
-  if (userRank.size === 0) return todos;
-  return todos
-    .map((todo, index) => ({ todo, key: userRank.get(todo.candidateId) ?? todo.rank, index }))
-    // `index` breaks ties, so two rows that end up with the same key keep the
-    // order they arrived in instead of swapping on every read.
-    .sort((left, right) => left.key - right.key || left.index - right.index)
-    .map(({ todo }, index) => ({ ...todo, rank: index + 1 }));
-}
+// Lives in todo/today-plan.ts now (team sync builds the same snapshot); kept
+// exported here for callers and tests that import it from the server module.
+export { applyUserOrder };
 
 async function reorderTodayPlan(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
   const request = readRecord(body);
@@ -1363,54 +1361,14 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   const env = readEnvFile(options.envPath);
   applyEnv(env);
   const config = loadConfig(options.configPath);
-
-  const latest = readLatestWorkflowOutput(config);
-  if (!latest || latest.workflow !== 'daily_plan') {
-    return { ok: true, plan: null, todos: [], feedback: {}, today: todayInTimezone(config) };
-  }
-
   const today = todayInTimezone(config);
-  const todos = extractDailyPlanTodos(latest.content);
-
-  // Latest feedback per candidate for today, so a row the user already ticked
-  // does not come back looking untouched.
-  const feedback: Record<string, string> = {};
-  const editedMinutes = new Map<string, number>();
-  // The user's own ordering, latest write wins. Kept separate from `feedback`
-  // because it is not a state a row can be *in* — it is where the row sits.
-  const userRank = new Map<string, number>();
-  for (const entry of listTodoFeedback(config)) {
-    if (entry.date !== today) continue;
-    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
-      feedback[entry.candidateId] = entry.event;
-    }
-    if (entry.event === 'reorder') userRank.set(entry.candidateId, entry.rank);
-    // Ledger order is append order, so a `reopen` after a tick wins and the row
-    // comes back untouched. Deleting rather than recording `reopen` as a state:
-    // "was completed and then wasn't" is history, and this map is the present.
-    if (entry.event === 'reopen') delete feedback[entry.candidateId];
-    // `!== undefined` and not truthiness: 0 is the recorded "back to unknown",
-    // and treating it as absent would make an estimate impossible to unset.
-    if (entry.minutes !== undefined) editedMinutes.set(entry.candidateId, entry.minutes);
-  }
-
+  const snapshot = buildTodayPlanSnapshot(config);
+  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, today };
   return {
     ok: true,
-    plan: { date: latest.date ?? '', workflow: latest.workflow, stale: Boolean(latest.date && latest.date !== today), generated_at: latest.generated_at ?? '' },
-    // The user's edit wins over the model's guess, and is merged in here rather
-    // than shipped as a second map: a client that renders `minutes` should not
-    // have to know an override mechanism exists to render the right number.
-    todos: applyUserOrder(
-      todos.map((todo) => {
-        const edited = editedMinutes.get(todo.candidateId);
-        if (edited === undefined) return todo;
-        if (edited > 0) return { ...todo, minutes: edited };
-        const { minutes: _dropped, ...withoutEstimate } = todo;
-        return withoutEstimate;
-      }),
-      userRank,
-    ),
-    feedback,
+    plan: { date: snapshot.date, workflow: 'daily_plan', stale: Boolean(snapshot.date && snapshot.date !== today), generated_at: snapshot.generated_at },
+    todos: snapshot.todos,
+    feedback: snapshot.feedback,
     today,
   };
 }
@@ -1534,6 +1492,13 @@ async function readCyclesPageState(options: UiServerOptions): Promise<Record<str
   applyEnv(env);
   const config = loadConfig(options.configPath);
   return { ok: true, cycles: readCyclesState(config), team: await readTeamViewState(config) };
+}
+
+async function readTeamTodayPage(options: UiServerOptions): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  return { ok: true, ...(await readTeamTodayState(config)) };
 }
 
 /**

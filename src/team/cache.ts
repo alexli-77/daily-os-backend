@@ -87,6 +87,10 @@ export interface TeamCacheState {
    * minute and an edit made while offline is still pending on the next tick.
    */
   pushed: Record<string, string>;
+  /** Same as `watermark`, over teammates' `daily_plans` rows. */
+  planWatermark: string;
+  /** `plan date -> payload hash` of the daily plans we last uploaded. */
+  pushedPlans: Record<string, string>;
 }
 
 const EMPTY_STATE: TeamCacheState = {
@@ -97,6 +101,8 @@ const EMPTY_STATE: TeamCacheState = {
   lastError: '',
   members: [],
   pushed: {},
+  planWatermark: '',
+  pushedPlans: {},
 };
 
 export function readTeamCacheState(): TeamCacheState {
@@ -109,10 +115,12 @@ export function readTeamCacheState(): TeamCacheState {
       syncedAt: asString(parsed.syncedAt),
       lastError: asString(parsed.lastError),
       members: Array.isArray(parsed.members) ? parsed.members.filter((member) => isUuid((member as TeamMember)?.userId)) : [],
-      pushed: parsed.pushed && typeof parsed.pushed === 'object' && !Array.isArray(parsed.pushed) ? (parsed.pushed as Record<string, string>) : {},
+      pushed: asRecord(parsed.pushed),
+      planWatermark: asString(parsed.planWatermark),
+      pushedPlans: asRecord(parsed.pushedPlans),
     };
   } catch {
-    return { ...EMPTY_STATE, members: [], pushed: {} };
+    return { ...EMPTY_STATE, members: [], pushed: {}, pushedPlans: {} };
   }
 }
 
@@ -132,7 +140,7 @@ export function resetTeamCache(teamId: string): TeamCacheState {
     // Best effort. A cache we cannot clear is stale data, not lost data, and
     // the next successful pull overwrites it.
   }
-  const next: TeamCacheState = { ...EMPTY_STATE, teamId, members: [], pushed: {} };
+  const next: TeamCacheState = { ...EMPTY_STATE, teamId, members: [], pushed: {}, pushedPlans: {} };
   writeTeamCacheState(next);
   return next;
 }
@@ -217,6 +225,85 @@ export function listCachedCycles(ownerId: string): CachedCycle[] {
   return docs.sort((left, right) => (left.id < right.id ? 1 : left.id > right.id ? -1 : 0));
 }
 
+// --- daily plans -------------------------------------------------------------
+
+/**
+ * A teammate's "today" list, as cached. `payload` is the owner's
+ * `TodayPlanSnapshot` verbatim; it is stored as JSON and not re-validated
+ * beyond being an object, because the reader (the console, the native clients)
+ * already tolerates every field being absent.
+ */
+export interface CachedDailyPlan {
+  date: string;
+  /** Remote `updated_at`: when the owner's machine last pushed this day. */
+  updatedAt: string;
+  payload: Record<string, unknown>;
+}
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+export function isPlanDate(value: unknown): value is string {
+  return typeof value === 'string' && DATE_PATTERN.test(value);
+}
+
+function teamCachePlanDir(ownerId: string): string {
+  return path.join(teamCacheOwnerDir(ownerId), 'daily');
+}
+
+/**
+ * Cache one teammate daily plan under `<owner>/daily/<date>.json`. Same guards
+ * as `writeCachedCycle`: never our own row, never outside the cache tree. The
+ * `daily/` subdirectory keeps `listCachedCycles` (which only reads `*.md` in
+ * the owner directory) from ever seeing these files.
+ */
+export function writeCachedDailyPlan(
+  selfUserId: string,
+  ownerId: string,
+  date: string,
+  updatedAt: string,
+  payload: Record<string, unknown>,
+): string {
+  if (!isUuid(ownerId)) throw new Error(`Refusing to cache a daily plan for a non-uuid owner: ${ownerId}`);
+  if (selfUserId && ownerId === selfUserId) {
+    throw new Error('Refusing to cache your own daily plan: the local workflow output is the source of truth.');
+  }
+  if (!isPlanDate(date)) throw new Error(`Refusing to cache an invalid plan date: ${date}`);
+
+  const root = teamCacheDir();
+  const filePath = path.resolve(root, ownerId, 'daily', `${date}.json`);
+  if (!isInside(root, filePath)) throw new Error(`Refusing to write outside the team cache: ${filePath}`);
+
+  const record: CachedDailyPlan = { date, updatedAt, payload };
+  writeFileAtomic(filePath, `${JSON.stringify(record, null, 2)}\n`);
+  return filePath;
+}
+
+/** One teammate's cached daily plans, newest date first. Never throws. */
+export function listCachedDailyPlans(ownerId: string): CachedDailyPlan[] {
+  if (!isUuid(ownerId)) return [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(teamCachePlanDir(ownerId));
+  } catch {
+    return [];
+  }
+  const plans: CachedDailyPlan[] = [];
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const date = name.slice(0, -5);
+    if (!isPlanDate(date)) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(teamCachePlanDir(ownerId), name), 'utf8')) as Partial<CachedDailyPlan>;
+      const payload = parsed.payload && typeof parsed.payload === 'object' && !Array.isArray(parsed.payload) ? parsed.payload : null;
+      if (!payload) continue;
+      plans.push({ date, updatedAt: asString(parsed.updatedAt), payload });
+    } catch {
+      continue;
+    }
+  }
+  return plans.sort((left, right) => (left.date < right.date ? 1 : left.date > right.date ? -1 : 0));
+}
+
 function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -224,4 +311,8 @@ function isInside(root: string, candidate: string): boolean {
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+function asRecord(value: unknown): Record<string, string> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, string>) : {};
 }
