@@ -214,6 +214,10 @@ try {
     // Saturday got the same seven-item work plan as Tuesday and there was no
     // setting to change that.
     'scripts/tests/rhythm.test.ts',
+    // `partial` — "worked on it, not finished". The four filters that each
+    // enumerate events by name and would otherwise drop it silently, plus the
+    // carry-over guard that used to be open-only.
+    'scripts/tests/partial-progress.test.ts',
   ]);
   console.log('Regression tests passed.');
 } finally {
