@@ -19,7 +19,7 @@ export interface TodayPlanSnapshot {
   date: string;
   generated_at: string;
   todos: DailyPlanTodo[];
-  /** Latest state per candidateId: complete | defer | update. Absent = untouched. */
+  /** Latest state per candidateId: complete | partial | defer | update. Absent = untouched. */
   feedback: Record<string, string>;
 }
 
@@ -53,7 +53,7 @@ export function buildTodayPlanSnapshot(config: AppConfig): TodayPlanSnapshot | n
   const userRank = new Map<string, number>();
   for (const entry of listTodoFeedback(config)) {
     if (entry.date !== today) continue;
-    if (entry.event === 'complete' || entry.event === 'defer' || entry.event === 'update') {
+    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
     if (entry.event === 'reorder') userRank.set(entry.candidateId, entry.rank);

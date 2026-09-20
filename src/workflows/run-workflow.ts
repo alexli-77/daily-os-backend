@@ -76,8 +76,15 @@ export async function runWorkflowDetailed(
       // line by line instead of writing a fresh long-form review. When no plan ran
       // today, both are marked so the summary degrades to the legacy render.
       const planTodos = loadTodayPlanTodos(config, date);
+      // `partial` belongs here for the same reason the other two do: it is a
+      // statement the user made about today's plan. Leaving it out of the
+      // evidence would make a row the user explicitly marked "worked on it,
+      // not done" arrive at the review looking untouched — the reconciliation
+      // would then have to guess at exactly the fact it was just told.
       const feedbackToday = listTodoFeedback(config).filter(
-        (entry) => entry.date === date && (entry.event === 'complete' || entry.event === 'defer'),
+        (entry) =>
+          entry.date === date &&
+          (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer'),
       );
       evidence.sources.daily_plan_todos = planTodos
         ? { state: 'available', data: { date, todos: planTodos } }

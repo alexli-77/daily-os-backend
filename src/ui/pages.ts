@@ -544,7 +544,7 @@ const TEAM_TODAY_JS = String.raw`
     if (!todos.length) return '<div class="team-today-member">' + head + note + '<p class="muted">这份 plan 没有待办条目。</p></div>';
     var rows = todos.map(function (todo) {
       var state = todo.candidateId ? feedback[todo.candidateId] : '';
-      var label = state === 'complete' ? 'done' : state === 'defer' ? 'deferred' : state === 'update' ? 'updated' : '';
+      var label = state === 'complete' ? 'done' : state === 'partial' ? 'partial' : state === 'defer' ? 'deferred' : state === 'update' ? 'updated' : '';
       return '<li class="todo-item' + (state === 'complete' ? ' state-checked' : '') + '">' +
         '<div class="todo-text"><span class="plan-rank">' + esc(todo.rank) + '</span> ' + esc(todo.text) + '</div>' +
         '<div class="todo-meta">' + tag(todo.candidateId || '') + (label ? '<span class="muted small">' + label + '</span>' : '') + '</div>' +
