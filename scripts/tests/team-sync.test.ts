@@ -342,6 +342,7 @@ async function main(): Promise<void> {
     // These four run last on purpose: they wipe and reseed data/team-cache,
     // which the suites above share.
     await testInstantPush();
+    await testSlowDirectoryDegrades();
     await testSingleFlight();
     await testVersionedApply();
     await testRetention();
@@ -1172,6 +1173,42 @@ async function main(): Promise<void> {
       }
     }
   }
+
+  // A directory the OS will not answer for must not take the service with it.
+  //
+  // LEO-314: `fs.watch` opens the watched directory with a synchronous `open()`
+  // on the main thread, so a first-run permission check or a wedged volume froze
+  // the whole event loop — service alive, port listening, no request answered.
+  // The fix warms the path through the async API first; this asserts the two
+  // things that must hold when that warm-up does not come back: the loop still
+  // starts, and no watcher is installed.
+  async function testSlowDirectoryDegrades(): Promise<void> {
+    const slowWatch = makeFakeWatch();
+    const slowStub = makeStub({ rows: [] });
+    bridge.setTeamSessionProviderForTests(slowStub);
+    const missing = { ...config, memory: { ...config.memory, repository_path: path.join(tmp, "nowhere") } };
+    const started = Date.now();
+    const slowLoop = sync.startTeamSync(() => missing, {
+      intervalMs: 3_600_000,
+      debounceMs: 20,
+      watchDir: slowWatch.watchDir,
+      watchWarmupMs: 40,
+    });
+    try {
+      check('startTeamSync returns without waiting on the directory', Date.now() - started < 40);
+      await slowLoop.flush();
+      check(
+        'an unreachable cycles directory installs no watcher',
+        slowWatch.dirs.length === 0,
+        JSON.stringify(slowWatch.dirs)
+      );
+      const degraded = await slowLoop.runNow();
+      check('and the loop still runs on the tick', degraded.status === 'ok', JSON.stringify(degraded));
+    } finally {
+      slowLoop.stop();
+    }
+  }
+
 
   // --- 10. single flight ------------------------------------------------------
 
