@@ -123,6 +123,24 @@ function writeBlocked(res) {
   return false;
 }
 
+/**
+ * An INSERT that a policy refused — and nothing else. Deliberately narrower
+ * than writeBlocked(): a 409 only says the primary key was taken, which for a
+ * probe on a fixed sentinel key usually means an earlier run left its row
+ * behind. Treating that as "RLS blocked it" is how a script goes on certifying
+ * a policy it never actually exercised. The sweeps below try to make 409
+ * impossible; if one happens anyway, it should be a visible failure, not a
+ * pass.
+ *
+ * We do not instead vary the key per run: `plan_date` is a `date`, so the only
+ * way to make it unique-per-run is to scatter probe rows across arbitrary
+ * calendar days, which trades a detectable collision for undeletable litter in
+ * a real user's table.
+ */
+function insertRejected(res) {
+  return res.status === 401 || res.status === 403;
+}
+
 async function main() {
   const tokenA = await signIn(process.env.SUPABASE_TEST_A_EMAIL, process.env.SUPABASE_TEST_A_PASSWORD);
   const tokenB = await signIn(process.env.SUPABASE_TEST_B_EMAIL, process.env.SUPABASE_TEST_B_PASSWORD);
@@ -424,6 +442,200 @@ async function main() {
     );
   }
 
+  // --- LEO-313: daily_plans ------------------------------------------------
+  //
+  // Same policy shape as cycles, on the key (team_id, owner, plan_date), so the
+  // same attacks get re-run against it. Unlike the cycles block above, B writes
+  // its own probe row instead of us reading whatever row B happens to own: a
+  // teammate who has not synced a plan yet would otherwise turn every
+  // cross-member assertion here into a skip, which is the failure mode this
+  // whole script exists to avoid. B signs the write itself, so no policy is
+  // being worked around to set it up.
+  //
+  // Two sentinel dates far outside any real plan, so a probe can never land on
+  // a day either user actually synced. The second one exists only so the
+  // owner-forging insert below cannot be refused by the primary key instead of
+  // by the policy under test.
+  const PLAN_DATE = '1970-01-02';
+  const PLAN_DATE_FORGE = '1970-01-03';
+  const planUrlA = `daily_plans?team_id=eq.${teamA}&owner=eq.${uidA}&plan_date=eq.${PLAN_DATE}`;
+  const planUrlB = `daily_plans?team_id=eq.${teamB}&owner=eq.${uidB}&plan_date=eq.${PLAN_DATE}`;
+  const planPayload = () => ({
+    generated_at: new Date().toISOString(),
+    todos: [],
+    feedback: {},
+  });
+
+  // Sweeps that catch every row this block can create, on both sentinel dates
+  // and in any team. Two reasons not to reuse planUrlA/planUrlB here:
+  //   - they only cover PLAN_DATE, so a leftover PLAN_DATE_FORGE row would make
+  //     the two inserts below fail on the primary key forever;
+  //   - they pin team_id, and the "move into a foreign team" PATCH below moves
+  //     A's row out of teamA whenever the policy it tests is broken.
+  // The delete policy is `using (owner = auth.uid())` with no team clause, so
+  // filtering on owner alone is both sufficient and the only filter that can
+  // still reach a row that got away. B's sweep also picks up the row A forged
+  // under B's uuid, which A itself has no right to delete.
+  const planDates = `in.(${PLAN_DATE},${PLAN_DATE_FORGE})`;
+  const planSweepA = `daily_plans?owner=eq.${uidA}&plan_date=${planDates}`;
+  const planSweepB = `daily_plans?owner=eq.${uidB}&plan_date=${planDates}`;
+
+  // A run that died before its cleanup leaves sentinel rows behind, and then
+  // the inserts below fail on the primary key rather than on RLS.
+  await rest(tokenA, planSweepA, { method: 'DELETE' });
+  await rest(tokenB, planSweepB, { method: 'DELETE' });
+
+  const planOwnA = await rest(tokenA, 'daily_plans', {
+    method: 'POST',
+    headers: { prefer: 'return=representation' },
+    body: JSON.stringify({ team_id: teamA, plan_date: PLAN_DATE, payload: planPayload() }),
+  });
+  check(
+    'user A can write their own daily_plans row, and owner defaults to their uuid',
+    planOwnA.ok && Array.isArray(planOwnA.body) && planOwnA.body[0]?.owner === uidA,
+    `status ${planOwnA.status}`,
+  );
+
+  const planOwnB = await rest(tokenB, 'daily_plans', {
+    method: 'POST',
+    headers: { prefer: 'return=representation' },
+    body: JSON.stringify({ team_id: teamB, plan_date: PLAN_DATE, payload: planPayload() }),
+  });
+  check('user B can write their own daily_plans row', planOwnB.ok, `status ${planOwnB.status}`);
+
+  if (planOwnB.ok) {
+    const planRead = await rest(
+      tokenA,
+      `daily_plans?select=owner,plan_date&owner=eq.${uidB}&plan_date=eq.${PLAN_DATE}`,
+    );
+    check(
+      "user A reads user B's daily_plans row",
+      Array.isArray(planRead.body) &&
+        planRead.body.length === 1 &&
+        planRead.body[0].owner === uidB,
+      `rows ${Array.isArray(planRead.body) ? planRead.body.length : 'n/a'}`,
+    );
+
+    const planHijack = await rest(tokenA, planUrlB, {
+      method: 'PATCH',
+      headers: { prefer: 'return=representation' },
+      body: JSON.stringify({ payload: { hijacked: 'by verify script' } }),
+    });
+    check(
+      "user A cannot update user B's daily_plans row",
+      writeBlocked(planHijack),
+      `status ${planHijack.status}`,
+    );
+
+    const planWipe = await rest(tokenA, planUrlB, {
+      method: 'DELETE',
+      headers: { prefer: 'return=representation' },
+    });
+    check(
+      "user A cannot delete user B's daily_plans row",
+      writeBlocked(planWipe),
+      `status ${planWipe.status}`,
+    );
+    // A DELETE that RLS filtered down to no rows still returns 2xx, so the only
+    // proof the row survived is reading it back.
+    const planSurvived = await rest(
+      tokenA,
+      `daily_plans?select=owner&owner=eq.${uidB}&plan_date=eq.${PLAN_DATE}`,
+    );
+    check(
+      "user B's daily_plans row is still there after A tried to delete it",
+      Array.isArray(planSurvived.body) && planSurvived.body.length === 1,
+      `rows ${Array.isArray(planSurvived.body) ? planSurvived.body.length : 'n/a'}`,
+    );
+  } else {
+    skip("user A reads user B's daily_plans row", "user B's own-write probe failed");
+    skip("user A cannot update user B's daily_plans row", "user B's own-write probe failed");
+    skip("user A cannot delete user B's daily_plans row", "user B's own-write probe failed");
+    skip(
+      "user B's daily_plans row is still there after A tried to delete it",
+      "user B's own-write probe failed",
+    );
+  }
+
+  const planForge = await rest(tokenA, 'daily_plans', {
+    method: 'POST',
+    headers: { prefer: 'return=representation' },
+    body: JSON.stringify({
+      team_id: teamA,
+      owner: uidB,
+      plan_date: PLAN_DATE_FORGE,
+      payload: planPayload(),
+    }),
+  });
+  check(
+    'user A cannot forge the owner column on daily_plans',
+    insertRejected(planForge),
+    `status ${planForge.status}`,
+  );
+
+  if (OTHER_TEAM_ID) {
+    // Weak on purpose, and worth knowing it: "zero rows" is also what a
+    // foreign team with no daily_plans at all returns, RLS or no RLS. Seeding
+    // one over there would need either a session in that team or a
+    // service_role key, and the second is not worth handing to this script.
+    // README says which team to point SUPABASE_TEST_OTHER_TEAM_ID at.
+    const planCrossRead = await rest(
+      tokenA,
+      `daily_plans?select=plan_date&team_id=eq.${OTHER_TEAM_ID}`,
+    );
+    check(
+      'user A reads no daily_plans from a foreign team',
+      Array.isArray(planCrossRead.body) && planCrossRead.body.length === 0,
+      `status ${planCrossRead.status}`,
+    );
+
+    const planCrossInsert = await rest(tokenA, 'daily_plans', {
+      method: 'POST',
+      headers: { prefer: 'return=representation' },
+      body: JSON.stringify({
+        team_id: OTHER_TEAM_ID,
+        plan_date: PLAN_DATE_FORGE,
+        payload: planPayload(),
+      }),
+    });
+    check(
+      'user A cannot insert a daily_plans row they own into a foreign team',
+      insertRejected(planCrossInsert),
+      `status ${planCrossInsert.status}`,
+    );
+
+    if (planOwnA.ok) {
+      const planMoveTeam = await rest(tokenA, planUrlA, {
+        method: 'PATCH',
+        headers: { prefer: 'return=representation' },
+        body: JSON.stringify({ team_id: OTHER_TEAM_ID }),
+      });
+      check(
+        'user A cannot move their own daily_plans row into a foreign team',
+        writeBlocked(planMoveTeam),
+        `status ${planMoveTeam.status}`,
+      );
+    } else {
+      skip(
+        'user A cannot move their own daily_plans row into a foreign team',
+        "user A's own-write probe failed",
+      );
+    }
+  } else {
+    skip(
+      'user A reads no daily_plans from a foreign team',
+      'SUPABASE_TEST_OTHER_TEAM_ID is not set, so there is no foreign team to read',
+    );
+    skip(
+      'user A cannot insert a daily_plans row they own into a foreign team',
+      'SUPABASE_TEST_OTHER_TEAM_ID is not set; a made-up uuid would fail on the foreign key instead of on RLS',
+    );
+    skip(
+      'user A cannot move their own daily_plans row into a foreign team',
+      'SUPABASE_TEST_OTHER_TEAM_ID is not set',
+    );
+  }
+
   // --- LEO-283: the team lifecycle RPCs ------------------------------------
   //
   // These are `security definer`, so they run as the function owner and RLS
@@ -601,6 +813,19 @@ async function main() {
     `status ${anonRead.status}`,
   );
 
+  // daily_plans is a separate table with its own policies, and at this point it
+  // is known to hold at least A's and B's probe rows, so an empty result here
+  // cannot be an empty table.
+  const anonPlans = await fetch(`${BASE}/rest/v1/daily_plans?select=plan_date`, {
+    headers: { apikey: ANON, authorization: `Bearer ${ANON}` },
+  });
+  const anonPlansBody = await anonPlans.json().catch(() => null);
+  check(
+    'anon key without a session reads no daily_plans',
+    !anonPlans.ok || (Array.isArray(anonPlansBody) && anonPlansBody.length === 0),
+    `status ${anonPlans.status}`,
+  );
+
   // EXECUTE is revoked from PUBLIC and granted only to `authenticated`, so an
   // unauthenticated caller must not even reach the auth.uid() check inside.
   for (const [name, args] of [
@@ -621,6 +846,12 @@ async function main() {
   if (insertOwn.ok) {
     await rest(tokenA, probeUrl, { method: 'DELETE' });
   }
+  // Same two sweeps as before the block ran, for the same reasons: they cover
+  // both sentinel dates and any team a row may have been moved or forged into.
+  // Each session removes only rows it owns; A deleting B's is precisely what
+  // the policy forbids, which is why the forged row is B's to clean up.
+  await rest(tokenA, planSweepA, { method: 'DELETE' });
+  await rest(tokenB, planSweepB, { method: 'DELETE' });
 }
 
 main()
