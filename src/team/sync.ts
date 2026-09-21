@@ -789,6 +789,17 @@ function assertOwnedBySelf(session: TeamSession, ownerId: string): void {
 export const TEAM_SYNC_INTERVAL_MS = 60_000;
 
 /**
+ * How long to wait for the watched directory to answer before giving up on the
+ * watcher for this run.
+ *
+ * Generous on purpose: the thing being waited on is usually a one-off
+ * permission check, and losing file-watching for a whole session to save a few
+ * seconds at startup is the wrong trade. Nothing is blocked while this runs —
+ * the HTTP server is already serving and the 60s tick is already ticking.
+ */
+export const WATCH_WARMUP_MS = 10_000;
+
+/**
  * How long a key stays quiet before its push goes out. Long enough to swallow
  * the 2-4 events one editor save produces and the several ledger rows one
  * drag-reorder writes; short enough that "within a second" is still true.
@@ -819,6 +830,8 @@ export interface TeamSyncLoopDeps extends TeamSyncDeps {
   debounceMs?: number;
   /** Injected in tests. Defaults to a thin `fs.watch` wrapper. */
   watchDir?: (dir: string, onChange: (filename: string) => void) => { close: () => void };
+  /** Injected in tests. Defaults to `WATCH_WARMUP_MS`. */
+  watchWarmupMs?: number;
   /** Injected in tests. Defaults to the process-wide local-change bus. */
   subscribe?: (listener: (kind: LocalChangeKind) => void) => () => void;
 }
@@ -924,7 +937,13 @@ export function startTeamSync(loadConfigFn: () => AppConfig, deps: TeamSyncLoopD
 
   const runNow = (): Promise<TeamSyncResult> => enqueue('tick', tickJob);
   const pushCycle = (cycleId: string): Promise<TeamSyncResult> => enqueue(`cycle:${cycleId}`, cycleJob(cycleId));
+  let watcherReady: Promise<void> = Promise.resolve();
+
   const flush = async (): Promise<void> => {
+    // The watcher starts asynchronously (see `startWatching`), so "everything
+    // pending has happened" has to include it — otherwise a caller that starts
+    // the loop and immediately flushes can find no watcher registered yet.
+    await watcherReady;
     for (const entry of [...timers.values()]) {
       clearTimeout(entry.timer);
       entry.fire();
@@ -942,25 +961,58 @@ export function startTeamSync(loadConfigFn: () => AppConfig, deps: TeamSyncLoopD
   });
 
   let watcher: { close: () => void } | null = null;
-  try {
-    watcher = (deps.watchDir ?? watchDirectory)(cyclesDir(loadConfigFn()), (filename) => {
-      const id = filename.endsWith('.md') ? filename.slice(0, -3) : '';
-      if (id && parseCycleId(id)) {
-        debounce(`cycle:${id}`, cycleJob(id));
-        return;
-      }
-      // No filename: some platforms report the event without one. A full tick
-      // pushes whatever changed — slower than one row, never wrong. Anything
-      // else (an atomic write's `.<name>.<pid>.<ts>.tmp` sibling, an editor's
-      // swap file) is not a cycle and is ignored.
-      if (!filename) debounce('tick', tickJob);
-    });
-  } catch {
-    // A cycles directory that does not exist yet, a platform without inotify,
-    // an fd limit. The 60s tick is still the backstop, so degrade to tick-only
-    // rather than taking down the console with it.
-    watcher = null;
-  }
+
+  /**
+   * Start the directory watcher without letting it take the process down.
+   *
+   * `fs.watch` looks asynchronous and is not: libuv's `uv_fs_event_start` opens
+   * the watched directory with a **synchronous** `open()`, on the main thread.
+   * Normally that returns in microseconds. When it does not — a first-run
+   * TCC/Gatekeeper check on a freshly signed bundle watching a folder under
+   * ~/Desktop, a stalled network volume — the Node event loop stops for as long
+   * as the kernel takes, and with it every HTTP request. Observed in the wild:
+   * the service alive, the port listening, and not one request answered; a
+   * `sample` of the process showed 2582 of 2582 samples parked in that `open`.
+   *
+   * So the path is warmed through the *async* fs API first. That open runs on
+   * the libuv threadpool, where blocking costs one worker instead of the whole
+   * loop, and it resolves whatever the slow thing was (a permission decision is
+   * cached per process) before the synchronous call is made. If the warm-up
+   * does not come back in time, the watcher is skipped: the 60s tick is still
+   * the backstop, so the cost is latency, not correctness.
+   */
+  const startWatching = async (): Promise<void> => {
+    const dir = cyclesDir(loadConfigFn());
+    if (!(await warmPath(dir, deps.watchWarmupMs ?? WATCH_WARMUP_MS))) {
+      console.warn(
+        `[team-sync] 拿不到周期目录的访问权（${dir}），暂时不装文件监听，改用 ${Math.round((deps.intervalMs ?? TEAM_SYNC_INTERVAL_MS) / 1000)} 秒轮询。` +
+          '如果这是第一次启动新版本，去「系统设置 → 隐私与安全性」确认 Daily OS 能访问这个目录。'
+      );
+      return;
+    }
+    if (stopped) return;
+    try {
+      watcher = (deps.watchDir ?? watchDirectory)(dir, (filename) => {
+        const id = filename.endsWith('.md') ? filename.slice(0, -3) : '';
+        if (id && parseCycleId(id)) {
+          debounce(`cycle:${id}`, cycleJob(id));
+          return;
+        }
+        // No filename: some platforms report the event without one. A full tick
+        // pushes whatever changed — slower than one row, never wrong. Anything
+        // else (an atomic write's `.<name>.<pid>.<ts>.tmp` sibling, an editor's
+        // swap file) is not a cycle and is ignored.
+        if (!filename) debounce('tick', tickJob);
+      });
+    } catch {
+      // A cycles directory that does not exist yet, a platform without inotify,
+      // an fd limit. The 60s tick is still the backstop, so degrade to tick-only
+      // rather than taking down the console with it.
+      watcher = null;
+    }
+  };
+
+  watcherReady = startWatching();
 
   void runNow();
   const timer = setInterval(() => void runNow(), deps.intervalMs ?? TEAM_SYNC_INTERVAL_MS);
@@ -986,6 +1038,38 @@ async function guard(run: () => Promise<TeamSyncResult>): Promise<TeamSyncResult
     return await run();
   } catch (error) {
     return idleResult('error', error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Touch `dir` through the async fs API, with a deadline.
+ *
+ * The point is *where* the work happens, not what it returns: `fsp.access` is
+ * serviced by the libuv threadpool, so a permission prompt or a wedged volume
+ * blocks a worker while the event loop keeps serving HTTP. Resolving it here
+ * also means the synchronous `open()` inside `fs.watch` finds an answer already
+ * cached.
+ *
+ * `false` on either failure or timeout — the caller treats both the same way,
+ * because "cannot read this directory" and "cannot read it yet" both mean the
+ * watcher must not be installed right now.
+ */
+async function warmPath(dir: string, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([
+      fs.promises.access(dir, fs.constants.R_OK).then(
+        () => true,
+        () => false
+      ),
+      deadline,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
