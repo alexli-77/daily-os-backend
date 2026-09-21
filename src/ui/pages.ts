@@ -10,10 +10,7 @@ import {
   TODO_HISTORY_RETENTION_DAYS,
   type TodoInboxItem,
 } from '../todo/inbox.js';
-import { readLatestWorkflowOutput } from '../storage/memory.js';
-import { extractDailyPlanTodos } from '../workflows/summary.js';
-import { todayInTimezone } from '../utils/date.js';
-import { listTodoFeedback } from '../todo/feedback.js';
+import { buildTodayPlanSnapshot } from '../todo/today-plan.js';
 import { readOkrSnapshot, type OkrFile, type OkrObjective } from './okr-lite.js';
 import { RETRO_TEMPLATE } from '../cycles/retro-template.js';
 import { pixelAvatarSvg } from './avatar.js';
@@ -565,37 +562,38 @@ const TEAM_TODAY_JS = String.raw`
 })();
 `;
 
-/** Today's plan — the todos the daily_plan workflow generated (read-only view). */
+/**
+ * Today's plan — the todos the daily_plan workflow generated (read-only view).
+ *
+ * Reads the shared snapshot rather than `_latest-workflow.json` directly: that
+ * pointer keeps only the last workflow to finish, so from the evening
+ * daily_review onwards this column claimed there was no plan at all (LEO-309).
+ * Going through `buildTodayPlanSnapshot` also means this page, `/api/today/plan`
+ * and what a teammate receives are one list — including the user's own
+ * reordering, which this column used to ignore.
+ */
 function renderPlanColumn(ctx: PageContext): string {
   const { config } = ctx;
-  const latest = safe(() => readLatestWorkflowOutput(config), null);
-  if (!latest || latest.workflow !== 'daily_plan') {
+  const snapshot = safe(() => buildTodayPlanSnapshot(config), null);
+  if (!snapshot) {
     return '<p class="muted">还没有今日 plan。在 Chat 里发 <code>daily-os plan</code>，或等定时任务生成。</p>';
   }
-  const todos = safe(() => extractDailyPlanTodos(latest.content), []);
+  const todos = snapshot.todos;
   if (todos.length === 0) {
     return '<p class="muted">最近一次 plan 没有解析出待办条目。</p>';
   }
-  const today = safe(() => todayInTimezone(config), '');
-  const staleNote =
-    latest.date && today && latest.date !== today
-      ? `<p class="muted small">来自 ${escapeHtml(latest.date)} 的 plan（今天还没跑）。</p>`
-      : '';
-  // Latest feedback per candidateId for today, so the card reflects what the
-  // user already ticked (the evening daily_review reconciles the same ledger).
-  const feedbackState = new Map<string, string>();
-  for (const entry of safe(() => listTodoFeedback(config), [])) {
-    if (entry.date !== today) continue;
-    if (entry.event === 'complete' || entry.event === 'defer' || entry.event === 'update') {
-      feedbackState.set(entry.candidateId, entry.event);
-    }
-  }
+  // Already today's feedback only, and already the latest state per candidate —
+  // a row the user ticked this morning must not come back looking untouched.
+  const feedbackState = snapshot.feedback;
   const workspace = config.sources.linear.workspace;
   const resendRow = `<div class="plan-toolbar"><button type="button" class="secondary compact" data-post="/api/today/resend">发飞书</button></div>`;
   const rows = todos
     .map((todo) => {
-      const state = todo.candidateId ? feedbackState.get(todo.candidateId) : undefined;
-      const stateLabel = state === 'complete' ? 'done' : state === 'defer' ? 'deferred' : state === 'update' ? 'updated' : '';
+      const state = todo.candidateId ? feedbackState[todo.candidateId] : undefined;
+      // `partial` only became reachable here once this column moved to the
+      // snapshot; unlabelled it would look like a row nobody touched.
+      const stateLabel =
+        state === 'complete' ? 'done' : state === 'partial' ? 'partial' : state === 'defer' ? 'deferred' : state === 'update' ? 'updated' : '';
       const issueId = todo.candidateId.startsWith('linear:') ? todo.candidateId.slice('linear:'.length) : '';
       const tag = issueId
         ? `<a class="tag tag-link" href="${escapeHtml(linearIssueUrl(issueId, workspace))}" target="_blank" rel="noopener">${escapeHtml(issueId)}</a>`
@@ -616,7 +614,7 @@ function renderPlanColumn(ctx: PageContext): string {
       </li>`;
     })
     .join('');
-  return `${resendRow}${staleNote}<ul class="todo-list">${rows}</ul>`;
+  return `${resendRow}<ul class="todo-list">${rows}</ul>`;
 }
 
 /** My todos — the user's own quick captures, with add / done / defer / delete. */

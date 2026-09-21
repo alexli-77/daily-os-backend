@@ -122,6 +122,42 @@ export function readWorkflowDetailCache(config: AppConfig, id: string): Workflow
   }
 }
 
+/**
+ * LEO-309 — the `daily_plan` output for one calendar date, or null when that
+ * date never had one.
+ *
+ * `_latest-workflow.json` holds only the *last* workflow to finish, so the
+ * 21:30 `daily_review` overwrites the morning's plan and the day's plan looks
+ * like it was never generated. Every reader that asked that file "are you
+ * today's plan?" went blank for the rest of the evening — the console's Today
+ * page, `/api/today/plan`, the plan team sync pushes, and the review's own
+ * reconciliation evidence. All four now come through here instead.
+ *
+ * The per-run detail cache is the only store that keeps every output, so the
+ * lookup falls back to it. Matching is on the record's own `date` — the user's
+ * local day as the workflow computed it — and never on a file timestamp, which
+ * is UTC and lands on the wrong day for anything run after 20:00 in Montreal.
+ */
+export function readDailyPlanOutput(config: AppConfig, date: string): LatestWorkflowOutput | null {
+  // One file instead of a directory scan, and the answer for the whole stretch
+  // between the morning plan and the first workflow that follows it.
+  const latest = readLatestWorkflowOutput(config);
+  if (latest && latest.workflow === 'daily_plan' && latest.date === date) return latest;
+
+  const cacheDir = workflowDetailCacheDir(config);
+  if (!fs.existsSync(cacheDir)) return null;
+  let best: WorkflowDetailCache | null = null;
+  for (const name of fs.readdirSync(cacheDir)) {
+    if (!name.endsWith('.json')) continue;
+    const cached = readWorkflowDetailCache(config, name.slice(0, -'.json'.length));
+    if (!cached || cached.workflow !== 'daily_plan' || cached.date !== date) continue;
+    // A rerun supersedes the earlier plan, and `generated_at` is the only
+    // ordering the cache carries — the file names are random UUIDs.
+    if (!best || cached.generated_at > best.generated_at) best = cached;
+  }
+  return best;
+}
+
 export function appendLongTermMemory(config: AppConfig, content: string, source = 'manual'): void {
   const longTermPath = path.resolve(config.memory.long_term_path);
   fs.mkdirSync(path.dirname(longTermPath), { recursive: true });
