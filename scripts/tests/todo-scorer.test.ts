@@ -340,6 +340,76 @@ test('OKR-linked candidate scores higher than a Feishu weekly-only hit', () => {
   });
 });
 
+// --- LEO-317: the OKR index comes from the configured vault ----------------
+
+test('the OKR index is read from the vault at memory.repository_path, not from the process cwd', () => {
+  withVault(VAULT_KR_ROW, (vault) => {
+    // Matched by description, not by id: the title never names O5-KR2, so only a
+    // KR whose `description` column was really parsed out of <vault>/10_OKR can
+    // link it. Asserting through `normalizeCandidates` keeps loadOkrIndex private
+    // (LEO-209 boundary) while still pinning the root resolution — under the old
+    // cwd-only root this workdir has no scaffold, so the link disappears.
+    const candidates = normalizeCandidates({
+      config: { memory: { repository_path: vault } } as AppConfig,
+      evidence: {
+        generated_at: NOW.toISOString(),
+        date: DATE,
+        sources: { vault_scan: { state: 'available', data: { candidates: [{ path: 'p.md', title: 'Publish the weekly digest 初稿' }] } } },
+      },
+      date: DATE,
+      now: NOW,
+    });
+    assert.equal(candidates[0].okrKrId, 'O5-KR2', 'the vault KR description answered for a title that never names its id');
+  });
+});
+
+test('a title carrying a vault KR id earns the full okrLinked weight', () => {
+  withVault(VAULT_KR_ROW, (vault) => {
+    // The bug this guards: cwd had no memory-vault, so okrKrId stayed empty and
+    // breakdown.okr never appeared, whatever the vault said.
+    const candidates = normalizeCandidates({
+      config: { memory: { repository_path: vault } } as AppConfig,
+      evidence: {
+        generated_at: NOW.toISOString(),
+        date: DATE,
+        sources: { vault_scan: { state: 'available', data: { candidates: [{ path: 'p.md', title: '推进 O5-KR2 的周报' }] } } },
+      },
+      date: DATE,
+      now: NOW,
+    });
+    assert.equal(candidates[0].okrKrId, 'O5-KR2', 'candidate is linked to the vault KR id');
+    const { breakdown } = scoreCandidate(candidates[0], DEFAULT_SCORER_WEIGHTS, NOW);
+    assert.equal(breakdown.okr, DEFAULT_SCORER_WEIGHTS.okrLinked);
+  });
+});
+
+test('an empty or unreachable repository_path falls back to the repo scaffold, without throwing', () => {
+  withOkrFile('| O1-KR1 | Ship portfolio site to production | done | not-done | 0% | 2026-07-16 |', () => {
+    // The last case is `config` = `{}` — hand-rolled configs with no `memory`
+    // block reach the scorer from the tests and from partial callers; they must
+    // not throw, and must still see the scaffold as before.
+    const cases: Array<[string, AppConfig]> = [
+      ['empty path', { memory: { repository_path: '' } } as AppConfig],
+      ['whitespace-only path', { memory: { repository_path: '   ' } } as AppConfig],
+      ['unreachable path', { memory: { repository_path: path.join(os.tmpdir(), 'daily-os-no-such-vault') } } as AppConfig],
+      ['no memory block at all', config],
+    ];
+    for (const [label, cfg] of cases) {
+      const candidates = normalizeCandidates({
+        config: cfg,
+        evidence: {
+          generated_at: NOW.toISOString(),
+          date: DATE,
+          sources: { vault_scan: { state: 'available', data: { candidates: [{ path: 'p.md', title: '推进 O1-KR1 相关工作' }] } } },
+        },
+        date: DATE,
+        now: NOW,
+      });
+      assert.equal(candidates[0].okrKrId, 'O1-KR1', `${label} -> falls back to the scaffold under cwd`);
+    }
+  });
+});
+
 test('buildScoredTodos returns a ranked top with breakdowns end-to-end', () => {
   const result = buildScoredTodos(config, makeEvidence(), DATE, { now: NOW });
   assert.ok(result.top.length >= 3);
@@ -468,6 +538,29 @@ function withOkrFile(krRow: string, fn: () => void): void {
       ['## Objective O1: Ship', '', '| KR ID | Description | Target | Current | Progress | Updated |', '| --- | --- | --- | --- | --- | --- |', krRow, ''].join('\n'),
     );
     fn();
+  });
+}
+
+const VAULT_KR_ROW = '| O5-KR2 | Publish the weekly digest | 12 | 3 | 25% | 2026-07-16 |';
+
+/**
+ * Real-shaped vault: `<repository_path>/10_OKR/current-okr.md`, living outside
+ * the workdir so the scaffold under cwd cannot answer for it — that separation
+ * is the whole point of the LEO-317 cases.
+ */
+function withVault(krRow: string, fn: (repositoryPath: string) => void): void {
+  withTmpWorkdir(() => {
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-scorer-vault-'));
+    fs.mkdirSync(path.join(vault, '10_OKR'), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, '10_OKR', 'current-okr.md'),
+      ['## Objective O5: Write', '', '| KR ID | Description | Target | Current | Progress | Updated |', '| --- | --- | --- | --- | --- | --- |', krRow, ''].join('\n'),
+    );
+    try {
+      fn(vault);
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
   });
 }
 

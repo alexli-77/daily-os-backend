@@ -167,7 +167,9 @@ export function normalizeCandidates(input: {
 }): TodoCandidate[] {
   const { evidence, date } = input;
   const now = input.now ?? new Date(`${date}T00:00:00`);
-  const okrIndex = loadOkrIndex();
+  // `config` here can be a hand-rolled object (tests, callers that only fill in
+  // what they need), so `memory` may be absent — never let that throw.
+  const okrIndex = loadOkrIndex(input.config?.memory?.repository_path);
   const raw: TodoCandidate[] = [
     ...fromTodoInbox(evidence.sources.todo_inbox, now),
     ...fromLinear(evidence.sources.linear),
@@ -452,13 +454,22 @@ interface OkrKr {
 }
 
 /**
- * Parse the local OKR files (memory-vault/default/10_OKR/*.md) into a flat list
- * of real (non-placeholder) key results. Kept private to the scorer per the
- * LEO-209 boundary — the dedicated OKR loader lives elsewhere and is off-limits.
+ * Parse the OKR markdown files into a flat list of real (non-placeholder) key
+ * results. Kept private to the scorer per the LEO-209 boundary — the dedicated
+ * OKR loader lives elsewhere and is off-limits.
+ *
+ * LEO-317: the root used to be the hardcoded relative `memory-vault/default/10_OKR`,
+ * which `path.resolve` anchors at `process.cwd()`. The packaged service runs with
+ * cwd = ~/Library/Application Support/DailyOS, where no vault exists, so the index
+ * was always empty and `okrLinked` never scored once. Resolve the user's real vault
+ * first — same two-step as `okrDir()` in src/ui/okr-lite.ts — and keep the repo
+ * scaffold as the fallback for a dev checkout / an unconfigured vault.
  */
-function loadOkrIndex(root = 'memory-vault/default/10_OKR'): OkrKr[] {
+function loadOkrIndex(repositoryPath?: string): OkrKr[] {
   try {
-    const dir = path.resolve(root);
+    const vault = (repositoryPath || '').trim();
+    const fromVault = vault ? path.resolve(vault, '10_OKR') : '';
+    const dir = fromVault && fs.existsSync(fromVault) ? fromVault : path.resolve('memory-vault', 'default', '10_OKR');
     if (!fs.existsSync(dir)) return [];
     const files = fs.readdirSync(dir).filter((name) => name.endsWith('.md'));
     const krs: OkrKr[] = [];
