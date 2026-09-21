@@ -1,11 +1,11 @@
 import type { AppConfig } from '../config/schema.js';
-import { readLatestWorkflowOutput } from '../storage/memory.js';
+import { readDailyPlanOutput } from '../storage/memory.js';
 import { todayInTimezone } from '../utils/date.js';
 import { extractDailyPlanTodos, type DailyPlanTodo } from '../workflows/summary.js';
 import { listTodoFeedback } from './feedback.js';
 
 /**
- * Today's plan as one value: the ranked todos the last `daily_plan` run
+ * Today's plan as one value: the ranked todos today's last `daily_plan` run
  * produced, with the user's own edits (estimate, order) folded in, plus the
  * complete / defer / update state per row for that day.
  *
@@ -15,7 +15,7 @@ import { listTodoFeedback } from './feedback.js';
  * sure of that is to compute it in exactly one place.
  */
 export interface TodayPlanSnapshot {
-  /** The plan's own date. Differs from today when today's run hasn't happened. */
+  /** The plan's own date, always today: a snapshot exists only for today's plan. */
   date: string;
   generated_at: string;
   todos: DailyPlanTodo[];
@@ -36,12 +36,23 @@ export function applyUserOrder(todos: DailyPlanTodo[], userRank: Map<string, num
     .map(({ todo }, index) => ({ ...todo, rank: index + 1 }));
 }
 
-/** Null when there is no `daily_plan` output at all. Never throws on a bad ledger. */
+/**
+ * Null when today has no `daily_plan` output. Never throws on a bad ledger.
+ *
+ * Today's, not the most recent one: yesterday's plan shown as today's is how
+ * someone works a day behind without noticing, so a day with no plan returns
+ * null instead of reaching back. And today's, not the last workflow to run —
+ * see `readDailyPlanOutput` (LEO-309).
+ *
+ * Every consumer therefore holds today's plan or nothing; none of them needs a
+ * "this is from an earlier day" path, and `/api/today/plan` keeps its `stale`
+ * flag only because the Mac client requires the field.
+ */
 export function buildTodayPlanSnapshot(config: AppConfig): TodayPlanSnapshot | null {
-  const latest = readLatestWorkflowOutput(config);
-  if (!latest || latest.workflow !== 'daily_plan') return null;
-
   const today = todayInTimezone(config);
+  const latest = readDailyPlanOutput(config, today);
+  if (!latest) return null;
+
   const todos = extractDailyPlanTodos(latest.content);
 
   // Latest feedback per candidate for today, so a row the user already ticked

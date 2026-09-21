@@ -54,6 +54,7 @@ async function main(): Promise<void> {
   const artifacts = await import('../../src/storage/artifacts.js');
   const { loadConfig } = await import('../../src/config/load-config.js');
   const { writeLatestWorkflowOutput } = await import('../../src/storage/memory.js');
+  const { todayInTimezone } = await import('../../src/utils/date.js');
   const { runManager } = await import('../../src/service/run-manager.js');
   const { startUiServer } = await import('../../src/ui/server.js');
 
@@ -179,10 +180,15 @@ async function main(): Promise<void> {
 
     const todayConfig = loadConfig('config/config.yaml');
     todayConfig.sources.linear.workspace = '';
+    // Dated today, not a fixed date. The subject here is the Linear link, but
+    // since LEO-309 the Today page only renders a plan that belongs to today —
+    // a hard-coded 2026-07-31 now renders the "还没有今日 plan" empty state and
+    // the assertion below fails for a reason that has nothing to do with the
+    // workspace config it is testing.
     writeLatestWorkflowOutput(
       todayConfig,
       'daily_plan',
-      '2026-07-31',
+      todayInTimezone(todayConfig),
       '{"todos":[{"rank":1,"text":"录完官网 Demo","candidateId":"linear:CUTTO-301"}]}',
     );
     const todayPage = await fetch(`${base}/today`, { headers: { cookie: adminCookie } });

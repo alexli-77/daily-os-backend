@@ -280,6 +280,12 @@ It checks that:
 - A cannot move themselves into another team, nor edit B's `members` row;
 - A reads nothing from a foreign team, and cannot insert or move a cycle into one
   (all three only when `SUPABASE_TEST_OTHER_TEAM_ID` is set);
+- the same round against `daily_plans`, on its `(team_id, owner, plan_date)` key:
+  A reads B's row but can neither update nor delete it (and the row is read back
+  afterwards to prove the refused delete was not a silent success), A cannot
+  forge `owner`, and — with `SUPABASE_TEST_OTHER_TEAM_ID` set — reads nothing
+  from a foreign team and can neither insert into one nor move their own row
+  there;
 - A, who is already in a team, is refused by both `join_team` and `create_team`,
   and is still in their original team afterwards — the anti-hopping guard;
 - the invite code A can read is at least 24 characters;
@@ -290,19 +296,42 @@ It checks that:
   nothing, and `rotate_invite_code` is refused for someone with no team;
 - with `SUPABASE_TEST_ALLOW_TEAM_CREATE=1`: `create_team` returns a uuid **and
   leaves the creator inside that team**, and rotating changes the code;
-- a bare anon key with no session reads nothing, and cannot execute any of the
-  four RPCs.
+- a bare anon key with no session reads no cycles and no daily_plans, and cannot
+  execute any of the four RPCs.
 
 **When the required variables are absent the script exits 0 and prints `SKIPPED`
 with the exact list of missing variables.** A skip is not a pass — nothing about
 the remote has been checked. Do not read a green exit code as verification
 unless the output says `passed` with zero skips.
 
+**"A reads nothing from a foreign team" is only worth something if that team has
+rows.** The assertion is `length === 0`, which is also what an empty table
+returns with RLS switched off entirely. `cycles` in an established team is
+usually populated; `daily_plans` is newer, so a foreign team that has never
+synced a plan makes that half of the check vacuous. Point
+`SUPABASE_TEST_OTHER_TEAM_ID` at a team that actually holds a `daily_plans` row,
+or read that one line as unverified. The script cannot seed the row itself: it
+has no session in that team, and the alternative is a `service_role` key, which
+is not worth introducing here for one assertion.
+
 The script writes one throwaway cycle row under user A's own identity and deletes
-it afterwards, and it renames user A's `member_id` and puts it back. Both are
-user A's own data and neither touches user B, but point the script at a scratch
-project if that bothers you. If it dies between the two rename steps, A is left
-with a `-renamed-<suffix>` label; set it back by hand.
+it afterwards, and it renames user A's `member_id` and puts it back. For
+`daily_plans` it uses two sentinel dates no real plan can occupy: `1970-01-02`
+for the row each of A and B writes under their own session, and `1970-01-03` for
+the two inserts that are *supposed* to be refused — owner-forging and
+cross-team. Everything is written by the session that owns it, but point the
+script at a scratch project if that bothers you. If it dies between the two
+rename steps, A is left with a `-renamed-<suffix>` label; set it back by hand.
+
+Before and after the `daily_plans` block, each session deletes every row it owns
+on either sentinel date, in any team — not just the row it wrote. The wider
+sweep matters because the rows that need collecting are the ones a *broken*
+policy created: a forged row lands under B's uuid, so only B's session can
+remove it, and a row that got moved into the foreign team is no longer found by
+any query pinned to A's own team. A run that dies mid-block leaves those rows
+behind; the next run's opening sweep takes them. If one survives even that, the
+two refused inserts now report the resulting `409` as a failure instead of
+counting it as proof the policy held.
 
 ## Open questions left after LEO-282/283
 

@@ -484,9 +484,10 @@ async function readMembers(config: AppConfig, provider: TeamSessionProvider, fal
 
 /**
  * Upload today's plan snapshot when it differs from what we last sent. One row
- * per day, keyed by the plan's own date, so a stale plan (yesterday's, because
- * today's run hasn't happened) is pushed under yesterday and the teammate's
- * view says so rather than showing it as today's.
+ * per day, keyed by the plan's own date — always today's, because the snapshot
+ * is today's plan or nothing (LEO-309). A day whose plan has not run pushes
+ * nothing, rather than republishing yesterday's rows under today's date; the
+ * teammate keeps seeing yesterday's row, which `pullTeammatePlans` flags.
  */
 async function pushTodayPlan(
   config: AppConfig,
@@ -498,7 +499,16 @@ async function pushTodayPlan(
   if (!snapshot || !isPlanDate(snapshot.date)) return 0;
 
   const payload = { generated_at: snapshot.generated_at, todos: snapshot.todos, feedback: snapshot.feedback };
-  const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  // `generated_at` is shipped but deliberately left out of the dedupe key: one
+  // run stamps it twice (`writeLatestWorkflowOutput` and
+  // `writeWorkflowDetailCache` each call `new Date()`), so the same plan carries
+  // two timestamps a few ms apart, and the evening switch from the pointer to
+  // the detail cache flipped the hash and bought an extra upsert every night.
+  // Making the two writers share one timestamp would fix today's pair and leave
+  // the next writer free to break it again; the question this key answers is
+  // "does what the teammate sees differ?", and that is the rows and their
+  // states. A rerun that produces a byte-identical list is not news.
+  const hash = crypto.createHash('sha256').update(JSON.stringify({ todos: snapshot.todos, feedback: snapshot.feedback })).digest('hex');
   if (state.pushedPlans[snapshot.date] === hash) return 0;
 
   assertOwnedBySelf(session, session.userId);

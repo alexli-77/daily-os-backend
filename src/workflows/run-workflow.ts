@@ -2,7 +2,7 @@ import type { AppConfig, WorkflowName } from '../config/schema.js';
 import { runAgent } from '../agent/index.js';
 import { collectEvidence } from './evidence.js';
 import { todayInTimezone } from '../utils/date.js';
-import { appendDailyMemory, loadMemory, readLatestWorkflowOutput, writeLatestWorkflowOutput, writeWorkflowDetailCache } from '../storage/memory.js';
+import { appendDailyMemory, loadMemory, readDailyPlanOutput, writeLatestWorkflowOutput, writeWorkflowDetailCache } from '../storage/memory.js';
 import { sendFeishuCard, sendFeishuMessage } from '../connectors/lark-cli.js';
 import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftCard } from '../progress/sync-drift.js';
 import { buildDailyPlanTable, buildWorkflowEvidenceTrace, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, parseDailyPlanTodoPlan } from './summary.js';
@@ -148,12 +148,18 @@ export async function runWorkflowDetailed(
 
 /**
  * LEO-232 — recover today's daily_plan todos (with candidateId/text/rank) from
- * the latest persisted workflow output. Returns null when the most recent output
- * is not today's daily_plan or is not the LEO-209 todo JSON.
+ * the persisted workflow output. Returns null when that date ran no daily_plan
+ * or its output is not the LEO-209 todo JSON.
+ *
+ * LEO-309: the lookup is by date through `readDailyPlanOutput`, not "is the
+ * latest output a plan?". A rerun of the review — or any workflow the user
+ * triggered between the two — would otherwise have moved the pointer off the
+ * plan, and the review that exists to reconcile against the morning list would
+ * report there was no list to reconcile against.
  */
 function loadTodayPlanTodos(config: AppConfig, date: string): Array<{ rank: number; text: string; candidateId: string }> | null {
-  const latest = readLatestWorkflowOutput(config);
-  if (!latest || latest.workflow !== 'daily_plan' || latest.date !== date) return null;
+  const latest = readDailyPlanOutput(config, date);
+  if (!latest) return null;
   const plan = parseDailyPlanTodoPlan(latest.content);
   return plan && plan.todos.length > 0 ? plan.todos : null;
 }

@@ -1349,13 +1349,15 @@ function readRhythmState(config: AppConfig): Record<string, unknown> {
 /**
  * Today's plan, as data.
  *
- * Deliberately the same three calls `renderPlanColumn` makes, in the same
- * order — the point is that the web page and the native client cannot drift,
- * so this reuses the extraction rather than re-implementing it.
+ * Deliberately the same snapshot `renderPlanColumn` renders — the point is that
+ * the web page and the native client cannot drift, so this reuses the builder
+ * rather than re-implementing it.
  *
- * `stale` is reported rather than hidden: a plan from yesterday is still the
- * most recent plan, and silently showing it as today's is how someone works a
- * day behind without noticing.
+ * `stale` is always false and stays on the wire anyway: the snapshot is today's
+ * plan or nothing (LEO-309), so there is no longer a day-behind plan to flag,
+ * but the Mac client decodes the field as a required Bool and dropping it would
+ * fail the whole response. Sent as a constant rather than as a comparison that
+ * can only come out false.
  */
 function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   const env = readEnvFile(options.envPath);
@@ -1366,7 +1368,7 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, today };
   return {
     ok: true,
-    plan: { date: snapshot.date, workflow: 'daily_plan', stale: Boolean(snapshot.date && snapshot.date !== today), generated_at: snapshot.generated_at },
+    plan: { date: snapshot.date, workflow: 'daily_plan', stale: false, generated_at: snapshot.generated_at },
     todos: snapshot.todos,
     feedback: snapshot.feedback,
     today,

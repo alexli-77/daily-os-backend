@@ -323,6 +323,7 @@ async function main(): Promise<void> {
   const cycleFileModule = await import('../../src/cycles/file.js');
   const memory = await import('../../src/storage/memory.js');
   const feedback = await import('../../src/todo/feedback.js');
+  const todayPlan = await import('../../src/todo/today-plan.js');
   const { todayInTimezone, addDays } = await import('../../src/utils/date.js');
 
   const config = loadConfig('config/config.yaml');
@@ -594,12 +595,10 @@ async function main(): Promise<void> {
     });
 
     // My own plan: what the morning run wrote, plus one row I already ticked.
-    memory.writeLatestWorkflowOutput(
-      config,
-      'daily_plan',
-      today,
-      JSON.stringify({ todos: [{ rank: 1, text: '我的第一件事', candidateId: 'linear:LEO-1' }, { rank: 2, text: '第二件', candidateId: 'inbox:abc' }] }),
-    );
+    const myPlanContent = JSON.stringify({
+      todos: [{ rank: 1, text: '我的第一件事', candidateId: 'linear:LEO-1' }, { rank: 2, text: '第二件', candidateId: 'inbox:abc' }],
+    });
+    memory.writeLatestWorkflowOutput(config, 'daily_plan', today, myPlanContent);
     feedback.recordTodoFeedback(config, { date: today, event: 'complete', candidateId: 'linear:LEO-1', rank: 1 });
 
     const stub = makeStub({ rows: [], plans: [matePlan(today, '企鹅今天的事')] });
@@ -625,6 +624,36 @@ async function main(): Promise<void> {
     const idle = await sync.syncTeamOnce(config);
     check('an unchanged plan is not re-uploaded', idle.plansPushed === 0 && planPushes(stub).length === 0, JSON.stringify(stub.calls));
     check('an unchanged remote fetches no plan payloads', idle.plansPulled === 0 && planBodyRequests(stub).length === 0, JSON.stringify(planBodyRequests(stub)));
+
+    // One run stamps `generated_at` twice — `writeLatestWorkflowOutput` and
+    // `writeWorkflowDetailCache` each call `new Date()` — so the pointer copy
+    // and the cache copy of the *same* plan disagree by a few ms. When the
+    // 21:30 review takes the pointer, the snapshot falls back to the cache and
+    // the plan arrives carrying the other timestamp. Identical rows, identical
+    // states, and under a hash that included `generated_at`, a second upsert
+    // every single night. The spin makes the two stamps provably differ, so a
+    // hash that regressed cannot pass this by landing in the same millisecond.
+    while (Date.now() === Date.parse(memory.readLatestWorkflowOutput(config)?.generated_at || '')) {
+      /* spin to the next millisecond */
+    }
+    memory.writeWorkflowDetailCache(config, 'daily_plan', today, myPlanContent);
+    memory.writeLatestWorkflowOutput(config, 'daily_review', today, '## 今日回顾');
+    stub.calls.length = 0;
+    const afterReview = await sync.syncTeamOnce(config);
+    // Guard against the vacuous pass: "pushed nothing" is only the right answer
+    // while there is still a plan there to push.
+    const afterReviewSnapshot = todayPlan.buildTodayPlanSnapshot(config);
+    check(
+      'the review moved the snapshot onto the cache copy, timestamp and all',
+      afterReviewSnapshot?.todos.some((todo) => todo.candidateId === 'linear:LEO-1') === true &&
+        afterReviewSnapshot?.generated_at !== push?.body?.[0]?.payload?.generated_at,
+      JSON.stringify({ was: push?.body?.[0]?.payload?.generated_at, now: afterReviewSnapshot?.generated_at }),
+    );
+    check(
+      'and an unchanged plan is still not re-uploaded, so the review costs no upsert',
+      afterReview.plansPushed === 0 && planPushes(stub).length === 0,
+      JSON.stringify(planPushes(stub).map((call) => call.body?.[0]?.payload?.generated_at)),
+    );
 
     // Ticking a row is a change worth pushing: that is the whole point.
     feedback.recordTodoFeedback(config, { date: today, event: 'defer', candidateId: 'inbox:abc', rank: 2 });
