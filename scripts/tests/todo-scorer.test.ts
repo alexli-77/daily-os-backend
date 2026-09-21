@@ -344,22 +344,97 @@ test('OKR-linked candidate scores higher than a Feishu weekly-only hit', () => {
 
 test('the OKR index is read from the vault at memory.repository_path, not from the process cwd', () => {
   withVault(VAULT_KR_ROW, (vault) => {
-    // Matched by description, not by id: the title never names O5-KR2, so only a
-    // KR whose `description` column was really parsed out of <vault>/10_OKR can
-    // link it. Asserting through `normalizeCandidates` keeps loadOkrIndex private
-    // (LEO-209 boundary) while still pinning the root resolution — under the old
-    // cwd-only root this workdir has no scaffold, so the link disappears.
+    // `O5-KR2` exists only in the vault fixture — the repo scaffold stops at
+    // O2-KR2 — so a link to it can only have come from <vault>/10_OKR. The
+    // second title names `O1-KR1`, which exists only in the *scaffold*: it must
+    // NOT link, or the root was never switched, just widened. Asserting through
+    // `normalizeCandidates` keeps loadOkrIndex private (LEO-209 boundary).
     const candidates = normalizeCandidates({
       config: { memory: { repository_path: vault } } as AppConfig,
       evidence: {
         generated_at: NOW.toISOString(),
         date: DATE,
-        sources: { vault_scan: { state: 'available', data: { candidates: [{ path: 'p.md', title: 'Publish the weekly digest 初稿' }] } } },
+        sources: {
+          vault_scan: {
+            state: 'available',
+            data: {
+              candidates: [
+                { path: 'a.md', title: '推进 O5-KR2 的周报' },
+                { path: 'b.md', title: '推进 O1-KR1 的周报' },
+              ],
+            },
+          },
+        },
       },
       date: DATE,
       now: NOW,
     });
-    assert.equal(candidates[0].okrKrId, 'O5-KR2', 'the vault KR description answered for a title that never names its id');
+    const vaultId = candidates.find((c) => c.title.includes('O5-KR2'));
+    const scaffoldId = candidates.find((c) => c.title.includes('O1-KR1'));
+    assert.equal(vaultId?.okrKrId, 'O5-KR2', 'the vault KR answered');
+    assert.equal(scaffoldId?.okrKrId, undefined, 'the repo scaffold is not consulted once a vault resolves');
+  });
+});
+
+// --- LEO-318: explicit ids only --------------------------------------------
+
+test('a title that merely echoes a KR description does not link to it', () => {
+  // The exact shape that broke: the KR reads 每周 4 次 30 分钟补强训练 (badminton),
+  // the candidate is English listening practice. Under the old 6-character
+  // description prefix (每周4次30, punctuation stripped) this collected the full
+  // okrLinked weight for an unrelated task.
+  withVault('| O5-KR2 | 每周 4 次 30 分钟补强训练 | 8 次 | 2 次 | 25% | 2026-09-01 |', (vault) => {
+    const candidates = normalizeCandidates({
+      config: { memory: { repository_path: vault } } as AppConfig,
+      evidence: {
+        generated_at: NOW.toISOString(),
+        date: DATE,
+        sources: {
+          vault_scan: {
+            state: 'available',
+            data: { candidates: [{ path: 'p.md', title: '每周 4 次 30 分钟英语听力练习' }] },
+          },
+        },
+      },
+      date: DATE,
+      now: NOW,
+    });
+    assert.equal(candidates[0].okrKrId, undefined, 'no link without the id');
+    assert.equal(scoreCandidate(candidates[0], DEFAULT_SCORER_WEIGHTS, NOW).breakdown.okr, undefined, 'and no okrLinked points');
+  });
+});
+
+test('an em dash in a real KR description does not disqualify it', () => {
+  // `includes('—')` used to sit beside `^todo` in the placeholder filter and
+  // dropped any hand-written description containing one — silently.
+  withVault('| O5-KR2 | 每周 4 次补强训练 —— 发接发与前三拍 | 8 次 | 2 次 | 25% | 2026-09-01 |', (vault) => {
+    const candidates = normalizeCandidates({
+      config: { memory: { repository_path: vault } } as AppConfig,
+      evidence: {
+        generated_at: NOW.toISOString(),
+        date: DATE,
+        sources: { vault_scan: { state: 'available', data: { candidates: [{ path: 'p.md', title: '推进 O5-KR2' }] } } },
+      },
+      date: DATE,
+      now: NOW,
+    });
+    assert.equal(candidates[0].okrKrId, 'O5-KR2', 'the em-dashed KR is still in the index');
+  });
+});
+
+test('a scaffold placeholder row is still skipped', () => {
+  withVault('| O5-KR2 | TODO — measurable key result | TODO target | TODO current | 0% | 2026-07-16 |', (vault) => {
+    const candidates = normalizeCandidates({
+      config: { memory: { repository_path: vault } } as AppConfig,
+      evidence: {
+        generated_at: NOW.toISOString(),
+        date: DATE,
+        sources: { vault_scan: { state: 'available', data: { candidates: [{ path: 'p.md', title: '推进 O5-KR2' }] } } },
+      },
+      date: DATE,
+      now: NOW,
+    });
+    assert.equal(candidates[0].okrKrId, undefined, 'an unfilled scaffold row is not something to link to');
   });
 });
 

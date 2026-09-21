@@ -448,15 +448,13 @@ function titlesSimilar(left: string, right: string): boolean {
 
 // --- OKR (lightweight local parse) -----------------------------------------
 
-interface OkrKr {
-  id: string;
-  description: string;
-}
-
 /**
  * Parse the OKR markdown files into a flat list of real (non-placeholder) key
- * results. Kept private to the scorer per the LEO-209 boundary — the dedicated
- * OKR loader lives elsewhere and is off-limits.
+ * result **ids**. Kept private to the scorer per the LEO-209 boundary — the
+ * dedicated OKR loader lives elsewhere and is off-limits.
+ *
+ * Ids only, since LEO-318. The rows used to carry their `description` column too,
+ * for a fuzzy title match that no longer exists — see `enrichOkr`.
  *
  * LEO-317: the root used to be the hardcoded relative `memory-vault/default/10_OKR`,
  * which `path.resolve` anchors at `process.cwd()`. The packaged service runs with
@@ -465,47 +463,67 @@ interface OkrKr {
  * first — same two-step as `okrDir()` in src/ui/okr-lite.ts — and keep the repo
  * scaffold as the fallback for a dev checkout / an unconfigured vault.
  */
-function loadOkrIndex(repositoryPath?: string): OkrKr[] {
+function loadOkrIndex(repositoryPath?: string): string[] {
   try {
     const vault = (repositoryPath || '').trim();
     const fromVault = vault ? path.resolve(vault, '10_OKR') : '';
     const dir = fromVault && fs.existsSync(fromVault) ? fromVault : path.resolve('memory-vault', 'default', '10_OKR');
     if (!fs.existsSync(dir)) return [];
     const files = fs.readdirSync(dir).filter((name) => name.endsWith('.md'));
-    const krs: OkrKr[] = [];
+    const ids: string[] = [];
     for (const file of files) {
       const content = fs.readFileSync(path.join(dir, file), 'utf8');
       for (const line of content.split('\n')) {
         // KR table rows: | O1-KR1 | Description | ... |
         const match = line.match(/^\s*\|\s*([A-Z]\d+-KR\d+)\s*\|\s*([^|]+?)\s*\|/);
         if (!match) continue;
-        const id = match[1].trim();
         const description = match[2].trim();
-        if (/^todo\b/i.test(description) || description.includes('—')) continue; // skip scaffold placeholders
-        krs.push({ id, description });
+        // Scaffold rows read `TODO — measurable key result`, and `^todo` already
+        // catches every one of them. The `includes('—')` half that used to sit
+        // beside it caught real key results instead: an em dash in a hand-written
+        // description is ordinary, and a KR dropped here is dropped silently —
+        // no error, no log, it simply never links (LEO-318).
+        if (/^todo\b/i.test(description)) continue;
+        ids.push(match[1].trim());
       }
     }
-    return krs;
+    return ids;
   } catch {
     return [];
   }
 }
 
-function enrichOkr(candidate: TodoCandidate, okrIndex: OkrKr[]): TodoCandidate {
+/**
+ * Link a candidate to a key result, by **explicit id only**.
+ *
+ * There used to be a second, fuzzy arm: the first 6 characters of the KR's
+ * description, punctuation stripped, matched anywhere in the title. It never ran
+ * in production — the index was always empty (LEO-317) — and the moment that was
+ * fixed it started mislabelling. Against the real vault, all four of these link
+ * to the wrong key result and collect the full `okrLinked` weight:
+ *
+ *     每周 4 次 30 分钟英语听力练习  → O5-KR2 (每周 4 次 30 分钟补强训练)
+ *     读完 1 本书并写读后感          → O4-KR2 (读完 1 本书并沉淀 1 篇笔记)
+ *     living cost 预算表更新         → O7-KR1 (living-docs 人脉网)
+ *     整理 2026 Q3 的报销单          → O2-KR1 (2026 Q3 家庭财富报告)
+ *
+ * Six characters is not a similarity measure. With whitespace and punctuation
+ * removed, a cadence like "每周 4 次 30 分钟" reads identically in any domain,
+ * and short English or numeric prefixes (`living`, `2026q3`) match anything that
+ * merely mentions them.
+ *
+ * `okrLinked` is +12, which is enough to reorder a morning. Missing a link costs
+ * a few points; inventing one puts an unrelated task at the top of the day with
+ * no visible reason — the harder of the two to debug. So: no guessing. A title
+ * that means to name its key result can name it (LEO-318).
+ */
+function enrichOkr(candidate: TodoCandidate, okrIds: string[]): TodoCandidate {
   if (candidate.okrKrId) return candidate;
   const haystack = candidate.title.toLowerCase();
-  const stripped = haystack.replace(/[\s\p{P}\p{S}]/gu, '');
-  for (const kr of okrIndex) {
-    if (haystack.includes(kr.id.toLowerCase())) return { ...candidate, okrKrId: kr.id };
-    const term = significantTerm(kr.description);
-    if (term && stripped.includes(term)) return { ...candidate, okrKrId: kr.id };
+  for (const id of okrIds) {
+    if (haystack.includes(id.toLowerCase())) return { ...candidate, okrKrId: id };
   }
   return candidate;
-}
-
-function significantTerm(description: string): string | null {
-  const cleaned = description.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
-  return cleaned.length >= 4 ? cleaned.slice(0, 6) : null;
 }
 
 // --- helpers ---------------------------------------------------------------
