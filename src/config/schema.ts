@@ -132,12 +132,16 @@ export const AppConfigSchema = z.object({
   llm: z.object({
     provider: z.enum(['codex', 'openai', 'claude', 'anthropic']).default('codex'),
     model: z.string().default('default'),
-    // Upper bound on a single agent run. daily-os #199: the old hard-coded 180s
-    // silently SIGTERM'd long-context generations, so a legitimately slow run
-    // "necessarily failed" with no signal. Generous default; set 0 to disable the
-    // cap entirely. A run that hits this now throws a message naming the provider,
-    // model and prompt size instead of a bare timeout string.
-    timeout_ms: z.number().int().nonnegative().default(600000),
+    // Upper bound on a single agent *attempt* (not the whole run). Fail fast:
+    // a `claude` CLI under launchd is bimodal — it answers within a minute or two
+    // or hangs forever (#199) — so a short cap plus a retry (see max_attempts)
+    // catches a hang early and re-rolls, instead of burning ten minutes before
+    // failing. Set 0 to disable the cap. A hit throws a message naming the
+    // provider/model/prompt size; `runAgent` retries it up to max_attempts.
+    timeout_ms: z.number().int().nonnegative().default(180000),
+    // How many attempts before giving up. 2 = one retry. The retry only fires on
+    // a per-attempt timeout (a hang), not on real errors. Set 1 to disable.
+    max_attempts: z.number().int().min(1).max(5).default(2),
   }),
   billing: z
     .object({

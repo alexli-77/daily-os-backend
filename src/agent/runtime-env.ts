@@ -158,9 +158,29 @@ export function cliUnavailableMessage(provider: string, bin: string, probe: CliP
   return lines.join('\n');
 }
 
-/** Per-run upper bound in ms; 0 means no cap. */
+/** Per-*attempt* upper bound in ms; 0 means no cap. */
 export function resolveAgentTimeoutMs(config: AppConfig): number {
   return config.llm.timeout_ms;
+}
+
+/** How many times to run one agent call before giving up. At least 1. */
+export function resolveMaxAttempts(config: AppConfig): number {
+  return Math.max(1, config.llm.max_attempts);
+}
+
+/**
+ * Thrown when an attempt hit the per-attempt timeout (the CLI hung), as opposed
+ * to answering with an error. `runAgent` retries only this — a hung `claude`
+ * under launchd is bimodal (it either answers in a minute or never), so a fresh
+ * attempt has a real chance where waiting longer does not. Real errors (bad
+ * model, spent budget, missing key) are not retried: they would fail the same
+ * way every time and only burn budget.
+ */
+export class AgentTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentTimeoutError';
+  }
 }
 
 /** A timeout message that says which provider/model/prompt size timed out, and why. */

@@ -3,7 +3,7 @@ import { runAnthropicAgent } from './anthropic-agent.js';
 import { runClaudeAgent } from './claude-agent.js';
 import { runCodexAgent } from './codex-agent.js';
 import { runOpenAiAgent } from './openai-agent.js';
-import { assertCliProviderUsable } from './runtime-env.js';
+import { AgentTimeoutError, assertCliProviderUsable, resolveMaxAttempts } from './runtime-env.js';
 
 export async function runAgent(input: AgentInput): Promise<string> {
   const provider = input.config.llm.provider;
@@ -30,6 +30,26 @@ export async function runAgent(input: AgentInput): Promise<string> {
       '[provider] claude CLI（headless）走订阅 Agent SDK 额度（2026-05 政策，Pro $20/月，暂未生效前仍计订阅额度）。注意：额度按用户计，客户实例须用客户自己的账号或 API key。',
     );
   }
+  // Fail fast, then retry. A per-attempt timeout (llm.timeout_ms) turns a hang
+  // into a quick failure; a hung `claude` under launchd is bimodal — answers in a
+  // minute or never — so a fresh attempt has a real chance where waiting longer
+  // does not (#199). Only a timeout is retried: a real error (bad model, spent
+  // budget, missing key) would fail identically and only burn budget/quota.
+  const maxAttempts = resolveMaxAttempts(input.config);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await dispatchAgent(provider, input);
+    } catch (error) {
+      if (error instanceof AgentTimeoutError && attempt < maxAttempts) {
+        console.warn(`[agent] ${provider} 第 ${attempt}/${maxAttempts} 次尝试超时，快速失败后立即重试。`);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function dispatchAgent(provider: string, input: AgentInput): Promise<string> {
   if (provider === 'anthropic') return runAnthropicAgent(input);
   if (provider === 'openai') return runOpenAiAgent(input);
   if (provider === 'claude') return runClaudeAgent(input);

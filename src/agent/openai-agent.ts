@@ -8,7 +8,7 @@ import { billingFromConfig, checkBudget, estimateCostUsd, recordUsage } from './
 import { bundledAsset } from '../utils/install-root.js';
 import { fitEvidenceToBudget } from '../workflows/evidence-budget.js';
 import { renderRhythmPromptSection, resolveDayShape } from '../user/rhythm.js';
-import { describeAgentTimeout, resolveAgentTimeoutMs } from './runtime-env.js';
+import { AgentTimeoutError, describeAgentTimeout, resolveAgentTimeoutMs } from './runtime-env.js';
 
 export interface AgentInput {
   config: AppConfig;
@@ -47,7 +47,7 @@ export async function runOpenAiAgent(input: AgentInput): Promise<string> {
   } catch (error) {
     const name = error instanceof Error ? error.name : '';
     if (/timeout/i.test(name) || (error instanceof Error && /timed out/i.test(error.message))) {
-      throw new Error(describeAgentTimeout('openai', input.config.llm.model, userPrompt.length, Date.now() - startedAt, timeoutMs));
+      throw new AgentTimeoutError(describeAgentTimeout('openai', input.config.llm.model, userPrompt.length, Date.now() - startedAt, timeoutMs));
     }
     throw error;
   }
