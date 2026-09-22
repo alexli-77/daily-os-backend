@@ -31,11 +31,14 @@ llm:
   # codex / claude 为订阅 CLI，用于程序化调度不合规（Anthropic 2026-02 条款），仅作迁移期回退。
   provider: "codex" # codex | openai | claude | anthropic
   model: "default" # codex/claude: 'default' uses the CLI account's model; openai/anthropic: an API model id (anthropic 默认 claude-sonnet-5)
-  # 单次「尝试」的超时（毫秒）。快速失败：CLI（尤其 claude 在 launchd 后台）要么一两
-  # 分钟内返回、要么永远挂（#199），所以用短超时 + 重试（max_attempts）尽快失败并重跑。
-  # 设 0 关闭上限。
-  timeout_ms: 180000
-  # 一次生成最多尝试几次；2 = 失败后重试一次。只在「尝试超时」时重试，真错误不重试。
+  # 单次「尝试」的绝对上限（毫秒），所有 provider 生效。这是宽松兜底，不是快速失败机制：
+  # 设得足够大，别误杀正常但慢的大上下文生成。设 0 关闭上限。
+  timeout_ms: 900000
+  # CLI provider（claude/codex）的空闲超时：连续这么久没有任何输出就判为挂起并中止。
+  # claude 在 launchd 后台挂起时不吐任何字节（#199），会被它快速抓到；而正常但慢的生成
+  # 会持续吐 token 不断刷新窗口，因此不管上下文多大都不会被误判。设 0 关闭空闲检测。
+  idle_timeout_ms: 120000
+  # 一次生成最多尝试几次；2 = 失败后重试一次。只在「尝试超时」（挂起）时重试，真错误不重试。
   max_attempts: 2
 
 # 三层预算熔断：每次 LLM 调用前检查累计花费，任一层触顶即抛错并写 data/runtime/budget-alerts.jsonl。

@@ -22,7 +22,27 @@ test('a timed-out command is flagged and says so in stderr', async () => {
   const result = await runCommand('node', ['-e', 'setTimeout(() => {}, 10000)'], { timeoutMs: 300 });
   assert.equal(result.timedOut, true);
   assert.equal(result.ok, false);
-  assert.match(result.stderr, /\[timeout\] killed after 300ms \(SIGTERM\)/);
+  assert.equal(result.timeoutKind, 'total');
+  assert.match(result.stderr, /\[timeout\] killed by total timeout \(SIGTERM\)/);
+});
+
+test('a silent command is killed by the idle timeout', async () => {
+  // Emits nothing, then sleeps well past the idle window — the hang case.
+  const result = await runCommand('node', ['-e', 'setTimeout(() => {}, 10000)'], { idleTimeoutMs: 300 });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.timeoutKind, 'idle');
+  assert.match(result.stderr, /\[timeout\] killed by idle timeout \(SIGTERM\)/);
+});
+
+test('a command that keeps streaming is NOT killed by the idle timeout', async () => {
+  // A heartbeat every 100ms for ~800ms, total far past the 300ms idle window:
+  // each write resets the timer, so a slow-but-working run survives.
+  const script =
+    'let n=0;const t=setInterval(()=>{process.stdout.write("beat ");if(++n>=8){clearInterval(t);process.exit(0);}},100);';
+  const result = await runCommand('node', ['-e', script], { idleTimeoutMs: 300 });
+  assert.equal(result.timedOut, false);
+  assert.equal(result.ok, true);
+  assert.match(result.stdout, /beat/);
 });
 
 test('output produced before the kill is kept alongside the timeout note', async () => {
