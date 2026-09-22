@@ -27,6 +27,43 @@ const strategyAlignment = z
     reference_sources: ['linear', 'vault', 'feishu', 'calendar', 'github'],
   });
 
+// "HH:mm" 24h. The macOS Today timeline decodes these to lay items out across the
+// real work day, so the shape is a contract, not free text.
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+const DEFAULT_WORKING_HOURS = { start: '09:30', end: '18:30' };
+const DEFAULT_MEAL_BLOCKS = [{ label: '午餐', start: '12:00', end: '13:00' }];
+
+// A bad "HH:mm" falls back to the default field rather than throwing the whole
+// config load — same tolerance `normalizeRestDays` gives a stray weekday code.
+const workingHours = z
+  .object({
+    start: z.string().regex(HHMM).catch(DEFAULT_WORKING_HOURS.start),
+    end: z.string().regex(HHMM).catch(DEFAULT_WORKING_HOURS.end),
+  })
+  .catch({ ...DEFAULT_WORKING_HOURS })
+  .default({ ...DEFAULT_WORKING_HOURS });
+
+const mealBlock = z.object({
+  label: z.string(),
+  start: z.string().regex(HHMM),
+  end: z.string().regex(HHMM),
+});
+
+// An entry with a malformed time is dropped, not thrown — one typo in one meal
+// block must not take the morning plan down. `safeParse` per entry is what makes
+// "drop, don't throw" per-item rather than all-or-nothing.
+const mealBlocks = z
+  .array(z.unknown())
+  .transform((entries) =>
+    entries.flatMap((entry) => {
+      const parsed = mealBlock.safeParse(entry);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  )
+  .catch(DEFAULT_MEAL_BLOCKS.map((block) => ({ ...block })))
+  .default(DEFAULT_MEAL_BLOCKS.map((block) => ({ ...block })));
+
 /**
  * The user's weekly rhythm. See `src/user/rhythm.ts` for why this is split into a
  * structured half (here) and a prose half (`rhythm.md` in the memory vault).
@@ -49,12 +86,18 @@ const userRhythm = z
      * be told about, and a hard zero would hide it.
      */
     work_task_cap_on_rest_days: z.number().int().min(0).max(20).default(1),
+    /** The work day the timeline lays items out across. "HH:mm" 24h. */
+    working_hours: workingHours,
+    /** Blocks to keep tasks out of (meals). Invalid entries are dropped. */
+    meal_blocks: mealBlocks,
   })
   .default({
     enabled: true,
     file: 'rhythm.md',
     rest_days: ['SAT', 'SUN'],
     work_task_cap_on_rest_days: 1,
+    working_hours: { ...DEFAULT_WORKING_HOURS },
+    meal_blocks: DEFAULT_MEAL_BLOCKS.map((block) => ({ ...block })),
   });
 
 const feishuProfile = enabled.extend({
