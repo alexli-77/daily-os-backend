@@ -6,7 +6,7 @@ import {
   estimateCostUsd,
   recordUsage,
 } from './token-meter.js';
-import { describeAgentTimeout, resolveAgentTimeoutMs } from './runtime-env.js';
+import { AgentTimeoutError, describeAgentTimeout, resolveAgentTimeoutMs } from './runtime-env.js';
 
 /**
  * Anthropic API-key provider — a first-class programmatic provider that talks to
@@ -82,7 +82,7 @@ export async function runAnthropicAgent(input: AgentInput): Promise<string> {
     });
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(describeAgentTimeout('anthropic', model, userPrompt.length, Date.now() - startedAt, timeoutMs));
+      throw new AgentTimeoutError(describeAgentTimeout('anthropic', model, userPrompt.length, Date.now() - startedAt, timeoutMs));
     }
     throw error;
   } finally {

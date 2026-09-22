@@ -206,6 +206,9 @@ try {
     // refuse by provider name — the first version blocked codex, which was
     // the only provider that had ever worked on the reporting machine.
     'scripts/tests/cli-provider-gate.test.ts',
+    // Fail fast + retry: a hung CLI attempt (short timeout) is retried up to
+    // llm.max_attempts, and only a timeout is retried — a real error is not.
+    'scripts/tests/agent-retry.test.ts',
     // The prompt has a size budget now: the GitHub projection, the per-workflow
     // drops, and the degradation order that replaced a hard 180s timeout.
     'scripts/tests/evidence-budget.test.ts',
