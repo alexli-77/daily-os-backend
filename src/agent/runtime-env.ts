@@ -158,9 +158,19 @@ export function cliUnavailableMessage(provider: string, bin: string, probe: CliP
   return lines.join('\n');
 }
 
-/** Per-*attempt* upper bound in ms; 0 means no cap. */
+/** Absolute per-*attempt* upper bound in ms (backstop); 0 means no cap. */
 export function resolveAgentTimeoutMs(config: AppConfig): number {
   return config.llm.timeout_ms;
+}
+
+/**
+ * Idle (no-output) window in ms for CLI providers; 0 means no idle detection.
+ *
+ * This is the fast-fail knob: a hung CLI stops emitting and trips it quickly,
+ * while a slow-but-streaming run resets it and is never misjudged.
+ */
+export function resolveIdleTimeoutMs(config: AppConfig): number {
+  return config.llm.idle_timeout_ms;
 }
 
 /** How many times to run one agent call before giving up. At least 1. */
@@ -190,12 +200,17 @@ export function describeAgentTimeout(
   promptChars: number,
   elapsedMs: number,
   timeoutMs: number,
+  kind: 'idle' | 'total' = 'total',
 ): string {
   const waited = Math.round(elapsedMs / 1000);
   const cap = Math.round(timeoutMs / 1000);
   const tail =
     isCliProvider(provider) && isHeadlessLaunchd()
       ? `在 launchd 后台环境里这个 CLI 可能根本不返回（daily-os #199）。先确认另一个 CLI provider 是否正常——它们的表现并不一致——否则改用 API-key provider（anthropic/openai）。`
-      : '如果这是正常的长耗时生成，可调大 config 里的 llm.timeout_ms（设 0 可完全关闭上限），或后续简化 prompt 长度。';
-  return `${provider} 运行超过 ${cap}s 被中止（已等待 ${waited}s）。provider=${provider} model=${model || 'default'} prompt≈${promptChars} 字符。${tail}`;
+      : '如果这是正常的长耗时生成，可调大 config 里的 llm.idle_timeout_ms / llm.timeout_ms（设 0 可关闭对应上限），或后续简化 prompt 长度。';
+  const cause =
+    kind === 'idle'
+      ? `无输出超过 ${cap}s 被判为挂起并中止（已运行 ${waited}s）`
+      : `运行超过 ${cap}s 被中止（已等待 ${waited}s）`;
+  return `${provider} ${cause}。provider=${provider} model=${model || 'default'} prompt≈${promptChars} 字符。${tail}`;
 }
