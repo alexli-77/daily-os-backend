@@ -1341,6 +1341,11 @@ function readRhythmState(config: AppConfig): Record<string, unknown> {
     isTemplate: rhythmNotesAreTemplate(notes),
     defaultMd: defaultRhythmMarkdown(),
     restDays: normalizeRestDays(config.user.rhythm.rest_days),
+    // The macOS Today timeline reads these to lay items across the work day and
+    // insert meals. Exposed under the config's own snake_case names so the
+    // client decodes one canonical shape (`state.rhythm.working_hours` etc.).
+    working_hours: config.user.rhythm.working_hours,
+    meal_blocks: config.user.rhythm.meal_blocks,
     today: resolveDayShape(config, today),
     tomorrow: resolveDayShape(config, addDays(today, 1)),
   };

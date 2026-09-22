@@ -389,6 +389,81 @@ test('a missing rhythm file reads as empty rather than throwing', () => {
   assert.equal(readRhythmNotes(config), '');
 });
 
+// --- working hours + meal blocks (LEO-321) ----------------------------------
+
+test('working hours and meal blocks materialize to defaults when absent', () => {
+  // A config.yaml written before this feature has neither key — it must still
+  // come out of the loader with both, or the timeline has nothing to lay against.
+  const config = tempConfig((raw) => {
+    delete raw.user.rhythm.working_hours;
+    delete raw.user.rhythm.meal_blocks;
+  });
+  assert.deepEqual(config.user.rhythm.working_hours, { start: '09:30', end: '18:30' });
+  assert.deepEqual(config.user.rhythm.meal_blocks, [{ label: '午餐', start: '12:00', end: '13:00' }]);
+});
+
+test('a whole missing user.rhythm still materializes working hours and meals', () => {
+  const config = tempConfig((raw) => {
+    raw.user = { display_name: 'U', timezone: 'UTC' };
+  });
+  assert.deepEqual(config.user.rhythm.working_hours, { start: '09:30', end: '18:30' });
+  assert.deepEqual(config.user.rhythm.meal_blocks, [{ label: '午餐', start: '12:00', end: '13:00' }]);
+});
+
+test('valid HH:mm working hours and meal blocks parse through unchanged', () => {
+  const config = tempConfig((raw) => {
+    raw.user.rhythm.working_hours = { start: '08:00', end: '17:30' };
+    raw.user.rhythm.meal_blocks = [
+      { label: '早餐', start: '07:30', end: '08:00' },
+      { label: '午餐', start: '12:30', end: '13:30' },
+    ];
+  });
+  assert.deepEqual(config.user.rhythm.working_hours, { start: '08:00', end: '17:30' });
+  assert.equal(config.user.rhythm.meal_blocks.length, 2);
+  assert.deepEqual(config.user.rhythm.meal_blocks[0], { label: '早餐', start: '07:30', end: '08:00' });
+});
+
+test('a malformed working-hours time falls back to the default field, it does not throw', () => {
+  // Fail safe like normalizeRestDays: drop the bad value, keep the good one, and
+  // never take the whole config load down over one stray string.
+  const config = tempConfig((raw) => {
+    raw.user.rhythm.working_hours = { start: '25:00', end: '17:00' };
+  });
+  assert.deepEqual(config.user.rhythm.working_hours, { start: '09:30', end: '17:00' });
+});
+
+test('a meal block with a malformed time is dropped, not thrown', () => {
+  const config = tempConfig((raw) => {
+    raw.user.rhythm.meal_blocks = [
+      { label: '午餐', start: '12:00', end: '13:00' },
+      { label: '晚餐', start: '99:99', end: '19:00' },
+    ];
+  });
+  assert.deepEqual(config.user.rhythm.meal_blocks, [{ label: '午餐', start: '12:00', end: '13:00' }]);
+});
+
+test('the resolved day shape carries working hours and meal blocks', () => {
+  const config = tempConfig();
+  const shape = resolveDayShape(config, TUESDAY);
+  assert.deepEqual(shape.workingHours, { start: '09:30', end: '18:30' });
+  assert.deepEqual(shape.mealBlocks, [{ label: '午餐', start: '12:00', end: '13:00' }]);
+});
+
+test('the prompt carries working-hours and meal guidance when rhythm is enabled', () => {
+  const config = tempConfig();
+  const section = renderRhythmPromptSection(config, TUESDAY);
+  assert.match(section, /工作时间 09:30–18:30/);
+  assert.match(section, /12:00–13:00 午餐/);
+  assert.match(section, /不要从早上一路堆到中午/);
+});
+
+test('rhythm off means no working-hours guidance in the prompt', () => {
+  const config = tempConfig((raw) => {
+    raw.user = { ...raw.user, rhythm: { enabled: false } };
+  });
+  assert.equal(renderRhythmPromptSection(config, TUESDAY), '');
+});
+
 async function run(): Promise<void> {
   let passed = 0;
   let failed = 0;

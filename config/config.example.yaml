@@ -16,6 +16,15 @@ user:
     # 休息日最多留几条工作来源（Linear / 每周要务）的任务。
     # 逾期或当天到期的不受这个上限压制；手记 todo 不算工作来源。
     work_task_cap_on_rest_days: 1
+    # 工作时间（HH:mm，24h）。macOS Today 时间线据此把任务铺在真实工作日里。
+    working_hours:
+      start: "09:30"
+      end: "18:30"
+    # 用餐等不排任务的时段（HH:mm）。格式非法的条目会被丢弃，不影响其余配置。
+    meal_blocks:
+      - label: "午餐"
+        start: "12:00"
+        end: "13:00"
 
 llm:
   # 程序化调度请使用 API-key provider（anthropic / openai）。

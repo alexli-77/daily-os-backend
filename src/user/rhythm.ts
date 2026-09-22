@@ -73,6 +73,22 @@ const DEFAULT_RHYTHM_MD = `# 作息
 -
 `;
 
+/** The work day the timeline lays items out across. "HH:mm" 24h. */
+export interface WorkingHours {
+  start: string;
+  end: string;
+}
+
+/** A block to keep tasks out of (a meal). "HH:mm" 24h. */
+export interface MealBlock {
+  label: string;
+  start: string;
+  end: string;
+}
+
+export const DEFAULT_WORKING_HOURS: WorkingHours = { start: '09:30', end: '18:30' };
+export const DEFAULT_MEAL_BLOCKS: MealBlock[] = [{ label: '午餐', start: '12:00', end: '13:00' }];
+
 /** A weekday's resolved shape — the single answer both the prompt and the scorer read. */
 export interface DayShape {
   date: string;
@@ -89,6 +105,10 @@ export interface DayShape {
   workTaskCap: number | null;
   /** Whether rhythm handling is switched on at all. */
   enabled: boolean;
+  /** The user's working hours, so the timeline knows the day's bounds. */
+  workingHours: WorkingHours;
+  /** Blocks the plan should not schedule tasks into (meals). */
+  mealBlocks: MealBlock[];
 }
 
 export interface RhythmFiles {
@@ -172,6 +192,10 @@ export function resolveDayShape(config: AppConfig, date: string): DayShape {
     dayTypeLabel: isRestDay ? '休息日' : '工作日',
     workTaskCap: isRestDay ? Math.max(0, rhythm?.work_task_cap_on_rest_days ?? 1) : null,
     enabled,
+    // Materialised by the schema for anything through `loadConfig`; the `??`
+    // covers the hand-built config objects `scoreCandidate` is also reached with.
+    workingHours: rhythm?.working_hours ?? DEFAULT_WORKING_HOURS,
+    mealBlocks: rhythm?.meal_blocks ?? DEFAULT_MEAL_BLOCKS,
   };
 }
 
@@ -206,6 +230,12 @@ export function renderRhythmPromptSection(config: AppConfig, date: string): stri
   const lines: string[] = [
     `今天是 ${shape.weekdayLabel}，属于${shape.dayTypeLabel}。`,
   ];
+  // Soft guidance so the timeline lays items across the real work day instead of
+  // piling everything from the start. Bounds only — the model still decides order.
+  const meals = shape.mealBlocks.map((block) => `${block.start}–${block.end} ${block.label}`).join('、');
+  lines.push(
+    `工作时间 ${shape.workingHours.start}–${shape.workingHours.end}${meals ? `；${meals}` : ''}。把任务安排在工作时间内，不要排进上面这些用餐时段；条目之间留合理间歇，不要从早上一路堆到中午。`,
+  );
   if (shape.isRestDay) {
     lines.push(
       shape.workTaskCap === 0
