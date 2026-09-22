@@ -132,15 +132,22 @@ export const AppConfigSchema = z.object({
   llm: z.object({
     provider: z.enum(['codex', 'openai', 'claude', 'anthropic']).default('codex'),
     model: z.string().default('default'),
-    // Upper bound on a single agent *attempt* (not the whole run). Fail fast:
-    // a `claude` CLI under launchd is bimodal — it answers within a minute or two
-    // or hangs forever (#199) — so a short cap plus a retry (see max_attempts)
-    // catches a hang early and re-rolls, instead of burning ten minutes before
-    // failing. Set 0 to disable the cap. A hit throws a message naming the
-    // provider/model/prompt size; `runAgent` retries it up to max_attempts.
-    timeout_ms: z.number().int().nonnegative().default(180000),
+    // Absolute upper bound on a single agent *attempt* (not the whole run), for
+    // every provider. This is a generous backstop, NOT the fast-fail mechanism:
+    // set high enough that a slow-but-working run (a large-context generation can
+    // legitimately take minutes) never trips it. Fast hang detection is
+    // idle_timeout_ms below. Set 0 to disable the ceiling.
+    timeout_ms: z.number().int().nonnegative().default(900000),
+    // Fast-fail for CLI providers (claude/codex): kill the attempt when the CLI
+    // produces NO output for this long. A `claude` CLI hung under launchd emits
+    // nothing (#199) and trips this in ~2min; a slow-but-working run keeps
+    // streaming tokens and resets the window, so it is never misjudged regardless
+    // of how big the context is. Needs a streaming output format (claude-agent
+    // uses stream-json). Set 0 to disable idle detection. Ignored by API
+    // providers (anthropic/openai), which rely on timeout_ms.
+    idle_timeout_ms: z.number().int().nonnegative().default(120000),
     // How many attempts before giving up. 2 = one retry. The retry only fires on
-    // a per-attempt timeout (a hang), not on real errors. Set 1 to disable.
+    // a timeout (idle or absolute — i.e. a hang), not on real errors. Set 1 to disable.
     max_attempts: z.number().int().min(1).max(5).default(2),
   }),
   billing: z
