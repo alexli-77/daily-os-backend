@@ -361,6 +361,10 @@ skills:
   # user-specific paths belong in the skill's own ignored config.yaml, not here.
   enabled: false
   inputs_dir: "./data/memory/skill-inputs"
+  # 是否允许 weekly-review 把要务/复盘写回飞书周报表。默认 false：周期已写本地
+  # 20_CYCLES/*.md，飞书周报表是共享文档，本地优先的部署默认不碰。需要写回飞书时
+  # 设 true 并重启服务。
+  feishu_writeback: false
   registry:
     - id: "weekly-review"
       provider: "auto" # auto | codex | claude

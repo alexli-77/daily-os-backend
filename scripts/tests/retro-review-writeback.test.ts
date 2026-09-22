@@ -89,6 +89,9 @@ async function withStubCli(reviewBehaviour: 'ok' | 'fail', fn: () => Promise<voi
 
   const parsed = yaml.load(fs.readFileSync('config/config.example.yaml', 'utf8')) as Record<string, any>;
   parsed.skills.enabled = true;
+  // This suite exercises the Feishu retro-review write-back, which now defaults
+  // off (skills.feishu_writeback); opt in so the write path is reached.
+  parsed.skills.feishu_writeback = true;
   parsed.skills.registry[0].workdir = dir;
   parsed.skills.registry[0].path = path.join(dir, 'SKILL.md');
   fs.writeFileSync(path.join(dir, 'SKILL.md'), '# stub');

@@ -650,6 +650,12 @@ export const AppConfigSchema = z.object({
     .object({
       enabled: z.boolean().default(false),
       inputs_dir: z.string().default('./data/memory/skill-inputs'),
+      // Whether the weekly-review skill may write back into the Feishu weekly
+      // report table (要务 columns + retro review). Default off: the cycle is
+      // written to local 20_CYCLES markdown regardless (LEO-278), and the Feishu
+      // table is a shared document a local-first setup should not touch unless
+      // explicitly asked. Set true to restore the Feishu write-back.
+      feishu_writeback: z.boolean().default(false),
       registry: z
         .array(
           z.object({
@@ -667,6 +673,7 @@ export const AppConfigSchema = z.object({
     .default({
       enabled: false,
       inputs_dir: './data/memory/skill-inputs',
+      feishu_writeback: false,
       registry: [],
     }),
 });

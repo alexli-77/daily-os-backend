@@ -1599,6 +1599,16 @@ async function testLifeReviewOsBridgeUsesExternalCli(): Promise<void> {
     'utf8',
   );
 
+  // Feishu write-back defaults off: the gate refuses before any CLI call. Assert
+  // that, then opt in for the rest of this bridge test.
+  config.skills.feishu_writeback = false;
+  await assert.rejects(
+    () => prepareLifeReviewOsWriteback({ config, skillId: 'weekly-review', mode: 'weekly' }),
+    /feishu_writeback/,
+    'Feishu write-back must refuse when skills.feishu_writeback is off',
+  );
+  config.skills.feishu_writeback = true;
+
   const preview = await prepareLifeReviewOsWriteback({ config, skillId: 'weekly-review', mode: 'weekly' });
   assert.equal(preview.token, run.runId);
   assert.equal(preview.items[0]?.targetRowLabel, 'KR2 协助 portfolio');

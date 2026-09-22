@@ -96,6 +96,7 @@ export async function prepareLifeReviewOsWriteback(input: {
   mode?: string;
   runId?: string;
 }): Promise<LifeReviewOsWritebackPreview> {
+  assertFeishuWritebackEnabled(input.config);
   const entry = skillEntry(input.config, input.skillId);
   const runId = input.runId || readLatestStoredRunId(input.config, input.skillId, input.mode || 'weekly');
   if (!runId) throw new Error('No recent weekly-review run found. Run `daily-os weekly deep` first.');
@@ -176,7 +177,25 @@ export async function generateCycleReview(config: AppConfig, skillId: string, in
   }
 }
 
+/**
+ * The single gate for every Feishu write the weekly-review skill can make.
+ *
+ * Default off (`skills.feishu_writeback`): the cycle's 要务 and retro already
+ * land in local `20_CYCLES/*.md`, and the Feishu weekly report table is a shared
+ * document a local-first install should not touch unless explicitly re-enabled.
+ * Enforced here rather than at each caller (chat / feishu / command) so no path
+ * can reach the table with it off.
+ */
+function assertFeishuWritebackEnabled(config: AppConfig): void {
+  if (!config.skills.feishu_writeback) {
+    throw new Error(
+      '飞书写回已关闭（config skills.feishu_writeback=false）。要务和复盘已写进本地周期文件（20_CYCLES/*.md）；如需写回飞书周报表，把该项设为 true 并重启服务。',
+    );
+  }
+}
+
 export async function executeLifeReviewOsWriteback(config: AppConfig, skillId: string, runId: string): Promise<LifeReviewOsWritebackResult> {
+  assertFeishuWritebackEnabled(config);
   const entry = skillEntry(config, skillId);
   const parsed = await callLifeReviewOs(entry, ['writeback', '--run-id', runId, '--json'], 'writeback');
   return {
@@ -197,6 +216,7 @@ export async function executeLifeReviewOsWriteback(config: AppConfig, skillId: s
  * decisions, so they are separate calls.
  */
 export async function executeLifeReviewOsRetroReview(config: AppConfig, skillId: string, runId: string): Promise<LifeReviewOsReviewResult> {
+  assertFeishuWritebackEnabled(config);
   return writeLifeReviewOsRetroReview(skillEntry(config, skillId), runId);
 }
 
