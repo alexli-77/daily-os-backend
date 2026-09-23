@@ -44,9 +44,9 @@ export interface LocalCycleWrite {
   section: CycleSection;
   cycleId: string;
   label: string;
-  status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped';
+  status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped' | 'drafted';
   chars: number;
-  /** Why nothing was written. Set for `skipped` and `unchanged`. */
+  /** Why nothing was written. Set for `skipped`, `unchanged`, and `drafted`. */
   reason?: string;
   error?: string;
 }
@@ -92,13 +92,16 @@ export function writeLocalCyclesFromRun(
       continue;
     }
     const applied = applyCyclePlan(config, plan, existing, { dryRun: Boolean(options.dryRun), now: options.now });
+    const wasDrafted = applied.drafted.includes(section);
     writes.push({
       section,
       cycleId: plan.id,
       label: plan.label,
-      status: applied.status,
+      // A drafted section didn't overwrite the body — report it as its own status
+      // so the log/UI can say "staged a draft" rather than "updated".
+      status: wasDrafted ? 'drafted' : applied.status,
       chars: content.length,
-      reason: applied.skipped.find((entry) => entry.section === section)?.reason,
+      reason: wasDrafted ? 'user-edited' : applied.skipped.find((entry) => entry.section === section)?.reason,
       error: applied.error,
     });
   }
@@ -208,6 +211,7 @@ export function formatLocalCycleWriteback(result: LocalCycleWritebackResult): st
     if (write.status === 'failed') return `${write.section} → ${where}：写入失败（${write.error || '未知错误'}）`;
     if (write.status === 'skipped') return `${write.section} → ${where}：跳过（${write.reason || '无内容'}）`;
     if (write.status === 'unchanged') return `${write.section} → ${where}：无变化${write.reason === 'user-edited' ? '（你手动改过，未覆盖）' : ''}`;
+    if (write.status === 'drafted') return `${write.section} → ${where}：已生成新草稿待合入（你手动改过，没有覆盖）`;
     return `${write.section} → ${where}：已写入 ${write.chars} 字`;
   });
   return lines.join('\n');

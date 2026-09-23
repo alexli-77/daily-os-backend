@@ -46,11 +46,26 @@ export type CycleSectionSource = (typeof CYCLE_SECTION_SOURCES)[number];
 export const CYCLE_MODES = ['weekly', 'biweekly'] as const;
 export const DEFAULT_CYCLE_MODE = 'biweekly';
 
+/** A regenerated version of a section, staged for the user to compare and merge. */
+export interface CycleSectionDraft {
+  content: string;
+  source: CycleSectionSource;
+  /** ISO-8601 of when the draft was staged. */
+  updatedAt: string;
+}
+
 export interface CycleSectionState {
   content: string;
   source: CycleSectionSource;
   /** ISO-8601, or '' when the file never recorded one. */
   updatedAt: string;
+  /**
+   * A newer, un-merged version of this section. Set when a planner re-run
+   * produced content for a section the user had hand-edited: the body is left
+   * alone and the new content waits here for an explicit accept/discard, so a
+   * regeneration never silently eats a hand edit.
+   */
+  pendingDraft?: CycleSectionDraft;
 }
 
 /** A body block in file order. `heading` is '' for text before the first `## `. */
@@ -92,7 +107,22 @@ export interface CyclePatch {
   cycle?: string;
   mode?: string;
   runId?: string;
-  sections?: Partial<Record<CycleSection, { content: string; source: CycleSectionSource }>>;
+  /**
+   * Per section, one of:
+   * - `{ content, source }` — write the body (and clear any pending draft).
+   * - `{ pendingDraft: { content, source } }` — stage a draft, leave the body.
+   * - `{ pendingDraft: null }` — clear the pending draft (discard).
+   */
+  sections?: Partial<
+    Record<
+      CycleSection,
+      {
+        content?: string;
+        source?: CycleSectionSource;
+        pendingDraft?: { content: string; source: CycleSectionSource } | null;
+      }
+    >
+  >;
 }
 
 export interface CycleWriteOptions {
@@ -208,9 +238,27 @@ export function writeCycle(config: AppConfig, id: string, patch: CyclePatch, opt
   for (const section of CYCLE_SECTIONS) {
     const update = patch.sections?.[section];
     if (!update) continue;
-    const content = normalizeContent(update.content);
-    next.sections[section] = { content, source: update.source, updatedAt: now };
-    upsertBlock(next.blocks, section, content);
+    const prior = next.sections[section];
+    let content = prior?.content ?? '';
+    let source: CycleSectionSource = prior?.source ?? 'unknown';
+    let updatedAt = prior?.updatedAt ?? '';
+    let pendingDraft = prior?.pendingDraft;
+
+    if (update.content !== undefined) {
+      // A real body write. Clears any pending draft — the body is now settled.
+      content = normalizeContent(update.content);
+      source = update.source ?? source;
+      updatedAt = now;
+      pendingDraft = undefined;
+      upsertBlock(next.blocks, section, content);
+    }
+    if (update.pendingDraft !== undefined) {
+      pendingDraft =
+        update.pendingDraft === null
+          ? undefined
+          : { content: normalizeContent(update.pendingDraft.content), source: update.pendingDraft.source, updatedAt: now };
+    }
+    next.sections[section] = { content, source, updatedAt, ...(pendingDraft ? { pendingDraft } : {}) };
   }
 
   const filePath = path.join(cyclesDir(config), `${id}.md`);
@@ -265,6 +313,7 @@ export function parseCycleMarkdown(markdown: string, id: string): CycleDoc {
       content: block.content,
       source: stored?.source || 'unknown',
       updatedAt: stored?.updatedAt || '',
+      ...(stored?.pendingDraft ? { pendingDraft: stored.pendingDraft } : {}),
     };
   }
 
@@ -285,13 +334,20 @@ export function parseCycleMarkdown(markdown: string, id: string): CycleDoc {
 
 /** Serialize a document back to markdown. Inverse of `parseCycleMarkdown`. */
 export function serializeCycleMarkdown(doc: CycleDoc): string {
-  const sections: Record<string, Record<string, string>> = {};
+  const sections: Record<string, Record<string, unknown>> = {};
   for (const block of doc.blocks) {
     const section = CYCLE_SECTIONS.find((candidate) => candidate === block.heading);
     if (!section) continue;
     const state = doc.sections[section];
-    const entry: Record<string, string> = { source: state?.source || 'unknown' };
+    const entry: Record<string, unknown> = { source: state?.source || 'unknown' };
     if (state?.updatedAt) entry.updated_at = state.updatedAt;
+    if (state?.pendingDraft) {
+      entry.pending_draft = {
+        source: state.pendingDraft.source,
+        ...(state.pendingDraft.updatedAt ? { updated_at: state.pendingDraft.updatedAt } : {}),
+        content: state.pendingDraft.content,
+      };
+    }
     sections[section] = entry;
   }
 
@@ -367,18 +423,28 @@ function splitFrontmatter(text: string): { frontmatter: unknown; body: string; e
   }
 }
 
-function readSectionMeta(raw: unknown): Partial<Record<CycleSection, { source: CycleSectionSource; updatedAt: string }>> {
-  const result: Partial<Record<CycleSection, { source: CycleSectionSource; updatedAt: string }>> = {};
+type SectionMeta = { source: CycleSectionSource; updatedAt: string; pendingDraft?: CycleSectionDraft };
+
+function normalizeSource(value: unknown): CycleSectionSource {
+  const source = asString(value);
+  return (CYCLE_SECTION_SOURCES as readonly string[]).includes(source) ? (source as CycleSectionSource) : 'unknown';
+}
+
+function readSectionMeta(raw: unknown): Partial<Record<CycleSection, SectionMeta>> {
+  const result: Partial<Record<CycleSection, SectionMeta>> = {};
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
   for (const section of CYCLE_SECTIONS) {
     const entry = (raw as Record<string, unknown>)[section];
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const record = entry as Record<string, unknown>;
-    const source = asString(record.source);
-    result[section] = {
-      source: (CYCLE_SECTION_SOURCES as readonly string[]).includes(source) ? (source as CycleSectionSource) : 'unknown',
-      updatedAt: asString(record.updated_at),
-    };
+    const meta: SectionMeta = { source: normalizeSource(record.source), updatedAt: asString(record.updated_at) };
+    const draftRaw = record.pending_draft;
+    if (draftRaw && typeof draftRaw === 'object' && !Array.isArray(draftRaw)) {
+      const dr = draftRaw as Record<string, unknown>;
+      const content = asString(dr.content);
+      if (content) meta.pendingDraft = { content, source: normalizeSource(dr.source), updatedAt: asString(dr.updated_at) };
+    }
+    result[section] = meta;
   }
   return result;
 }
