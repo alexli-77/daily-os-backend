@@ -667,6 +667,13 @@ export const AppConfigSchema = z.object({
       // table is a shared document a local-first setup should not touch unless
       // explicitly asked. Set true to restore the Feishu write-back.
       feishu_writeback: z.boolean().default(false),
+      // On `start`, keep the weekly-review skill (life-review-os) current on its
+      // own: clone it if missing, else `git pull --ff-only` when it is on the
+      // default branch and clean. So a machine gets biweekly fixes by launching
+      // the app — no manual `git pull`, no repackaging. A developer's checkout on
+      // a feature branch (or with local edits) is left alone. Set false to manage
+      // the checkout entirely by hand (the console Install/Update buttons still work).
+      auto_update: z.boolean().default(true),
       registry: z
         .array(
           z.object({
@@ -685,6 +692,7 @@ export const AppConfigSchema = z.object({
       enabled: false,
       inputs_dir: './data/memory/skill-inputs',
       feishu_writeback: false,
+      auto_update: true,
       registry: [],
     }),
 });

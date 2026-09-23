@@ -28,6 +28,7 @@ import {
 import { analyzeChatContext, formatChatContextAnalysis, type ChatAnalysisMode } from './chat/context-analysis.js';
 import { bundledAsset } from './utils/install-root.js';
 import { BIWEEKLY_STRATEGY_FILE } from './skills/runner.js';
+import { ensureWeeklyReviewSkill } from './skills/update.js';
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -220,6 +221,15 @@ async function startAll(options: CliOptions): Promise<void> {
   const scheduler = createScheduler(getConfig);
   await scheduler.start();
   console.log(`daily-os-feishu scheduler 已启动（${scheduler.driver} 驱动）。`);
+
+  // Keep the weekly-review skill (life-review-os) current on its own: clone it if
+  // missing, else fast-forward a clean default-branch checkout. Fire-and-forget
+  // so a slow or offline network never delays boot; the skill is only needed at
+  // the scheduled weekly-review time, not at startup. Non-fatal by contract.
+  void ensureWeeklyReviewSkill(options.configPath)
+    .then((result) => console.log(`[skill] weekly-review ${result.action}：${result.message}`))
+    .catch((error) => console.warn(`[skill] weekly-review 自动检查失败：${error instanceof Error ? error.message : String(error)}`));
+
   const sleepControls = startPreventSleep(config.service.prevent_sleep.enabled);
   const chromeControls = startChromeSnapshotService(config);
 
