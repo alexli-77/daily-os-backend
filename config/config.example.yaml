@@ -372,6 +372,11 @@ skills:
   # 20_CYCLES/*.md，飞书周报表是共享文档，本地优先的部署默认不碰。需要写回飞书时
   # 设 true 并重启服务。
   feishu_writeback: false
+  # 启动时自动维护 weekly-review 技能（life-review-os）：没有就自动 clone（公开 repo，
+  # 免鉴权），有且在默认分支、无本地改动就 git pull --ff-only。这样装/开 App 就能拿到
+  # biweekly 的更新，不用手动 git pull、也不用重打包。开发机在 feature 分支或有未提交
+  # 改动时会自动跳过。设 false 则完全手动管理（控制台的安装/更新按钮仍可用）。
+  auto_update: true
   registry:
     - id: "weekly-review"
       provider: "auto" # auto | codex | claude

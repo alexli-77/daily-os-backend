@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import yaml from 'js-yaml';
 import type { AppConfig } from '../config/schema.js';
+import { loadConfig } from '../config/load-config.js';
 import { runCommand } from '../utils/command.js';
 
 /**
@@ -315,4 +317,96 @@ export async function updateSkillRepo(config: AppConfig): Promise<SkillUpdateRes
     commits,
     message: `已更新 ${before.slice(0, 7)} → ${after.slice(0, 7)}，${commits.length} 个新提交。`,
   };
+}
+
+// --- startup self-provisioning ------------------------------------------------
+
+export type SkillProvisionAction = 'disabled' | 'install' | 'update' | 'skip';
+
+export interface SkillProvisionDecision {
+  action: SkillProvisionAction;
+  reason: string;
+}
+
+/** Branches safe to fast-forward automatically; anything else is a dev branch we leave alone. */
+const DEFAULT_BRANCHES = new Set(['main', 'master']);
+
+/**
+ * Pure policy: given the local skill state and the auto_update flag, decide what
+ * startup should do. Kept apart from the git/filesystem work so the guards that
+ * protect a developer's checkout are unit-testable without a real repo.
+ *
+ *   - auto_update off        → do nothing.
+ *   - no usable checkout     → install (clone).
+ *   - dirty / feature branch → skip: never touch a checkout someone is working in.
+ *   - clean, default branch  → update (fetch + ff-only; a no-op when already current).
+ */
+export function decideSkillProvisioning(state: SkillRepoState, autoUpdate: boolean): SkillProvisionDecision {
+  if (!autoUpdate) return { action: 'disabled', reason: 'skills.auto_update=false' };
+  if (!state.available) {
+    return { action: 'install', reason: state.workdir ? `checkout 不存在：${state.workdir}` : 'weekly-review 技能未安装' };
+  }
+  if (!state.isGitRepo) return { action: 'skip', reason: `${state.workdir} 不是 git 仓库，跳过自动更新` };
+  if (state.dirty.length > 0) return { action: 'skip', reason: `本地有未提交改动（${state.dirty.slice(0, 3).join('、')}），跳过` };
+  if (!DEFAULT_BRANCHES.has(state.branch)) {
+    return { action: 'skip', reason: `在分支 ${state.branch || '(未知)'} 上（非默认分支），跳过自动更新` };
+  }
+  return { action: 'update', reason: `在 ${state.branch} 上，检查并快进更新` };
+}
+
+export interface EnsureSkillResult {
+  action: SkillProvisionAction | 'install-failed' | 'update-failed';
+  message: string;
+}
+
+/**
+ * Startup self-provisioning for the weekly-review skill (life-review-os).
+ *
+ * Non-fatal by contract: the caller runs it in the background and the service
+ * works regardless of the outcome. Clones the (public) repo when it is missing —
+ * so a machine gets biweekly by launching the app, no manual clone — otherwise
+ * fast-forwards a clean checkout on the default branch, so fixes arrive without a
+ * `git pull` in a terminal and without repackaging the app. A developer's feature
+ * branch or dirty tree is deliberately left untouched.
+ */
+export async function ensureWeeklyReviewSkill(configPath: string): Promise<EnsureSkillResult> {
+  const config = loadConfig(configPath);
+  const state = await readSkillRepoState(config);
+  const decision = decideSkillProvisioning(state, config.skills.auto_update);
+
+  if (decision.action === 'disabled' || decision.action === 'skip') {
+    return { action: decision.action, message: decision.reason };
+  }
+
+  if (decision.action === 'install') {
+    const result = await installSkillRepo(defaultSkillInstallDir());
+    if (!result.ok || !result.registered) return { action: 'install-failed', message: result.message };
+    persistSkillRegistration(configPath, result.registered);
+    return { action: 'install', message: result.message };
+  }
+
+  const result = await updateSkillRepo(config);
+  if (!result.ok) return { action: 'update-failed', message: result.message };
+  return { action: 'update', message: result.message };
+}
+
+/**
+ * Write a freshly-cloned checkout into config.skills.registry — the same write
+ * path the console's Install button uses, so both reach an identical entry. Reads
+ * the config fresh right before writing to avoid clobbering a concurrent edit.
+ */
+function persistSkillRegistration(configPath: string, registered: { id: string; path: string; workdir: string }): void {
+  const config = loadConfig(configPath);
+  const entry: AppConfig['skills']['registry'][number] = {
+    id: SKILL_ID,
+    provider: 'auto',
+    path: registered.path,
+    workdir: registered.workdir,
+    default_mode: 'weekly',
+    effects: ['read', 'draft', 'feishu_write'],
+    require_confirmation_for: ['feishu_write'],
+  };
+  const registry = [...config.skills.registry.filter((existing) => existing.id !== SKILL_ID), entry];
+  const nextConfig: AppConfig = { ...config, skills: { ...config.skills, enabled: true, registry } };
+  fs.writeFileSync(path.resolve(configPath), `${yaml.dump(nextConfig, { lineWidth: 120, noRefs: true })}`, 'utf8');
 }
