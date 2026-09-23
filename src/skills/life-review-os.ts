@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { runCommand } from '../utils/command.js';
+import { installRoot } from '../utils/install-root.js';
 
 type SkillEntry = AppConfig['skills']['registry'][number];
 
@@ -276,7 +277,14 @@ function assertWritebackReady(writeback: LifeReviewOsWriteback): void {
 
 async function callLifeReviewOs(entry: SkillEntry, args: string[], label: string, timeoutMs = 300000): Promise<Record<string, unknown>> {
   const cli = requireLifeReviewOsCli(entry);
-  const result = await runCommand('node', [cli, ...args], { cwd: lifeReviewOsRoot(cli), timeoutMs });
+  // A checkout CLI runs exactly as before (bundled === null). A bundled CLI gets
+  // its config/runs pointed at the writable data dir.
+  const bundled = bundledCliRuntime(cli);
+  const result = await runCommand('node', [cli, ...args, ...(bundled?.extraArgs ?? [])], {
+    cwd: bundled?.cwd ?? lifeReviewOsRoot(cli),
+    env: bundled?.env,
+    timeoutMs,
+  });
   return parseLifeReviewOsJson(result.stdout, result.stderr, label, result.ok);
 }
 
@@ -299,13 +307,46 @@ function requireLifeReviewOsCli(entry: SkillEntry): string {
   return cli;
 }
 
-function resolveLifeReviewOsCli(entry: SkillEntry): string {
+export function resolveLifeReviewOsCli(entry: SkillEntry): string {
   const candidates = [
     process.env.LIFE_REVIEW_OS_CLI || '',
     path.join(skillWorkdir(entry), 'bin/life-review-os.mjs'),
     path.join(path.dirname(expandPath(entry.path)), 'bin/life-review-os.mjs'),
+    // The copy bundled inside the Mac app. Last on purpose: an explicit
+    // env/config override or a real checkout always wins, so a developer running
+    // from a clone (or anyone with the skill workdir set) sees no change. The
+    // bundle only steps in when nothing external is configured — which is what
+    // makes the .app self-contained for biweekly without a clone.
+    bundledLifeReviewOsCli(),
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || '';
+}
+
+/** Path to the life-review-os CLI copied into the app bundle, next to the service. */
+function bundledLifeReviewOsCli(): string {
+  return path.join(installRoot(), 'life-review-os', 'bin', 'life-review-os.mjs');
+}
+
+/**
+ * When the CLI runs from the read-only bundle, its own directory cannot hold the
+ * per-machine config or the run records. Point both at the writable data dir
+ * (the service's cwd, `~/Library/Application Support/DailyOS`): config at
+ * `life-review-os/config.yaml` there (per-machine, holds Feishu tokens — never
+ * shipped in the app), run records under `life-review-os/.runs` (shared across
+ * the run→writeback invocations via LIFE_REVIEW_OS_RUNS_DIR). Returns null for a
+ * checkout CLI, which keeps its existing behavior untouched.
+ */
+export function bundledCliRuntime(cli: string): { extraArgs: string[]; env: NodeJS.ProcessEnv; cwd: string } | null {
+  const bundledRoot = path.join(installRoot(), 'life-review-os');
+  if (!path.resolve(cli).startsWith(path.resolve(bundledRoot) + path.sep)) return null;
+  const dataDir = path.resolve('life-review-os');
+  const runsDir = path.join(dataDir, '.runs');
+  fs.mkdirSync(runsDir, { recursive: true });
+  return {
+    extraArgs: ['--config', path.join(dataDir, 'config.yaml')],
+    env: { ...process.env, LIFE_REVIEW_OS_RUNS_DIR: runsDir },
+    cwd: dataDir,
+  };
 }
 
 function lifeReviewOsRoot(cliPath: string): string {

@@ -180,6 +180,10 @@ try {
     // LEO-287 installing the skill (git clone) from the console: git-missing,
     // non-empty target, clone failure, and the config.yaml seed + registration.
     'scripts/tests/skill-install.test.ts',
+    // Bundling the life-review-os CLI into the Mac app must not change a machine
+    // that runs it from a checkout: a real checkout wins, only a bundled CLI gets
+    // config/runs redirected to the writable data dir.
+    'scripts/tests/life-review-os-resolve.test.ts',
     // Sign-up, the signed-out welcome page, and the topbar identity. The public
     // root must stay free of the owner's data now that it is reachable.
     'scripts/tests/auth-register.test.ts',
