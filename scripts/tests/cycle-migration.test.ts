@@ -227,7 +227,7 @@ test('running twice leaves every file byte-identical', () => {
   assert.deepEqual(after, first, 'not even updated_at may move');
 });
 
-test('a section the user has edited is skipped, not overwritten', () => {
+test('a section the user has edited is staged as a draft, not overwritten', () => {
   const vault = tempDir();
   const config = tempConfig(vault);
   const plans = planFor(standardRuns()).filter((plan) => plan.owner === 'self');
@@ -239,11 +239,26 @@ test('a section the user has edited is skipped, not overwritten', () => {
   writeSection(config, plan.id, 'review', '旧的 review', 'ai');
 
   const result = applyCyclePlan(config, plan, readCycle(config, plan.id), { dryRun: false });
-  assert.deepEqual(result.skipped, [{ section: 'retro', reason: 'user-edited' }]);
+  // The hand-edited retro is now staged as a pending draft rather than skipped;
+  // the AI review is still overwritten.
+  assert.deepEqual(result.drafted, ['retro']);
   assert.deepEqual(result.written, ['review']);
+  assert.deepEqual(result.skipped, []);
   const doc = readCycle(config, plan.id)!;
+  // Body preserved, draft staged with the plan's new content.
   assert.equal(doc.sections.retro?.content, '我后来手写重排过的 retro');
+  assert.ok(doc.sections.retro?.pendingDraft, 'retro carries a pending draft');
+  assert.notEqual(doc.sections.retro?.pendingDraft?.content, '我后来手写重排过的 retro');
+  assert.equal(doc.sections.retro?.pendingDraft?.source, 'user');
   assert.match(doc.sections.review?.content || '', /最终版/);
+
+  // Re-running does not restage the identical draft.
+  const rerun = applyCyclePlan(config, plan, readCycle(config, plan.id), { dryRun: false });
+  assert.ok(
+    rerun.skipped.some((entry) => entry.section === 'retro' && entry.reason === 'draft-unchanged'),
+    're-running does not restage the same draft',
+  );
+  assert.deepEqual(rerun.drafted, [], 'no new draft on a re-run with the same content');
 });
 
 test('🐧 cycles never land in this machine\'s vault', () => {

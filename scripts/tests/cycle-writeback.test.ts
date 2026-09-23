@@ -224,15 +224,20 @@ test('a retro the user wrote is never touched by a run', () => {
   assert.ok(doc.sections.review!.content, 'and the review still landed alongside it');
 });
 
-test('a 要务 section the user edited is not overwritten by a re-plan', () => {
+test('a 要务 section the user edited is staged as a draft, not overwritten', () => {
   const { config, runsDir } = tempWorkspace();
   writeSection(config, TARGET_ID, '要务', '- 我自己改过的要务', 'user');
   writeRun(runsDir, 'run-10');
   const result = writeLocalCyclesFromRun(config, runsDir, 'run-10');
 
-  assert.equal(readCycle(config, TARGET_ID)!.sections['要务']!.content, '- 我自己改过的要务');
+  const doc = readCycle(config, TARGET_ID)!;
+  // Body untouched; the re-plan's 要务 waits in a pending draft to merge.
+  assert.equal(doc.sections['要务']!.content, '- 我自己改过的要务');
+  assert.ok(doc.sections['要务']!.pendingDraft, 'a pending draft was staged');
+  assert.equal(doc.sections['要务']!.pendingDraft?.source, 'planner');
+  assert.ok((doc.sections['要务']!.pendingDraft?.content || '').includes('###'), 'the draft carries the regenerated 要务');
   const write = result.writes.find((entry) => entry.section === '要务');
-  assert.equal(write?.status, 'unchanged');
+  assert.equal(write?.status, 'drafted');
   assert.equal(write?.reason, 'user-edited', 'and it says why it stood back');
 });
 

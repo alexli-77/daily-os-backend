@@ -500,6 +500,8 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/cycles/review') return sendJson(response, await generateCycleReviewSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/create') return sendJson(response, await createCycle(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/replan') return sendJson(response, await replanCycle(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/accept-draft') return sendJson(response, await resolveCycleDraft(options, await readJson(request), 'accept'));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/discard-draft') return sendJson(response, await resolveCycleDraft(options, await readJson(request), 'discard'));
     // Team / Supabase (LEO-282/283/284/285). Writes, so the member gate above
     // already rejects the member role; nothing here is on the member whitelist.
     // /api/team/sync is matched first: the prefix handler below would otherwise
@@ -1809,6 +1811,41 @@ async function replanCycle(options: UiServerOptions, body: unknown): Promise<Rec
 
   const planning = startReplanPlanning(config, cycle);
   return { ok: planning.status === 'started', id, cycle: cycle.cycle, mode: cycle.mode, planning, text: planning.reason };
+}
+
+/**
+ * Accept or discard a section's pending draft (the regenerated version staged
+ * when a re-plan hit a hand-edited section). Accept promotes the draft into the
+ * body and clears it; discard just clears it. Both leave the other sections and
+ * the un-drafted body untouched.
+ */
+async function resolveCycleDraft(
+  options: UiServerOptions,
+  body: unknown,
+  action: 'accept' | 'discard',
+): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  await assertLocalCycleWriteTarget(config, request.owner ?? request.ownerId);
+
+  const id = String(request.id || '').trim();
+  if (!parseCycleId(id)) throw new Error(`Invalid cycle id: ${id || '(empty)'}`);
+  const section = String(request.section || '') as CycleSection;
+  if (!CYCLE_SECTIONS.includes(section)) throw new Error(`Unknown cycle section: ${String(request.section || '(empty)')}`);
+
+  const current = readCycle(config, id);
+  if (!current) throw new Error(`Cycle not found: ${id}`);
+  const draft = current.sections[section]?.pendingDraft;
+  if (!draft) return { ok: true, id, section, changed: false, text: '没有待合入的草稿。' };
+
+  if (action === 'accept') {
+    writeCycle(config, id, { sections: { [section]: { content: draft.content, source: draft.source } } });
+    return { ok: true, id, section, changed: true, text: `已合入 ${section} 的新草稿。` };
+  }
+  writeCycle(config, id, { sections: { [section]: { pendingDraft: null } } });
+  return { ok: true, id, section, changed: true, text: `已丢弃 ${section} 的草稿。` };
 }
 
 /** The same planning run as create, aimed at the existing current cycle. */

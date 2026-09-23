@@ -118,6 +118,37 @@ test('issue ids and markdown emphasis survive a round trip through disk', () => 
   assert.ok(priorities.includes('1. [O1]'), 'the numbered list must not be renumbered or escaped');
 });
 
+test('a pending draft round-trips, then accept promotes it and discard clears it', () => {
+  const { config } = tempConfig();
+  fs.mkdirSync(cyclesDir(config), { recursive: true });
+  fs.writeFileSync(cycleFilePath(config, ID), SAMPLE, 'utf8');
+
+  // Stage a draft on the user-owned retro without touching its body.
+  writeCycle(config, ID, { sections: { retro: { pendingDraft: { content: '规划生成的新 retro 草稿', source: 'planner' } } } });
+  let doc = readCycle(config, ID)!;
+  assert.ok(doc.sections.retro?.content.includes('羽毛球'), 'the body is left alone');
+  assert.equal(doc.sections.retro?.pendingDraft?.content, '规划生成的新 retro 草稿');
+  assert.equal(doc.sections.retro?.pendingDraft?.source, 'planner');
+
+  // The draft survives a serialize/parse round trip (it lives in the frontmatter).
+  const roundTripped = parseCycleMarkdown(serializeCycleMarkdown(doc), ID);
+  assert.equal(roundTripped.sections.retro?.pendingDraft?.content, '规划生成的新 retro 草稿');
+
+  // Accept: the body becomes the draft, the draft is cleared.
+  const draft = doc.sections.retro!.pendingDraft!;
+  writeCycle(config, ID, { sections: { retro: { content: draft.content, source: draft.source } } });
+  doc = readCycle(config, ID)!;
+  assert.equal(doc.sections.retro?.content, '规划生成的新 retro 草稿');
+  assert.equal(doc.sections.retro?.pendingDraft, undefined, 'accept clears the draft');
+
+  // Re-stage, then discard: the body stays, the draft is gone.
+  writeCycle(config, ID, { sections: { retro: { pendingDraft: { content: '又一版草稿', source: 'planner' } } } });
+  writeCycle(config, ID, { sections: { retro: { pendingDraft: null } } });
+  doc = readCycle(config, ID)!;
+  assert.equal(doc.sections.retro?.content, '规划生成的新 retro 草稿', 'discard leaves the body');
+  assert.equal(doc.sections.retro?.pendingDraft, undefined, 'discard clears the draft');
+});
+
 test('section ownership is recorded per section, not per file', () => {
   const doc = parseCycleMarkdown(SAMPLE, ID);
   assert.equal(doc.sections['要务']?.source, 'planner');

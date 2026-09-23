@@ -84,6 +84,8 @@ export interface CycleApplyResult {
   owner: CycleOwner;
   status: 'created' | 'updated' | 'unchanged' | 'failed';
   written: CycleSection[];
+  /** Sections staged as a pending draft (user-edited, not overwritten). */
+  drafted: CycleSection[];
   skipped: Array<{ section: CycleSection; reason: string }>;
   error?: string;
 }
@@ -512,6 +514,7 @@ export function applyCyclePlan(
     owner: plan.owner,
     status: existing ? 'unchanged' : 'created',
     written: [],
+    drafted: [],
     skipped: [],
   };
 
@@ -519,18 +522,27 @@ export function applyCyclePlan(
   for (const [section, content] of Object.entries(plan.sections) as Array<[CycleSection, string]>) {
     const stored = existing?.sections[section];
     if (stored && stored.source === 'user' && stored.content !== normalizeContent(content)) {
-      result.skipped.push({ section, reason: 'user-edited' });
+      // Hand-edited and the plan wants something different: don't overwrite —
+      // stage the new content as a pending draft to compare and merge. Skip if
+      // the same draft is already staged, so a re-run does not restamp it.
+      if (stored.pendingDraft?.content === normalizeContent(content)) {
+        result.skipped.push({ section, reason: 'draft-unchanged' });
+        continue;
+      }
+      patch.sections![section] = { pendingDraft: { content, source: sourceFor(section) } };
+      result.drafted.push(section);
       continue;
     }
     if (stored && stored.content === normalizeContent(content)) {
       result.skipped.push({ section, reason: 'unchanged' });
       continue;
     }
+    // A fresh write settles the body and clears any stale draft (see writeCycle).
     patch.sections![section] = { content, source: sourceFor(section) };
     result.written.push(section);
   }
 
-  if (result.written.length === 0) {
+  if (result.written.length === 0 && result.drafted.length === 0) {
     result.status = 'unchanged';
     return result;
   }
