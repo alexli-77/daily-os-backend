@@ -499,6 +499,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/cycles/section') return sendJson(response, await saveCycleSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/review') return sendJson(response, await generateCycleReviewSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/create') return sendJson(response, await createCycle(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/replan') return sendJson(response, await replanCycle(options, await readJson(request)));
     // Team / Supabase (LEO-282/283/284/285). Writes, so the member gate above
     // already rejects the member role; nothing here is on the member whitelist.
     // /api/team/sync is matched first: the prefix handler below would otherwise
@@ -1484,7 +1485,13 @@ function readCyclesState(config: AppConfig): Record<string, unknown> {
     frontmatterError: doc.frontmatterError || '',
     sections: doc.sections,
   }));
-  return { dir: cyclesDir(config), items };
+  // Whether a weekly/biweekly planning run is on right now. The App uses this to
+  // tell "still generating 要务" apart from "generation finished and left it
+  // empty (failed)" — without it a failed cycle looks identical to a running one.
+  // A global flag, not per-cycle: the run only resolves its target cycle when it
+  // finishes, and while it runs it is planning the current cycle.
+  const planningInFlight = runManager.list().some((run) => (run.workflow || '').startsWith('skill:weekly-review:'));
+  return { dir: cyclesDir(config), items, planningInFlight };
 }
 
 /**
@@ -1761,6 +1768,91 @@ function startCyclePlanning(
   return {
     status: 'started',
     reason: `规划已经在后台跑了（${mode === 'biweekly' ? '双周' : '单周'}，大约十分钟）。跑完要务会自己写进周期文件，中途可以在 Runs 里看进度。`,
+  };
+}
+
+/**
+ * Re-run planning for a cycle that already exists — the recovery path when a
+ * create's planning run failed (or was empty) and left 要务 blank, and the create
+ * button is gone because the file exists. Unlike `createCycle` it does not refuse
+ * an existing file: the planner overwrites the planner-owned 要务 and routes a
+ * hand-edited one through the usual merge flow. Limited to the current cycle,
+ * because the planner picks its target week from today — only the cycle that
+ * contains today is guaranteed to be the one it writes into.
+ */
+async function replanCycle(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  await assertLocalCycleWriteTarget(config, request.owner ?? request.ownerId);
+
+  const id = String(request.id ?? '').trim();
+  if (!id) throw new Error('缺少 cycle id。');
+  const cycle = listCycles(config).find((doc) => doc.id === id);
+  if (!cycle) throw new Error(`找不到周期：${id}`);
+
+  // ISO dates compare lexicographically; the mode's span is enough to fence
+  // "current" without parsing the label's exact span.
+  const spanDays = cycle.mode === 'weekly' ? 7 : 14;
+  const today = todayInTimezone(config);
+  const endDate = addDays(cycle.startDate, spanDays - 1);
+  if (!(cycle.startDate <= today && today <= endDate)) {
+    return {
+      ok: false,
+      id,
+      cycle: cycle.cycle,
+      planning: { status: 'unavailable', reason: '只能重新生成当前周期（这一期）。历史周期暂不支持。' },
+      text: '只能重新生成当前周期（这一期）。',
+    };
+  }
+
+  const planning = startReplanPlanning(config, cycle);
+  return { ok: planning.status === 'started', id, cycle: cycle.cycle, mode: cycle.mode, planning, text: planning.reason };
+}
+
+/** The same planning run as create, aimed at the existing current cycle. */
+function startReplanPlanning(
+  config: AppConfig,
+  cycle: { id: string; cycle: string; mode: string },
+): { status: 'started' | 'unavailable'; reason: string } {
+  if (!config.skills.enabled) {
+    return { status: 'unavailable', reason: 'skills.enabled=false，没有跑规划。启用技能后再重试。' };
+  }
+  const entry = config.skills.registry.find((candidate) => candidate.id === 'weekly-review');
+  if (!entry || !isLifeReviewOsEntry(entry)) {
+    return { status: 'unavailable', reason: '没有可用的 weekly-review skill（life-review-os CLI 找不到）。' };
+  }
+  const mode = cycle.mode === 'weekly' ? 'weekly' : 'biweekly';
+  void runConfiguredSkill({
+    config,
+    skillId: entry.id,
+    mode,
+    userText: `重新为当前周期 ${cycle.cycle} 规划要务（上一次可能失败或为空）。`,
+    source: 'local-ui-cycle-replan',
+    messageId: `cycle-replan-${cycle.id}-${Date.now()}`,
+  })
+    .then((result) => {
+      appendUiLog({
+        event: 'action',
+        level: 'info',
+        status: 'success',
+        action: 'cycle_replan',
+        detail: result.localCycles ? formatLocalCycleWriteback(result.localCycles) : `重新生成跑完了，但没有写入任何周期文件（${cycle.cycle}）。`,
+      });
+    })
+    .catch((error: unknown) => {
+      appendUiLog({
+        event: 'action',
+        level: 'error',
+        status: 'error',
+        action: 'cycle_replan',
+        detail: `${cycle.cycle} 重新生成失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+    });
+  return {
+    status: 'started',
+    reason: `重新生成已在后台跑（${mode === 'biweekly' ? '双周' : '单周'}，约十分钟）。跑完要务会更新，中途可在 Runs 里看进度。`,
   };
 }
 

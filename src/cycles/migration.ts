@@ -394,15 +394,49 @@ function locateInTables(tables: FeishuTable[], label: string): { table: FeishuTa
  * Priorities grouped by their OKR row, the way the table stores them.
  * `rowLabels` is the table's first column when the cycle still has one.
  */
+/** What an OKR row with nothing planned this cycle gets, so every O still shows. */
+export const EMPTY_PRIORITY_PLACEHOLDER = '本周期无安排';
+
 export function renderPrioritiesFromRun(items: MigrationRunItem[], rowLabels: string[] = []): string {
-  const groups = new Map<string, string[]>();
+  // No items at all = a failed/empty run. Keep 要务 empty so the failure stays
+  // visible (the App shows "未生成" + a regenerate button); do NOT paper over it
+  // with a full set of placeholders, which would look like a successful blank plan.
+  if (items.length === 0) return '';
+  // Items grouped by the OKR row they target.
+  const byRow = new Map<number, string[]>();
   for (const item of items) {
-    const heading = shortLabel(rowLabels[item.targetRow] || item.targetRowLabel);
-    const lines = groups.get(heading) || [];
+    const lines = byRow.get(item.targetRow) || [];
     lines.push(bulletFor(item.text, item.isMit));
-    groups.set(heading, lines);
+    byRow.set(item.targetRow, lines);
   }
-  return renderGroups(groups);
+
+  const chunks: string[] = [];
+  const rendered = new Set<number>();
+  // Every OKR row, in order — an O with nothing planned still shows, with the
+  // placeholder, instead of silently vanishing. Without this a cycle that only
+  // planned into 3 of 7 objectives looked like it only had 3.
+  for (let row = 1; row < rowLabels.length; row += 1) {
+    const label = (rowLabels[row] || '').trim();
+    if (!label) continue;
+    rendered.add(row);
+    const lines = byRow.get(row) || [];
+    chunks.push([`### ${shortLabel(rowLabels[row])}`, ...(lines.length ? lines : [EMPTY_PRIORITY_PLACEHOLDER])].join('\n'));
+  }
+  // Items whose target row has no label (fell back to target_row_label): keep
+  // them rather than drop, appended after the enumerated objectives.
+  const extra = new Map<string, string[]>();
+  for (const item of items) {
+    if (rendered.has(item.targetRow)) continue;
+    const heading = shortLabel(rowLabels[item.targetRow] || item.targetRowLabel);
+    const lines = extra.get(heading) || [];
+    lines.push(bulletFor(item.text, item.isMit));
+    extra.set(heading, lines);
+  }
+  for (const [heading, lines] of extra) {
+    if (lines.length === 0) continue;
+    chunks.push([`### ${heading}`, ...lines].join('\n'));
+  }
+  return chunks.join('\n\n');
 }
 
 /** Same shape, from a 要务 table column: one group per OKR row. */

@@ -168,6 +168,19 @@ test('group headings come from the quarterly OKR objectives, not the KR paragrap
   assert.doesNotMatch(body, /### KR1 完成 PhD/, 'the raw KR paragraph must not become a heading');
 });
 
+test('an objective with nothing planned still shows, with the placeholder', () => {
+  const { config, runsDir } = tempWorkspace();
+  // Plan only O1 (row 1); O2 (row 2) is left unplanned this cycle. It must still
+  // appear, with 本周期无安排 — not silently dropped.
+  writeRun(runsDir, 'run-partial', {
+    items: [{ text: '只排了工作这一项', target_row: 1, target_row_label: 'KR1' }],
+  });
+  writeLocalCyclesFromRun(config, runsDir, 'run-partial');
+  const body = readCycle(config, TARGET_ID)!.sections['要务']!.content;
+  assert.match(body, /^### 工作 · 技术专家$/m, 'the planned objective shows');
+  assert.match(body, /### 金钱 · 家庭理财规划师\n本周期无安排/m, 'the unplanned objective shows the placeholder');
+});
+
 test('the MIT marker and Linear ids survive into the markdown', () => {
   const { config, runsDir } = tempWorkspace();
   writeRun(runsDir, 'run-6');
