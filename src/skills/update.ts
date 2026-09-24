@@ -5,6 +5,7 @@ import yaml from 'js-yaml';
 import type { AppConfig } from '../config/schema.js';
 import { loadConfig } from '../config/load-config.js';
 import { runCommand } from '../utils/command.js';
+import { isFilledLifeReviewOsConfig } from './life-review-os-config.js';
 
 /**
  * Updating the weekly-review skill from the console.
@@ -111,7 +112,15 @@ export type SkillCommandRunner = (
 
 export async function installSkillRepo(
   targetDir: string,
-  deps: { run?: SkillCommandRunner } = {},
+  deps: {
+    run?: SkillCommandRunner;
+    /**
+     * Configs from earlier installs, most relevant first. The first one that is
+     * filled in is carried into the new checkout instead of the template. See
+     * `previousSkillConfigCandidates()`.
+     */
+    seedFrom?: string[];
+  } = {},
 ): Promise<SkillInstallResult> {
   const run: SkillCommandRunner = deps.run ?? runCommand;
   const dir = path.resolve((targetDir || '').trim() || defaultSkillInstallDir());
@@ -131,28 +140,57 @@ export async function installSkillRepo(
   if (!cloned.ok) return fail(`git clone 失败：${(cloned.stderr || cloned.stdout || '未知错误').slice(0, 300)}`);
 
   // life-review-os keeps config.yaml gitignored; the repo ships only
-  // config.example.yaml. Seed the real file so the CLI has something to read —
-  // the returned message tells the operator to fill in the tokens.
+  // config.example.yaml. Seed the real file so the CLI has something to read.
+  //
+  // A filled config from an earlier install wins over the template. This clone
+  // usually *replaces* a working install — the registry is rewritten to point
+  // here — and seeding the template then silently swaps real document tokens
+  // for `YOUR_*` placeholders. The install message saying "fill in the tokens"
+  // is no safeguard when the install ran in the background at startup and
+  // nobody read it: every run after that failed on its first Feishu call (#218).
   const example = path.join(dir, 'config.example.yaml');
   const configFile = path.join(dir, 'config.yaml');
-  let seeded = false;
+  const previous = (deps.seedFrom ?? []).find((candidate) => path.resolve(candidate) !== configFile && isFilledLifeReviewOsConfig(candidate));
+  let seeded: 'previous' | 'example' | '' = '';
   try {
-    if (fs.existsSync(example) && !fs.existsSync(configFile)) {
-      fs.copyFileSync(example, configFile);
-      seeded = true;
+    if (!fs.existsSync(configFile)) {
+      if (previous) {
+        fs.copyFileSync(previous, configFile);
+        seeded = 'previous';
+      } else if (fs.existsSync(example)) {
+        fs.copyFileSync(example, configFile);
+        seeded = 'example';
+      }
     }
   } catch {
     // Non-fatal: the clone succeeded; the operator can copy it by hand.
   }
 
+  const messages = {
+    previous: `已安装到 ${dir}，沿用了之前的配置 ${previous}。`,
+    example: `已安装到 ${dir}。请在 ${configFile} 填入飞书文档 token 与 linear.workspace 后再运行 weekly-review。`,
+    '': `已安装到 ${dir}（未找到 config.example.yaml，需手动创建 config.yaml）。`,
+  };
   return {
     ok: true,
     dir,
     registered: { id: SKILL_ID, path: path.join(dir, 'SKILL.md'), workdir: dir },
-    message: seeded
-      ? `已安装到 ${dir}。请在 ${configFile} 填入飞书文档 token 与 linear.workspace 后再运行 weekly-review。`
-      : `已安装到 ${dir}（未找到 config.example.yaml，需手动创建 config.yaml）。`,
+    message: messages[seeded],
   };
+}
+
+/**
+ * Where a filled life-review-os config.yaml from an earlier install may live,
+ * most relevant first: the workdir the registry points at now (the install
+ * about to be replaced), then each CLI's skill directory. Nonexistent paths are
+ * fine — `installSkillRepo` skips them.
+ */
+export function previousSkillConfigCandidates(config?: AppConfig): string[] {
+  const dirs = [
+    config ? workdirFor(config) : '',
+    ...CLI_SKILL_HOMES.map(({ home }) => path.join(os.homedir(), home, 'skills', SKILL_ID)),
+  ].filter(Boolean);
+  return [...new Set(dirs.map((dir) => path.join(dir, 'config.yaml')))];
 }
 
 /**
@@ -379,7 +417,7 @@ export async function ensureWeeklyReviewSkill(configPath: string): Promise<Ensur
   }
 
   if (decision.action === 'install') {
-    const result = await installSkillRepo(defaultSkillInstallDir());
+    const result = await installSkillRepo(defaultSkillInstallDir(), { seedFrom: previousSkillConfigCandidates(config) });
     if (!result.ok || !result.registered) return { action: 'install-failed', message: result.message };
     persistSkillRegistration(configPath, result.registered);
     return { action: 'install', message: result.message };

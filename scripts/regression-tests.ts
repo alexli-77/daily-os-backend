@@ -180,6 +180,7 @@ try {
     // LEO-287 installing the skill (git clone) from the console: git-missing,
     // non-empty target, clone failure, and the config.yaml seed + registration.
     'scripts/tests/skill-install.test.ts',
+    'scripts/tests/life-review-os-config.test.ts',
     // Startup self-provisioning policy: clone when missing, fast-forward a clean
     // default-branch checkout, and never touch a developer's feature branch / dirty tree.
     'scripts/tests/skill-auto-provision.test.ts',
