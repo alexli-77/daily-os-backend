@@ -1,3 +1,5 @@
+import type { AppConfig } from '../config/schema.js';
+import { listCycles } from '../cycles/file.js';
 import type { EvidenceSource } from './types.js';
 
 export interface WeeklyPriorityItem {
@@ -19,6 +21,74 @@ export function extractWeeklyPrioritiesFromFeishuDocs(source: EvidenceSource | u
   return items.length > 0
     ? { state: 'available', detail: `Extracted ${items.length} weekly priority items for ${week}`, data: { week, items } }
     : { state: 'empty', detail: `No Feishu weekly priorities found for ${week}`, data: { week, items: [] } };
+}
+
+/**
+ * The current cycle's 要务, read from the local cycle file.
+ *
+ * Since Feishu write-back went default-off (#211) the plan lives only in
+ * `20_CYCLES/*.md`: the Feishu weekly table never gets a column for the new
+ * cycle, so `extractWeeklyPrioritiesFromFeishuDocs` finds nothing and the
+ * daily plan loses its strategy anchor every single day (#220). The local file
+ * is the source of truth now; Feishu stays as the fallback for installs that
+ * still write back or have no cycle file for today.
+ */
+export function extractWeeklyPrioritiesFromLocalCycle(config: AppConfig, date: string): EvidenceSource {
+  const doc = currentCycle(config, date);
+  if (!doc) return { state: 'missing', detail: `No local cycle covers ${date}` };
+  const content = doc.sections['要务']?.content || '';
+  const items = parseCyclePriorities(content, doc.cycle, doc.id);
+  return items.length > 0
+    ? { state: 'available', detail: `Extracted ${items.length} weekly priority items for ${doc.cycle} from local cycle ${doc.id}`, data: { week: doc.cycle, items } }
+    : { state: 'empty', detail: `Local cycle ${doc.id} has no 要务 yet`, data: { week: doc.cycle, items: [] } };
+}
+
+/** Local cycle first; Feishu only when the local file has nothing to offer. */
+export function preferLocalPriorities(local: EvidenceSource, feishu: EvidenceSource): EvidenceSource {
+  return local.state === 'available' ? local : feishu;
+}
+
+/**
+ * `### <OKR heading>` groups `- <item>` lines. Items keep their markers (✅,
+ * **MIT**, Linear ids) verbatim — the scorer already drops ✅ rows, and
+ * rewriting the text here would make the candidate stop matching what the user
+ * sees in the Cycles page.
+ */
+export function parseCyclePriorities(markdown: string, week: string, source = 'local_cycle'): WeeklyPriorityItem[] {
+  const out: WeeklyPriorityItem[] = [];
+  let okr = '';
+  for (const raw of markdown.split('\n')) {
+    const line = raw.trim();
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    if (heading) {
+      okr = completeText(heading[1] || '', 220);
+      continue;
+    }
+    const bullet = line.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+    if (!bullet) continue;
+    const item = completeText(bullet[1] || '', 260);
+    if (item.length < 2) continue;
+    out.push({ source, scope: 'local', week, okr, item });
+  }
+  return out;
+}
+
+/**
+ * The cycle whose span contains `date`. The label carries no year, so the
+ * start date is what pins it; the label supplies the end. Narrowest wins when
+ * two overlap, same rule as the Feishu header lookup.
+ */
+function currentCycle(config: AppConfig, date: string): ReturnType<typeof listCycles>[number] | null {
+  let best: { doc: ReturnType<typeof listCycles>[number]; span: number } | null = null;
+  for (const doc of listCycles(config)) {
+    if (!doc.startDate || doc.startDate > date) continue;
+    const span = labelSpanCoveringDate(doc.cycle, date);
+    if (span === null) continue;
+    const elapsed = Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${doc.startDate}T00:00:00Z`)) / DAY_MS);
+    if (elapsed >= span) continue;
+    if (!best || span < best.span) best = { doc, span };
+  }
+  return best?.doc ?? null;
 }
 
 export function extractWeeklyPrioritiesFromXml(xml: string, week: string, source = 'document'): WeeklyPriorityItem[] {

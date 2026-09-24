@@ -53,6 +53,7 @@ import {
   listTodoInboxItems,
   openTodoInboxItems,
   parseTodoInboxCommand,
+  syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
 } from '../todo/inbox.js';
 import { recordTodoFeedback } from '../todo/feedback.js';
@@ -883,6 +884,9 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
       ...(note ? { note } : {}),
       ...(minutes ? { minutes } : clearsMinutes ? { minutes: 0 } : {}),
     });
+    // An inbox-sourced plan row is the inbox item; keep the inbox's own status
+    // in step so the next plan does not re-propose it (#220).
+    syncTodoInboxFromPlanRow(config, candidateId, event);
     return {
       ok: true,
       candidateId,

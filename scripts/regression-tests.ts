@@ -174,6 +174,7 @@ try {
     // LEO-279 cycle files -> next run: the hand-written retro reaches the
     // planner, inside the 20k of the input pack life-review-os actually reads.
     'scripts/tests/cycle-retro-context.test.ts',
+    'scripts/tests/plan-candidate-pool.test.ts',
     // Updating the weekly-review skill from the console: fast-forward only, and
     // refused on a dirty tree or a diverged branch.
     'scripts/tests/skill-update.test.ts',

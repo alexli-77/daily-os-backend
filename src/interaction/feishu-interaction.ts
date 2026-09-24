@@ -51,7 +51,7 @@ import { readLatestSkillRun } from '../skills/runner.js';
 import { executeLifeReviewOsRetroReview, executeLifeReviewOsWriteback, formatRetroReviewOutcome, prepareLifeReviewOsWriteback } from '../skills/life-review-os.js';
 import { buildOkrWritebackPreview, executeConfirmedOkrWriteback, renderOkrWritebackCard } from './okr-writeback-card.js';
 import { formatWorkflowRevisionMemoryNote } from './workflow-revision.js';
-import { handleTodoInboxCommand, parseTodoInboxCommand } from '../todo/inbox.js';
+import { handleTodoInboxCommand, parseTodoInboxCommand, syncTodoInboxFromPlanRow } from '../todo/inbox.js';
 import type { CalendarDraft, CalendarDraftPeriod, CalendarDraftResult } from '../calendar/bridge.js';
 import { writebackCalendarDraft } from '../calendar/writeback.js';
 import { dbLoadCalendarDraftSnapshot, dbSaveCalendarDraftSnapshot } from '../storage/db.js';
@@ -1507,6 +1507,7 @@ async function handleTodoCardAction(input: {
     rank: input.action.rank,
     source: `card-action:${input.event.chatId}`,
   });
+  syncTodoInboxFromPlanRow(input.config, input.action.candidateId, input.action.action);
   const label = input.action.action === 'complete' ? '完成' : '推迟';
   await input.channel.send(
     input.event.chatId,
