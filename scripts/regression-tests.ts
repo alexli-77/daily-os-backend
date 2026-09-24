@@ -175,6 +175,10 @@ try {
     // planner, inside the 20k of the input pack life-review-os actually reads.
     'scripts/tests/cycle-retro-context.test.ts',
     'scripts/tests/plan-candidate-pool.test.ts',
+    // cycle_context: local 20_CYCLES + 10_OKR replace life-review-os reading the
+    // Feishu weekly table — 要务 markdown parses back to per-OKR rows, and the
+    // previous/target cycle are assembled from local files (null → Feishu fallback).
+    'scripts/tests/cycle-context.test.ts',
     // Updating the weekly-review skill from the console: fast-forward only, and
     // refused on a dirty tree or a diverged branch.
     'scripts/tests/skill-update.test.ts',
