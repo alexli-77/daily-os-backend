@@ -173,7 +173,7 @@ function planFor(run: MigrationRun, label: string, section: CycleSection, conten
  * heading is merely wrong, never the item text, and a short list falls back to
  * the KR paragraph rather than mislabelling a row it cannot account for.
  */
-function okrRowLabels(config: AppConfig): string[] {
+export function okrRowLabels(config: AppConfig): string[] {
   const vault = (config.memory.repository_path || '').trim();
   if (!vault) return [];
   try {

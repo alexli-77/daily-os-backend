@@ -22,6 +22,7 @@ import { resolveOkrDir } from '../okr/biweekly-progress.js';
 import { isLifeReviewOsEntry, runLifeReviewOsSkill } from './life-review-os.js';
 import { formatLocalCycleWriteback, writeLocalCyclesFromRun, type LocalCycleWritebackResult } from '../cycles/writeback.js';
 import { recentLocalPriorities, recentLocalRetros, renderLocalPrioritiesBlock, renderLocalRetroBlock } from '../cycles/context.js';
+import { buildCycleContext, renderCycleContextBlock } from '../cycles/cycle-context.js';
 import { bundledAsset } from '../utils/install-root.js';
 
 type SkillEntry = AppConfig['skills']['registry'][number];
@@ -255,6 +256,9 @@ export async function buildSkillInputPack(
   const okrChainSummary = loadLocalOkrChainSummary(config);
   const localRetroBlock = renderLocalRetroBlock(recentLocalRetros(config));
   const localPrioritiesBlock = renderLocalPrioritiesBlock(recentLocalPriorities(config, date));
+  // Structured OKR rows + previous/target cycle 要务/retro, from local md — the
+  // local-first replacement for life-review-os reading the Feishu weekly table.
+  const cycleContextBlock = renderCycleContextBlock(buildCycleContext(config));
 
   return redactSensitive(
     [
@@ -288,6 +292,15 @@ export async function buildSkillInputPack(
       '',
       readBiweeklyStrategy(),
       okrChainSummary || '(no local OKR chain found)',
+      '',
+      // Structured cycle context from local md (20_CYCLES + 10_OKR): OKR rows,
+      // the previous cycle's 要务/retro and the target cycle's existing 要务.
+      // life-review-os reads THIS instead of the Feishu weekly table, so a run
+      // needs no Feishu token; absent (no local cycle) it falls back to Feishu.
+      // Kept high in the pack so it survives the ~20k-char read cutoff.
+      '## Cycle Context',
+      '本地 20_CYCLES + 10_OKR 推导的结构化周期上下文（schema 1）：okrRows / 上期 reviewRows（按 O 分组的要务）+ reviewRetro / 本期 targetRows / reviewWeek / targetWeek。life-review-os 有它就用它、不再读飞书 weekly 表；没有则回退飞书。row 号与 okrRows 对齐（0=表头）。',
+      cycleContextBlock || '(no local cycle context)',
       '',
       // Same reason as the OKR chain above: life-review-os only reads the first
       // ~20k chars of this pack, and the full Linear dump under "Structured

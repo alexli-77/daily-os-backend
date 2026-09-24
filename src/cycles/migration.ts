@@ -478,7 +478,7 @@ function bulletFor(text: string, isMit: boolean): string {
  * OKR row labels are whole KR paragraphs, and a run's copy is a ` / `-joined
  * cell that can start with the separator for a line it never captured.
  */
-function shortLabel(value: string): string {
+export function shortLabel(value: string): string {
   const first = (value || '')
     .split('\n')
     .map((line) => line.replace(/^[\s/]+/, '').trim())
