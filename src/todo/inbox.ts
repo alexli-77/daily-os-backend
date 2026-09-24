@@ -82,6 +82,31 @@ export function isTodoInboxCaptureText(text: string): boolean {
   return parseTodoInboxCommand(text)?.type === 'capture';
 }
 
+/** Whether an inbox command's target names an existing open todo. */
+export function hasMatchingOpenTodo(config: AppConfig, target: string): boolean {
+  return findOpenItem(listTodoInboxItems(config), target) !== null;
+}
+
+/**
+ * Resolve the command for text typed into the dedicated 记下 capture field.
+ *
+ * That field doubles as a command line ("完成 X", "删除 X", "修改 todo：…"), but a
+ * normal todo that merely *starts* with 完成 / 删除 / 暂缓 / … must still be
+ * captured, not silently swallowed: `parseTodoInboxCommand` reads it as a
+ * done/delete command, `updateTodoItem` finds no matching open todo and no-ops,
+ * and the capture is lost with the UI none the wiser (e.g. "完成导师布置的论文任务"
+ * captured nothing). So an update/rename is honoured only when its target
+ * actually names an open todo; otherwise the whole text is captured verbatim.
+ */
+export function resolveCaptureCommand(config: AppConfig, text: string): TodoInboxCommand {
+  const command = parseTodoInboxCommand(text);
+  if (!command) return { type: 'capture', text };
+  if ((command.type === 'update' || command.type === 'rename') && !hasMatchingOpenTodo(config, command.target)) {
+    return { type: 'capture', text };
+  }
+  return command;
+}
+
 export function handleTodoInboxCommand(
   config: AppConfig,
   command: TodoInboxCommand,
