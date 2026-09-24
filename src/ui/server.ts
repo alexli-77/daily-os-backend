@@ -52,7 +52,7 @@ import {
   handleTodoInboxCommand,
   listTodoInboxItems,
   openTodoInboxItems,
-  parseTodoInboxCommand,
+  resolveCaptureCommand,
   syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
 } from '../todo/inbox.js';
@@ -1396,7 +1396,7 @@ async function captureTodo(options: UiServerOptions, body: unknown): Promise<Rec
   const env = readEnvFile(options.envPath);
   applyEnv(env);
   const config = loadConfig(options.configPath);
-  const command = parseTodoInboxCommand(text) || { type: 'capture' as const, text };
+  const command = resolveCaptureCommand(config, text);
   if (command.type === 'capture' && typeof request.type === 'string' && isTodoInboxType(request.type)) command.itemType = request.type;
   const result = handleTodoInboxCommand(config, command, { source: 'local-ui' });
   return { ok: true, text: result.reply || 'Todo inbox updated.', items: result.items || [], state: await buildState(options) };
@@ -2175,7 +2175,7 @@ async function runActionInner(options: UiServerOptions, request: Record<string, 
   if (action === 'todo_capture') {
     const text = String(request.text || '').trim();
     if (!text) throw new Error('Todo capture text is empty.');
-    const command = parseTodoInboxCommand(text) || { type: 'capture' as const, text };
+    const command = resolveCaptureCommand(config, text);
     const result = handleTodoInboxCommand(config, command, { source: 'local-ui' });
     return { ok: true, text: result.reply || 'Todo inbox updated.', state: await buildState(options) };
   }
