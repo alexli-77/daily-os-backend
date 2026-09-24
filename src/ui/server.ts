@@ -34,7 +34,7 @@ import {
   rhythmNotesAreTemplate,
 } from '../user/rhythm.js';
 import { BIWEEKLY_STRATEGY_FILE, defaultBiweeklyStrategy, expandPath, runConfiguredSkill } from '../skills/runner.js';
-import { defaultSkillInstallDir, installSkillRepo, readSkillRepoState, updateSkillRepo } from '../skills/update.js';
+import { defaultSkillInstallDir, installSkillRepo, previousSkillConfigCandidates, readSkillRepoState, updateSkillRepo } from '../skills/update.js';
 import { generateCycleReview, isLifeReviewOsEntry } from '../skills/life-review-os.js';
 import { readOkrEditorState, writeOkrFile } from '../okr/editor.js';
 import { normalizeOkrMarkdown } from '../okr/normalize.js';
@@ -1009,7 +1009,9 @@ async function updateSkill(options: UiServerOptions, auth: AuthContext): Promise
 async function installSkill(options: UiServerOptions, auth: AuthContext, body: unknown): Promise<Record<string, unknown>> {
   if (auth.role !== 'admin') return { ok: false, error: 'Admin role required.' };
   const dir = typeof readRecord(body).dir === 'string' ? String(readRecord(body).dir) : '';
-  const result = await installSkillRepo(dir || defaultSkillInstallDir());
+  const result = await installSkillRepo(dir || defaultSkillInstallDir(), {
+    seedFrom: previousSkillConfigCandidates(loadConfig(options.configPath)),
+  });
   if (!result.ok || !result.registered) return { ...result };
   // Persist the checkout into the registry (same write path as saveConfig).
   const config = loadConfig(options.configPath);

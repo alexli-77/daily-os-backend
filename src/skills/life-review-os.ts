@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { runCommand } from '../utils/command.js';
+import { checkLifeReviewOsConfig } from './life-review-os-config.js';
 
 type SkillEntry = AppConfig['skills']['registry'][number];
 
@@ -296,7 +297,29 @@ function parseLifeReviewOsJson(stdout: string, stderr: string, label: string, ok
 function requireLifeReviewOsCli(entry: SkillEntry): string {
   const cli = resolveLifeReviewOsCli(entry);
   if (!cli) throw new Error('life-review-os CLI not found. Set weekly-review workdir to the life-review-os repo or install bin/life-review-os.mjs in the skill folder.');
+  assertLifeReviewOsConfigFilled(cli);
   return cli;
+}
+
+/**
+ * Refuse to start a run whose config.yaml still holds template placeholders.
+ *
+ * Without this the CLI sends `YOUR_2026_DOG_WEEKLY_TABLE_BLOCK_ID` to Feishu
+ * as a block id and the run dies as `1770001 invalid param` — an error that
+ * names neither the field nor the file (#218). A missing config.yaml is left
+ * to the CLI, which already says so.
+ */
+function assertLifeReviewOsConfigFilled(cli: string): void {
+  const configPath = path.join(lifeReviewOsRoot(cli), 'config.yaml');
+  if (!fs.existsSync(configPath)) return;
+  const check = checkLifeReviewOsConfig(configPath);
+  if (check.error) throw new Error(`life-review-os 的 config.yaml 读不了：${check.error}（${configPath}）`);
+  if (check.unfilled.length > 0) {
+    throw new Error(
+      `life-review-os 的 config.yaml 还是模板，${check.unfilled.join('、')} 没填。` +
+        `填入飞书 Weekly 文档的 token 和表格 block_id 后再跑：${configPath}`,
+    );
+  }
 }
 
 function resolveLifeReviewOsCli(entry: SkillEntry): string {
