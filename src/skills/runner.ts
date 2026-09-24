@@ -21,7 +21,7 @@ import { loadOkrFromDir, buildOkrSummary } from '../okr/loader.js';
 import { resolveOkrDir } from '../okr/biweekly-progress.js';
 import { isLifeReviewOsEntry, runLifeReviewOsSkill } from './life-review-os.js';
 import { formatLocalCycleWriteback, writeLocalCyclesFromRun, type LocalCycleWritebackResult } from '../cycles/writeback.js';
-import { recentLocalRetros, renderLocalRetroBlock } from '../cycles/context.js';
+import { recentLocalPriorities, recentLocalRetros, renderLocalPrioritiesBlock, renderLocalRetroBlock } from '../cycles/context.js';
 import { bundledAsset } from '../utils/install-root.js';
 
 type SkillEntry = AppConfig['skills']['registry'][number];
@@ -254,6 +254,7 @@ export async function buildSkillInputPack(
   const structuredEvidence = compactEvidenceForWeeklyPlanning(evidence);
   const okrChainSummary = loadLocalOkrChainSummary(config);
   const localRetroBlock = renderLocalRetroBlock(recentLocalRetros(config));
+  const localPrioritiesBlock = renderLocalPrioritiesBlock(recentLocalPriorities(config, date));
 
   return redactSensitive(
     [
@@ -312,6 +313,12 @@ export async function buildSkillInputPack(
       '## Local Cycle Retro',
       '用户在本地 Cycles 页手写的 retro，按周期倒序。**这是 retro 的权威来源**：用户现在在这里写复盘，飞书的 retro 单元格可能为空或过时。对某个周期做复盘时，如果下面有同名周期的 retro，以它为准；两边都有内容时以这里为准，飞书那份视为旧稿。',
       localRetroBlock || '(no local retro written yet)',
+      '',
+      // #220: with Feishu write-back off, the weekly table has no column for
+      // any recent cycle, so this is the only place the previous plan exists.
+      '## Local Cycle Priorities',
+      '用户本地 Cycles 页里各周期的要务，按周期倒序，条目末尾的 ✅ / 🚧 / ❌ 是完成状态。**这是上期要务的权威来源**：飞书写回已关闭，weekly_rows 里对应周期的要务列通常为空。复盘上一期、按「照搬上期未完成要务」规则延续条目时，以这里同名周期的要务为准；🚧 / ❌ 的条目要么照搬进新周期，要么明确写「本期不做」及原因，不能无声消失。',
+      localPrioritiesBlock || '(no local cycle priorities yet)',
       '',
       '## Latest Workflow',
       latest ? JSON.stringify(latest, null, 2) : '(none)',

@@ -6,7 +6,7 @@ import { collectSnapshots } from '../connectors/snapshots.js';
 import { collectVault } from '../connectors/vault-gate.js';
 import { readProgressLedger } from '../progress/capture.js';
 import type { Evidence, EvidenceSource } from './types.js';
-import { extractWeeklyPrioritiesFromFeishuDocs } from './weekly-priorities.js';
+import { extractWeeklyPrioritiesFromFeishuDocs, extractWeeklyPrioritiesFromLocalCycle, preferLocalPriorities } from './weekly-priorities.js';
 import { todoInboxEvidence } from '../todo/inbox.js';
 
 export async function collectEvidence(config: AppConfig, date: string): Promise<Evidence> {
@@ -42,7 +42,10 @@ export async function collectEvidence(config: AppConfig, date: string): Promise<
     date,
     sources: {
       ...sources,
-      weekly_priorities: extractWeeklyPrioritiesFromFeishuDocs(feishuDocsSource(sources), date),
+      weekly_priorities: preferLocalPriorities(
+        extractWeeklyPrioritiesFromLocalCycle(config, date),
+        extractWeeklyPrioritiesFromFeishuDocs(feishuDocsSource(sources), date),
+      ),
     },
   };
 }

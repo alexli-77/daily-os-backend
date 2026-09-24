@@ -510,13 +510,30 @@ test('a candidate ticked complete is dropped from the next plan (Feishu ✅ / co
   });
 });
 
-test('completion is terminal: still excluded on a later day, not just the day it was ticked', () => {
+// #220: a tick on a Linear / inbox row is about that day's slice of the work.
+// The issue itself stays In Progress in Linear, and excluding it forever is how
+// all three of a user's active issues vanished from her plan.
+test('Linear completion only holds for the day it was ticked; the next day Linear decides', () => {
   withTmpWorkdir(() => {
-    const target = buildScoredTodos(config, makeEvidence(), DATE, { now: NOW }).top[0].id;
-    recordTodoFeedback(config, { date: DATE, event: 'complete', candidateId: target, rank: 1, source: 'feishu-card' });
+    const target = 'linear:LEO-142';
+    assert.ok(buildScoredTodos(config, makeEvidence(), DATE, { now: NOW }).top.some((item) => item.id === target), 'fixture plans LEO-142');
+    recordTodoFeedback(config, { date: DATE, event: 'complete', candidateId: target, rank: 1, source: 'console-today' });
+    const sameDay = buildScoredTodos(config, makeEvidence(), DATE, { now: NOW });
+    assert.ok(!sameDay.top.some((item) => item.id === target), 're-running today does not re-propose what was just ticked');
     const laterDate = '2026-07-24';
     const later = buildScoredTodos(config, makeEvidence(), laterDate, { now: new Date(`${laterDate}T00:00:00`) });
-    assert.ok(!later.top.some((item) => item.id === target), 'a week later it is still excluded');
+    assert.ok(later.top.some((item) => item.id === target), 'still active in Linear a week later, so it is planned again');
+  });
+});
+
+test('completion stays terminal for sources with no state of their own (weekly priorities, vault)', () => {
+  withTmpWorkdir(() => {
+    const target = buildScoredTodos(config, makeEvidence(), DATE, { now: NOW, topN: 50 }).top.find((item) => item.source === 'weekly_priorities')?.id;
+    assert.ok(target, 'fixture has a weekly-priority candidate');
+    recordTodoFeedback(config, { date: DATE, event: 'complete', candidateId: target!, rank: 1, source: 'feishu-card' });
+    const laterDate = '2026-07-24';
+    const later = buildScoredTodos(config, makeEvidence(), laterDate, { now: new Date(`${laterDate}T00:00:00`), topN: 50 });
+    assert.ok(!later.top.some((item) => item.id === target), 'nothing else would ever say it is done, so the tick has to');
   });
 });
 

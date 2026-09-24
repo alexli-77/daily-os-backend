@@ -88,8 +88,8 @@ export interface ScoreAndRankOptions {
   carryOverDaysById?: Map<string, number>;
   /**
    * candidateIds already marked complete (Feishu ✅ / console "完成"), excluded from
-   * the candidate pool so a finished todo is never re-proposed tomorrow.
-   * Injectable for tests; falls back to the ledger in `buildScoredTodos`.
+   * the candidate pool. Injectable for tests; falls back to the ledger in
+   * `buildScoredTodos`, scoped to the plan date — see `getCompletedCandidateIds`.
    */
   completedCandidateIds?: Set<string>;
   /**
@@ -129,9 +129,9 @@ export function buildScoredTodos(
   const dayShape = options.dayShape ?? resolveDayShape(config, date);
   const now = options.now ?? new Date(`${date}T00:00:00`);
   const all = normalizeCandidates({ config, evidence, date, now });
-  // Drop anything the user already ticked complete: a completed todo must never be
-  // re-proposed by a later plan, however its source still reports it.
-  const completed = options.completedCandidateIds ?? getCompletedCandidateIds(config);
+  // Drop what the user already ticked complete. For Linear and inbox rows that
+  // means "ticked today"; after that their own state decides (#220).
+  const completed = options.completedCandidateIds ?? getCompletedCandidateIds(config, { date });
   const candidates = completed.size ? all.filter((candidate) => !completed.has(candidate.id)) : all;
   // LEO-232: overlay the carry-over streak (from the daily-review reconciliation
   // ledger) so a task the user keeps deferring gains carryOverDays even when its

@@ -174,6 +174,31 @@ export function updateTodoInboxItemById(config: AppConfig, id: string, update: T
   return { handled: true, reply: `Todo 已更新：${match.text}`, items: [match] };
 }
 
+/**
+ * Carry a plan-row state change on an inbox-sourced row back to the inbox.
+ *
+ * A row on the Today plan whose candidateId is `todo_inbox:<id>` *is* that
+ * inbox item, but ticking it only wrote the feedback ledger. The inbox kept
+ * saying `open`, so the two disagreed — and since the scorer now lets the inbox
+ * decide what is finished after the day of the tick (#220), an unsynced tick
+ * would bring the item straight back tomorrow.
+ *
+ * `defer` is deliberately not mapped: on the plan it means "tomorrow", which is
+ * still open work, not the inbox's `deferred` (shelved, out of the plan).
+ * Returns whether the inbox changed; unknown ids and non-inbox rows are no-ops.
+ */
+export function syncTodoInboxFromPlanRow(config: AppConfig, candidateId: string, event: string): boolean {
+  if (!candidateId.startsWith('todo_inbox:')) return false;
+  const status: TodoInboxStatus | undefined =
+    event === 'complete' ? 'done' : event === 'reopen' || event === 'partial' ? 'open' : undefined;
+  if (!status) return false;
+  const id = candidateId.slice('todo_inbox:'.length);
+  const match = listTodoInboxItems(config).find((item) => item.id === id);
+  if (!match || match.status === status) return false;
+  updateTodoInboxItemById(config, id, { status });
+  return true;
+}
+
 /** How long a done/deferred todo stays visible in the console's History / Deferred lists. */
 export const TODO_HISTORY_RETENTION_DAYS = 30;
 

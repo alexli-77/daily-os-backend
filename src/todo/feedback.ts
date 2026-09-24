@@ -120,27 +120,56 @@ export function recordCarryOver(config: AppConfig, date: string, candidateIds: s
 }
 
 /**
- * candidateIds the user has marked complete — on the Feishu plan card's ✅ button
- * or the console's "完成". A completed todo must not be re-proposed by the next
- * daily plan, so the scorer subtracts these from its candidate pool. Completion is
- * terminal: an id stays excluded on every later day, not just the day it was
- * ticked, which is exactly what "点了 ✅ 第二天还收到同样的 todo" was missing.
+ * Candidate sources that record for themselves whether the work is finished:
+ * a Linear issue has its state, an inbox capture has its status. For these,
+ * the source is the authority on "done" and a plan-row tick only speaks for
+ * the day it was made on. See `getCompletedCandidateIds`.
  */
-export function getCompletedCandidateIds(config: AppConfig): Set<string> {
-  const out = new Set<string>();
-  // Ledger order is append order, so the last complete/reopen for an id wins:
-  // restoring a todo from the console's History clears its completed state and
-  // makes it eligible for planning again.
+const SELF_TRACKING_PREFIXES = ['linear:', 'todo_inbox:'] as const;
+
+export function isSelfTrackingCandidate(candidateId: string): boolean {
+  return SELF_TRACKING_PREFIXES.some((prefix) => candidateId.startsWith(prefix));
+}
+
+/**
+ * candidateIds the user has marked complete — on the Feishu plan card's ✅ button
+ * or the console's "完成" — that the next plan must not propose again.
+ *
+ * Without `date` completion is terminal for every source: once ticked, excluded
+ * on every later day. That was right for the vault and weekly-priority rows,
+ * which have no state of their own, and wrong for Linear and the inbox (#220).
+ * Ticking today's slice of an Urgent Linear issue that runs for weeks excluded
+ * the *issue* from planning forever, while Linear still said In Progress — on
+ * 2026-09-24 all three of the user's active issues were gone that way, and the
+ * plan came back with one item.
+ *
+ * With `date` (the scorer passes the plan date), a self-tracking candidate is
+ * excluded only when it was completed *on that date* — re-running today's plan
+ * still does not re-propose what you just ticked — and from the next day its
+ * own source decides: a closed Linear issue is not in the active list, a done
+ * inbox item is not in `open`. The inbox half depends on a plan-row tick
+ * reaching the inbox; `syncTodoInboxFromPlanRow` does that.
+ *
+ * Ledger order is append order, so the last complete/reopen for an id wins:
+ * restoring a todo from the console's History clears its completed state and
+ * makes it eligible for planning again.
+ */
+export function getCompletedCandidateIds(config: AppConfig, options: { date?: string } = {}): Set<string> {
+  const completedOn = new Map<string, string>();
   for (const entry of listTodoFeedback(config)) {
     if (!entry.candidateId) continue;
-    if (entry.event === 'complete') out.add(entry.candidateId);
+    if (entry.event === 'complete') completedOn.set(entry.candidateId, entry.date);
     // `partial` clears completion for the same reason `reopen` does, and the
     // order matters: ticking a row and then downgrading it to "actually I only
     // got halfway" is a correction, and without this line the row would stay
-    // permanently excluded from planning while the user believes they have
-    // marked it unfinished. Completion is terminal; being *told* it is not
-    // complete has to be able to undo that.
-    else if (entry.event === 'reopen' || entry.event === 'partial') out.delete(entry.candidateId);
+    // excluded from planning while the user believes they have marked it
+    // unfinished. Being *told* it is not complete has to be able to undo that.
+    else if (entry.event === 'reopen' || entry.event === 'partial') completedOn.delete(entry.candidateId);
+  }
+  const out = new Set<string>();
+  for (const [candidateId, date] of completedOn) {
+    if (options.date && isSelfTrackingCandidate(candidateId) && date !== options.date) continue;
+    out.add(candidateId);
   }
   return out;
 }

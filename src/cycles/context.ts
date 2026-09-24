@@ -86,3 +86,61 @@ export function renderLocalRetroBlock(entries: LocalRetroEntry[]): string {
     })
     .join('\n\n');
 }
+
+/**
+ * #220 — the 要务 the user actually planned, from the local cycle files.
+ *
+ * life-review-os reads the previous cycle's 要务 from the Feishu weekly table.
+ * With Feishu write-back off (#211) that column is never written, so the
+ * planner reviews a cycle with no plan in it and its "carry unfinished items
+ * forward verbatim" rule has nothing to carry: 9.7-9.20's 🚧 CUTTO-1093/1094
+ * simply vanished from 9.21-10.4, neither carried nor marked 本期不做.
+ *
+ * Same placement and budget reasoning as the retro block above.
+ */
+const MAX_PRIORITY_CYCLES = 2;
+const MAX_PRIORITY_CHARS_PER_CYCLE = 1800;
+const MAX_PRIORITY_TOTAL_CHARS = 3200;
+
+export interface LocalPrioritiesEntry {
+  cycleId: string;
+  label: string;
+  mode: string;
+  priorities: string;
+  truncated: boolean;
+}
+
+/**
+ * Cycles that have started by `date` and have 要务, newest first. Started, not
+ * finished: planning often runs on the last weekend of a cycle, when the cycle
+ * being reviewed is still the current one.
+ */
+export function recentLocalPriorities(config: AppConfig, date: string): LocalPrioritiesEntry[] {
+  const entries: LocalPrioritiesEntry[] = [];
+  let budget = MAX_PRIORITY_TOTAL_CHARS;
+  for (const doc of listCycles(config)) {
+    if (entries.length >= MAX_PRIORITY_CYCLES) break;
+    if (!doc.startDate || doc.startDate > date) continue;
+    const text = (doc.sections['要务']?.content || '').trim();
+    if (!text) continue;
+    const limit = Math.min(MAX_PRIORITY_CHARS_PER_CYCLE, budget);
+    if (limit <= 0) break;
+    const truncated = text.length > limit;
+    entries.push({
+      cycleId: doc.id,
+      label: doc.cycle || doc.id,
+      mode: doc.mode || '',
+      priorities: truncated ? `${text.slice(0, limit)}…（已截断）` : text,
+      truncated,
+    });
+    budget -= limit;
+  }
+  return entries;
+}
+
+export function renderLocalPrioritiesBlock(entries: LocalPrioritiesEntry[]): string {
+  if (entries.length === 0) return '';
+  return entries
+    .map((entry) => `### ${entry.label} 要务${entry.mode ? `（${entry.mode}）` : ''}\n${entry.priorities}`)
+    .join('\n\n');
+}
