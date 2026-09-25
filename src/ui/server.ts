@@ -16,6 +16,7 @@ import { sendFeishuMessage } from '../connectors/lark-cli.js';
 import { readLatestWorkflowOutput } from '../storage/memory.js';
 import { listTodoFeedback } from '../todo/feedback.js';
 import { applyUserOrder, buildTodayPlanSnapshot } from '../todo/today-plan.js';
+import { isHistoryDate, listPlanDates, readDayHistory } from '../todo/day-history.js';
 import { readArtifactsIndex } from '../storage/artifacts.js';
 import { buildDailyPlanTable, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, normalizePlanMinutes, type DailyPlanTodo } from '../workflows/summary.js';
 import { bundledAsset } from '../utils/install-root.js';
@@ -482,6 +483,9 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // merely looked plausible.
     if (request.method === 'GET' && url.pathname === '/api/today/plan') {
       return sendJson(response, readTodayPlan(options));
+    }
+    if (request.method === 'GET' && url.pathname === '/api/day/plan') {
+      return sendJson(response, readDayPlan(options, url.searchParams.get('date')));
     }
     if (request.method === 'POST' && url.pathname === '/api/capture') return sendJson(response, await captureTodo(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/todo-inbox') return sendJson(response, await updateTodoInbox(options, await readJson(request)));
@@ -1387,6 +1391,25 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
     feedback: snapshot.feedback,
     today,
   };
+}
+
+/**
+ * A past day's plan and its review, read-only. Without `date` it answers with
+ * the most recent day before today that has a plan — "yesterday" in practice,
+ * or the Friday when today is Monday. `dates` rides along so the client can
+ * build its day list from the same call.
+ */
+function readDayPlan(options: UiServerOptions, requested: string | null): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = todayInTimezone(config);
+  const dates = listPlanDates(config);
+  if (requested !== null && !isHistoryDate(requested)) {
+    return { ok: false, error: `date must be YYYY-MM-DD, got: ${requested}` };
+  }
+  const date = requested ?? dates.find((candidate) => candidate < today) ?? today;
+  return { ok: true, today, dates, ...readDayHistory(config, date) };
 }
 
 async function captureTodo(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
