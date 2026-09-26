@@ -15,7 +15,7 @@ import { listTodoFeedback } from './feedback.js';
  * sure of that is to compute it in exactly one place.
  */
 export interface TodayPlanSnapshot {
-  /** The plan's own date, always today: a snapshot exists only for today's plan. */
+  /** The plan's own date. Today's for `buildTodayPlanSnapshot`; any day for `buildPlanSnapshotForDate`. */
   date: string;
   generated_at: string;
   todos: DailyPlanTodo[];
@@ -49,13 +49,29 @@ export function applyUserOrder(todos: DailyPlanTodo[], userRank: Map<string, num
  * flag only because the Mac client requires the field.
  */
 export function buildTodayPlanSnapshot(config: AppConfig): TodayPlanSnapshot | null {
-  const today = todayInTimezone(config);
-  const latest = readDailyPlanOutput(config, today);
+  return buildPlanSnapshotForDate(config, todayInTimezone(config));
+}
+
+/**
+ * The same snapshot for any date — the past-days view reads it.
+ *
+ * One builder for both, so a past day shows exactly what its Today page
+ * showed at the end of that day: the user's order, their estimate edits, and
+ * the last state each row was left in. `output` lets the caller supply a plan
+ * found somewhere other than `readDailyPlanOutput` (the detail cache it reads
+ * is pruned to about a week; the daily memory file is not).
+ */
+export function buildPlanSnapshotForDate(
+  config: AppConfig,
+  date: string,
+  output: { date?: string; generated_at?: string; content: string } | null = readDailyPlanOutput(config, date),
+): TodayPlanSnapshot | null {
+  const latest = output;
   if (!latest) return null;
 
   const todos = extractDailyPlanTodos(latest.content);
 
-  // Latest feedback per candidate for today, so a row the user already ticked
+  // Latest feedback per candidate for that day, so a row the user already ticked
   // does not come back looking untouched.
   const feedback: Record<string, string> = {};
   const editedMinutes = new Map<string, number>();
@@ -63,7 +79,7 @@ export function buildTodayPlanSnapshot(config: AppConfig): TodayPlanSnapshot | n
   // because it is not a state a row can be *in* — it is where the row sits.
   const userRank = new Map<string, number>();
   for (const entry of listTodoFeedback(config)) {
-    if (entry.date !== today) continue;
+    if (entry.date !== date) continue;
     if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
@@ -78,7 +94,7 @@ export function buildTodayPlanSnapshot(config: AppConfig): TodayPlanSnapshot | n
   }
 
   return {
-    date: latest.date ?? '',
+    date: latest.date || date,
     generated_at: latest.generated_at ?? '',
     // The user's edit wins over the model's guess, and is merged in here rather
     // than shipped as a second map: a client that renders `minutes` should not
