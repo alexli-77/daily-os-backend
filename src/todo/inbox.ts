@@ -4,7 +4,9 @@ import crypto from 'node:crypto';
 import type { AppConfig } from '../config/schema.js';
 import { parseWorkflowRevisionItems, type WorkflowRevisionItemType } from '../interaction/workflow-revision.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
+import { readDailyPlanOutput, writeLatestWorkflowOutput } from '../storage/memory.js';
 import { todayInTimezone } from '../utils/date.js';
+import { parseDailyPlanTodoPlan } from '../workflows/summary.js';
 import { recordTodoFeedback } from './feedback.js';
 import { buildTodayPlanSnapshot } from './today-plan.js';
 
@@ -225,6 +227,53 @@ export function syncTodoInboxFromPlanRow(config: AppConfig, candidateId: string,
   if (!match || match.status === status) return false;
   updateTodoInboxItemById(config, id, { status });
   return true;
+}
+
+/**
+ * Put a capture on today's call sheet.
+ *
+ * Until now a capture could only reach the sheet by being picked up the next
+ * time daily_plan ran, which is no use for something you decide to do in the
+ * next hour. This appends it to the end of today's plan instead.
+ *
+ * It rewrites the plan output rather than layering an event on top of it (the
+ * way reorder and estimate edits do), because adding work *is* a change to the
+ * plan: the daily review reconciles against this list, and 往日 replays it.
+ *
+ * `minutes` is asked for at the call site rather than defaulted silently — the
+ * sheet projects every later row's slot from the estimates, so a row without one
+ * would make "预计结束" lie. That projection is why captures were taken out of
+ * the sheet in the first place.
+ *
+ * Returns null when there is no plan today, the id is unknown, or the capture is
+ * already on the sheet.
+ */
+export function addTodoInboxItemToTodayPlan(
+  config: AppConfig,
+  id: string,
+  minutes: number | undefined,
+  date: string,
+): { text: string; rank: number } | null {
+  const match = listTodoInboxItems(config).find((item) => item.id === id);
+  if (!match || match.status !== 'open') return null;
+  const output = readDailyPlanOutput(config, date);
+  if (!output) return null;
+  const plan = parseDailyPlanTodoPlan(output.content);
+  if (!plan) return null;
+  const candidateId = `todo_inbox:${id}`;
+  if (plan.todos.some((todo) => todo.candidateId === candidateId)) return null;
+  const rank = plan.todos.length + 1;
+  const todos = [
+    ...plan.todos,
+    { rank, text: match.text, candidateId, ...(minutes ? { minutes } : {}) },
+  ];
+  writeLatestWorkflowOutput(
+    config,
+    'daily_plan',
+    date,
+    JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) }),
+  );
+  return { text: match.text, rank };
 }
 
 /**

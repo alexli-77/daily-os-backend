@@ -54,6 +54,7 @@ import {
   listTodoInboxItems,
   openTodoInboxItems,
   resolveCaptureCommand,
+  addTodoInboxItemToTodayPlan,
   syncPlanRowFromTodoInbox,
   syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
@@ -431,6 +432,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // Console API routes (auth + member gate already enforced above).
     if (request.method === 'POST' && url.pathname === '/api/today/todo-feedback') return sendJson(response, await todoFeedback(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/plan-order') return sendJson(response, await reorderTodayPlan(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/today/plan-add') return sendJson(response, await addCaptureToTodayPlan(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') return sendJson(response, await cancelRun(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/runs/rerun') return sendJson(response, await rerunWorkflow(options, await readJson(request)));
@@ -568,6 +570,8 @@ const MEMBER_WRITE_WHITELIST = new Set([
   '/api/today/todo-feedback',
   // Reordering your own day is the same class of act as ticking a row on it.
   '/api/today/plan-order',
+  // As is putting one of your own captures on it.
+  '/api/today/plan-add',
   '/api/capture',
   '/api/todo-inbox',
   '/api/chat/session',
@@ -847,6 +851,26 @@ async function reorderTodayPlan(options: UiServerOptions, body: unknown): Promis
     });
   }
   return { ok: true, order, text: '已调整顺序' };
+}
+
+/**
+ * Put one of today's captures on the call sheet, with an estimate so the slots
+ * below it stay honest.
+ */
+async function addCaptureToTodayPlan(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const id = String(request.id || '').trim();
+  if (!id) return { ok: false, error: 'Todo id is required.' };
+  const minutes = normalizePlanMinutes(request.minutes);
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const date = todayInTimezone(config);
+  const added = addTodoInboxItemToTodayPlan(config, id, minutes, date);
+  if (!added) {
+    return { ok: false, error: '加不进今天的计划：这条可能已经在计划里、已经完成，或者今天还没有计划。' };
+  }
+  return { ok: true, id, rank: added.rank, ...(minutes ? { minutes } : {}), text: `已加到今天的计划：${added.text}` };
 }
 
 async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {

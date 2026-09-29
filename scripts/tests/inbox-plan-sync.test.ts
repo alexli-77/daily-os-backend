@@ -21,7 +21,8 @@ import yaml from 'js-yaml';
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
 import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/memory.js';
 import { listTodoFeedback, recordTodoFeedback } from '../../src/todo/feedback.js';
-import { handleTodoInboxCommand, syncPlanRowFromTodoInbox } from '../../src/todo/inbox.js';
+import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
+import { addTodoInboxItemToTodayPlan, handleTodoInboxCommand, syncPlanRowFromTodoInbox } from '../../src/todo/inbox.js';
 import { todayInTimezone } from '../../src/utils/date.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -129,6 +130,50 @@ test('a row reopened on the plan can be ticked again from the inbox', () => {
   recordTodoFeedback(config, { date: todayInTimezone(config), event: 'reopen', candidateId: `todo_inbox:${id}`, rank: 1 });
   assert.equal(syncPlanRowFromTodoInbox(config, id, 'done'), true, 'reopen cleared the done state');
   assert.deepEqual(eventsFor(config, `todo_inbox:${id}`), ['complete', 'reopen', 'complete']);
+});
+
+// --- putting a capture on today's sheet -------------------------------------
+
+const planTexts = (config: AppConfig): string[] => buildTodayPlanSnapshot(config)?.todos.map((todo) => todo.text) ?? [];
+
+test('a capture can be added to the end of today\'s plan, with its estimate', () => {
+  const config = freshConfig();
+  const id = capture(config, '订魁北克住宿');
+  planToday(config, 'linear:LEO-1');
+  const added = addTodoInboxItemToTodayPlan(config, id, 45, todayInTimezone(config));
+  assert.equal(added?.rank, 2);
+  assert.deepEqual(planTexts(config), ['第 1 件', '订魁北克住宿']);
+  const row = buildTodayPlanSnapshot(config)?.todos.find((todo) => todo.candidateId === `todo_inbox:${id}`);
+  assert.equal(row?.minutes, 45, 'the estimate rides along so the slots below stay honest');
+});
+
+test('adding it twice is refused rather than duplicating the row', () => {
+  const config = freshConfig();
+  const id = capture(config, '换汇');
+  planToday(config, 'linear:LEO-1');
+  assert.ok(addTodoInboxItemToTodayPlan(config, id, 30, todayInTimezone(config)));
+  assert.equal(addTodoInboxItemToTodayPlan(config, id, 30, todayInTimezone(config)), null);
+  assert.equal(planTexts(config).length, 2);
+});
+
+test('no plan today, unknown id, and an already-done capture are all refused', () => {
+  const config = freshConfig();
+  const id = capture(config, '本月记账');
+  assert.equal(addTodoInboxItemToTodayPlan(config, id, 30, todayInTimezone(config)), null, 'no plan yet');
+  planToday(config, 'linear:LEO-1');
+  assert.equal(addTodoInboxItemToTodayPlan(config, 'nope', 30, todayInTimezone(config)), null, 'unknown id');
+  syncPlanRowFromTodoInbox(config, id, 'done');
+  handleTodoInboxCommand(config, { type: 'update', action: 'done', target: '本月记账' }, { source: 'test', messageId: 'm' });
+  assert.equal(addTodoInboxItemToTodayPlan(config, id, 30, todayInTimezone(config)), null, 'already done');
+});
+
+test('an added row can then be ticked from the inbox, closing the loop', () => {
+  const config = freshConfig();
+  const id = capture(config, '转运商品');
+  planToday(config, 'linear:LEO-1');
+  addTodoInboxItemToTodayPlan(config, id, 30, todayInTimezone(config));
+  assert.equal(syncPlanRowFromTodoInbox(config, id, 'done'), true);
+  assert.deepEqual(eventsFor(config, `todo_inbox:${id}`), ['complete']);
 });
 
 let passed = 0;
