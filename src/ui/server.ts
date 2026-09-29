@@ -54,6 +54,7 @@ import {
   listTodoInboxItems,
   openTodoInboxItems,
   resolveCaptureCommand,
+  syncPlanRowFromTodoInbox,
   syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
 } from '../todo/inbox.js';
@@ -924,7 +925,12 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
   const env = readEnvFile(options.envPath);
   applyEnv(env);
   const config = loadConfig(options.configPath);
-  updateTodoInboxItemById(config, id, { status: action === 'check' ? 'done' : 'deferred' });
+  const status = action === 'check' ? 'done' : 'deferred';
+  updateTodoInboxItemById(config, id, { status });
+  // The mirror of the plan-row sync above: a capture that is also on today's
+  // plan must reach the feedback ledger, or its call-sheet row stays untouched
+  // and the next plan drops it instead of showing it struck through.
+  syncPlanRowFromTodoInbox(config, id, status);
   return { ok: true, id, action };
 }
 
@@ -1450,6 +1456,11 @@ async function updateTodoInbox(options: UiServerOptions, body: unknown): Promise
       rank: 0,
       source: 'console-my-todos',
     });
+  } else if (status) {
+    // Ticking done here (the Mac app's 我的待办 posts to this route) has to reach
+    // the feedback ledger too, so the call-sheet row is struck through rather
+    // than disappearing from tomorrow's plan.
+    syncPlanRowFromTodoInbox(config, id, status);
   }
   return { ok: true, text: result.reply || 'Todo inbox updated.', items: result.items || [], state: await buildState(options) };
 }
