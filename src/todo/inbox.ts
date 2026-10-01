@@ -4,6 +4,11 @@ import crypto from 'node:crypto';
 import type { AppConfig } from '../config/schema.js';
 import { parseWorkflowRevisionItems, type WorkflowRevisionItemType } from '../interaction/workflow-revision.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
+import { readDailyPlanOutput, writeLatestWorkflowOutput } from '../storage/memory.js';
+import { todayInTimezone } from '../utils/date.js';
+import { parseDailyPlanTodoPlan } from '../workflows/summary.js';
+import { recordTodoFeedback } from './feedback.js';
+import { buildTodayPlanSnapshot } from './today-plan.js';
 
 export type TodoInboxStatus = 'open' | 'done' | 'deferred' | 'deleted';
 export type TodoInboxItemType = WorkflowRevisionItemType | 'reminder';
@@ -224,6 +229,97 @@ export function syncTodoInboxFromPlanRow(config: AppConfig, candidateId: string,
   return true;
 }
 
+/**
+ * Put a capture on today's call sheet.
+ *
+ * Until now a capture could only reach the sheet by being picked up the next
+ * time daily_plan ran, which is no use for something you decide to do in the
+ * next hour. This appends it to the end of today's plan instead.
+ *
+ * It rewrites the plan output rather than layering an event on top of it (the
+ * way reorder and estimate edits do), because adding work *is* a change to the
+ * plan: the daily review reconciles against this list, and 往日 replays it.
+ *
+ * `minutes` is asked for at the call site rather than defaulted silently — the
+ * sheet projects every later row's slot from the estimates, so a row without one
+ * would make "预计结束" lie. That projection is why captures were taken out of
+ * the sheet in the first place.
+ *
+ * Returns null when there is no plan today, the id is unknown, or the capture is
+ * already on the sheet.
+ */
+export function addTodoInboxItemToTodayPlan(
+  config: AppConfig,
+  id: string,
+  minutes: number | undefined,
+  date: string,
+): { text: string; rank: number } | null {
+  const match = listTodoInboxItems(config).find((item) => item.id === id);
+  if (!match || match.status !== 'open') return null;
+  const output = readDailyPlanOutput(config, date);
+  if (!output) return null;
+  const plan = parseDailyPlanTodoPlan(output.content);
+  if (!plan) return null;
+  const candidateId = `todo_inbox:${id}`;
+  if (plan.todos.some((todo) => todo.candidateId === candidateId)) return null;
+  const rank = plan.todos.length + 1;
+  const todos = [
+    ...plan.todos,
+    { rank, text: match.text, candidateId, ...(minutes ? { minutes } : {}) },
+  ];
+  writeLatestWorkflowOutput(
+    config,
+    'daily_plan',
+    date,
+    JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) }),
+  );
+  return { text: match.text, rank };
+}
+
+/**
+ * The same carry, the other way: an inbox item ticked in 我的待办 that is also a
+ * row on today's plan has to reach the feedback ledger.
+ *
+ * Without this the two halves disagree in the direction the user actually sees.
+ * Ticking in the inbox only set its `status`, while the call-sheet row reads the
+ * feedback ledger — so the row kept showing as untouched, and the next plan
+ * dropped the item altogether (the scorer reads only `open` captures). The row
+ * vanished instead of being struck through.
+ *
+ * Only rows on *today's* plan are written. A capture that was never planned has
+ * nothing to keep in step: `done` already takes it out of the scorer's pool, so
+ * the event would be a ledger entry with no reader.
+ *
+ * `deferred` is not mapped, mirroring `syncTodoInboxFromPlanRow`: shelving a
+ * capture is not the plan's "顺延到明天".
+ */
+export function syncPlanRowFromTodoInbox(config: AppConfig, id: string, status: TodoInboxStatus): boolean {
+  if (status !== 'done') return false;
+  const candidateId = `todo_inbox:${id}`;
+  // Never throws: the tick itself has already been written, and reading the plan
+  // needs far more of the config than marking a capture done does. A sync that
+  // cannot run must not fail the action the user actually asked for.
+  try {
+    const snapshot = buildTodayPlanSnapshot(config);
+    const rank = snapshot?.todos.findIndex((todo) => todo.candidateId === candidateId) ?? -1;
+    if (!snapshot || rank < 0) return false;
+    // The snapshot already resolved the row's latest state for today; ticking a
+    // row that is already done would only add a duplicate event.
+    if (snapshot.feedback[candidateId] === 'complete') return false;
+    recordTodoFeedback(config, {
+      date: todayInTimezone(config),
+      event: 'complete',
+      candidateId,
+      rank: rank + 1,
+      source: 'inbox-sync',
+    });
+    return true;
+  } catch (error) {
+    console.warn(`[inbox] could not mirror the tick onto today's plan row: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
 /** How long a done/deferred todo stays visible in the console's History / Deferred lists. */
 export const TODO_HISTORY_RETENTION_DAYS = 30;
 
@@ -313,6 +409,9 @@ function updateTodoItem(config: AppConfig, action: 'done' | 'defer' | 'delete', 
   if (note) match.note = note;
   writeTodoInboxItems(config, items);
   syncTodoInboxVaultNote(config);
+  // 完成 todo from Feishu is the same tick as the console's: if the capture is
+  // also a row on today's plan, the feedback ledger has to hear about it.
+  syncPlanRowFromTodoInbox(config, match.id, match.status);
   return { handled: true, reply: `${stateActionLabel(action)}：${match.text}` };
 }
 
