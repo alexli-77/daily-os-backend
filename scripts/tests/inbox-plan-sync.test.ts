@@ -176,6 +176,51 @@ test('an added row can then be ticked from the inbox, closing the loop', () => {
   assert.deepEqual(eventsFor(config, `todo_inbox:${id}`), ['complete']);
 });
 
+// --- the note left on a row comes back ---------------------------------------
+
+test('a note left with 记一条更新 is readable again', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:LEO-102');
+  recordTodoFeedback(config, {
+    date: todayInTimezone(config),
+    event: 'update',
+    candidateId: 'linear:LEO-102',
+    rank: 1,
+    note: '汇率按 4.74 重算过了',
+  });
+  assert.equal(buildTodayPlanSnapshot(config)?.notes['linear:LEO-102'], '汇率按 4.74 重算过了');
+});
+
+test('the latest note wins, and an empty one does not erase it', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:LEO-102');
+  const date = todayInTimezone(config);
+  recordTodoFeedback(config, { date, event: 'update', candidateId: 'linear:LEO-102', rank: 1, note: '第一版' });
+  recordTodoFeedback(config, { date, event: 'update', candidateId: 'linear:LEO-102', rank: 1, note: '第二版' });
+  recordTodoFeedback(config, { date, event: 'complete', candidateId: 'linear:LEO-102', rank: 1 });
+  assert.equal(buildTodayPlanSnapshot(config)?.notes['linear:LEO-102'], '第二版', 'a later note-less event leaves it alone');
+});
+
+test('a note on any event is kept, not just 更新', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:LEO-102');
+  recordTodoFeedback(config, {
+    date: todayInTimezone(config),
+    event: 'complete',
+    candidateId: 'linear:LEO-102',
+    rank: 1,
+    note: '只做了一半就交了',
+  });
+  assert.equal(buildTodayPlanSnapshot(config)?.notes['linear:LEO-102'], '只做了一半就交了');
+});
+
+test('a row with no note has no entry at all', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:LEO-102');
+  recordTodoFeedback(config, { date: todayInTimezone(config), event: 'complete', candidateId: 'linear:LEO-102', rank: 1 });
+  assert.deepEqual(buildTodayPlanSnapshot(config)?.notes, {});
+});
+
 let passed = 0;
 let failed = 0;
 for (const { name, fn } of tests) {

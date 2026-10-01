@@ -21,6 +21,14 @@ export interface TodayPlanSnapshot {
   todos: DailyPlanTodo[];
   /** Latest state per candidateId: complete | partial | defer | update. Absent = untouched. */
   feedback: Record<string, string>;
+  /**
+   * The last note left on each row, whatever event carried it.
+   *
+   * The ledger has held these since 记一条更新 shipped, but nothing read them
+   * back — the note went in and was never seen again, which made the control
+   * look like it had discarded what you typed.
+   */
+  notes: Record<string, string>;
 }
 
 /**
@@ -74,6 +82,7 @@ export function buildPlanSnapshotForDate(
   // Latest feedback per candidate for that day, so a row the user already ticked
   // does not come back looking untouched.
   const feedback: Record<string, string> = {};
+  const notes: Record<string, string> = {};
   const editedMinutes = new Map<string, number>();
   // The user's own ordering, latest write wins. Kept separate from `feedback`
   // because it is not a state a row can be *in* — it is where the row sits.
@@ -83,6 +92,9 @@ export function buildPlanSnapshotForDate(
     if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
+    // Any event can carry one, not just `update` — ticking a row and saying why
+    // is the same note. Latest wins, like every other field here.
+    if (entry.note?.trim()) notes[entry.candidateId] = entry.note.trim();
     if (entry.event === 'reorder') userRank.set(entry.candidateId, entry.rank);
     // Ledger order is append order, so a `reopen` after a tick wins and the row
     // comes back untouched. Deleting rather than recording `reopen` as a state:
@@ -110,5 +122,6 @@ export function buildPlanSnapshotForDate(
       userRank,
     ),
     feedback,
+    notes,
   };
 }
