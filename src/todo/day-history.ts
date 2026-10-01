@@ -36,6 +36,8 @@ export interface DayHistory {
   todos: DailyPlanTodo[];
   /** Last state each row was left in that day: complete | partial | defer | update. */
   feedback: Record<string, string>;
+  /** The note left on each row that day, if any. */
+  notes: Record<string, string>;
   /** The evening review's reconciliation, when it ran and produced the JSON. */
   review: DailyReviewReconciliation | null;
   /**
@@ -101,6 +103,7 @@ export function readDayHistory(config: AppConfig, date: string): DayHistory {
     plan: snapshot ? { date: snapshot.date, generated_at: snapshot.generated_at } : null,
     todos: snapshot?.todos ?? [],
     feedback: snapshot?.feedback ?? {},
+    notes: snapshot?.notes ?? {},
     review,
   };
   if (output && history.todos.length === 0 && output.content.trim()) {
