@@ -54,8 +54,10 @@ import {
   listTodoInboxItems,
   openTodoInboxItems,
   resolveCaptureCommand,
+  abandonCaptures,
   addTodoInboxItemToTodayPlan,
   carriedCaptureDates,
+  staleCaptures,
   syncPlanRowFromTodoInbox,
   syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
@@ -434,6 +436,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/today/todo-feedback') return sendJson(response, await todoFeedback(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/plan-order') return sendJson(response, await reorderTodayPlan(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/plan-add') return sendJson(response, await addCaptureToTodayPlan(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/todo-inbox/abandon') return sendJson(response, await abandonStaleCaptures(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') return sendJson(response, await cancelRun(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/runs/rerun') return sendJson(response, await rerunWorkflow(options, await readJson(request)));
@@ -573,6 +576,8 @@ const MEMBER_WRITE_WHITELIST = new Set([
   '/api/today/plan-order',
   // As is putting one of your own captures on it.
   '/api/today/plan-add',
+  // And giving up on ones you have been carrying.
+  '/api/todo-inbox/abandon',
   '/api/capture',
   '/api/todo-inbox',
   '/api/chat/session',
@@ -852,6 +857,26 @@ async function reorderTodayPlan(options: UiServerOptions, body: unknown): Promis
     });
   }
   return { ok: true, order, text: '已调整顺序' };
+}
+
+/**
+ * Stop carrying a pile of captures. Shelves them (`deferred`), so the console's
+ * 已顺延 list still has them and nothing is silently lost.
+ */
+async function abandonStaleCaptures(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const ids = Array.isArray(request.ids) ? request.ids.map((id) => String(id || '').trim()).filter(Boolean) : [];
+  if (ids.length === 0) return { ok: false, error: 'ids must be a non-empty array of todo ids.' };
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const abandoned = abandonCaptures(config, ids);
+  return {
+    ok: true,
+    abandoned,
+    text: abandoned.length === 0 ? '这些条目已经不在顺延中了。' : `已放弃 ${abandoned.length} 条，可在「已顺延」里找回。`,
+    state: await buildState(options),
+  };
 }
 
 /**
@@ -1422,6 +1447,10 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
     feedback: snapshot.feedback,
     notes: snapshot.notes,
     carriedFrom: carriedCaptureDates(config, today),
+    // Carried long enough to be worth a decision. Sent with the plan so the
+    // client does not have to re-derive "how long has this been here" from the
+    // capture dates it was just given.
+    staleCaptures: staleCaptures(config, today),
     today,
   };
 }
