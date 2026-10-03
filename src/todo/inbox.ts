@@ -146,6 +146,25 @@ export function captureTodoItems(
 
   appendTodoInboxItems(config, items);
   syncTodoInboxVaultNote(config);
+  // A capture goes straight onto today's sheet, from whichever entry point made
+  // it — console, Mac app or the Feishu command. Putting it here rather than in
+  // each route is what keeps the three in step; the inbox ledger is still the
+  // store, it is just no longer a list the user has to go and process.
+  //
+  // Before today's plan exists there is nothing to append to. The capture is
+  // still written, and `mergeOpenCapturesIntoPlan` puts it on the plan when one
+  // is generated.
+  //
+  // Never throws. The capture is already on disk by this point, and writing it
+  // down is the whole promise of the feature — reaching the plan needs far more
+  // of the config than appending to the ledger does, and a capture that failed
+  // because the plan could not be read would lose the thing the user typed.
+  try {
+    const today = todayInTimezone(config);
+    for (const item of items) addTodoInboxItemToTodayPlan(config, item.id, CAPTURE_DEFAULT_MINUTES, today);
+  } catch (error) {
+    console.warn(`[inbox] captured, but could not put it on today's plan: ${error instanceof Error ? error.message : String(error)}`);
+  }
   return {
     handled: true,
     items,
@@ -248,6 +267,68 @@ export function syncTodoInboxFromPlanRow(config: AppConfig, candidateId: string,
  * Returns null when there is no plan today, the id is unknown, or the capture is
  * already on the sheet.
  */
+/** What a capture is worth on the clock until someone says otherwise. */
+export const CAPTURE_DEFAULT_MINUTES = 30;
+
+/**
+ * For each still-open capture written before `date`, the day it was written.
+ *
+ * A row on today's sheet that was captured earlier is there because it was not
+ * finished, and should say so rather than looking like something new.
+ *
+ * Derived from `created_at` on every read instead of being stamped onto the
+ * plan: the plan is regenerated every morning, and a stored marker would have to
+ * survive that. Lives here rather than in `buildPlanSnapshotForDate` because
+ * `today-plan.ts` must not depend on this module — it is the other way round.
+ */
+export function carriedCaptureDates(config: AppConfig, date: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const item of listTodoInboxItems(config)) {
+    if (item.status !== 'open') continue;
+    const captured = (item.created_at || '').slice(0, 10);
+    if (captured && captured < date) out[`todo_inbox:${item.id}`] = captured;
+  }
+  return out;
+}
+
+/**
+ * Put every still-open capture on the plan, whether or not the model picked it.
+ *
+ * A capture is now written straight onto the day's sheet, so "I did not finish
+ * it" has to mean "it is there again tomorrow" — not "it might score well enough
+ * to be chosen again". The plan is produced by the model, which re-decides every
+ * morning; the existing carry-over signal only *raises* a candidate's score
+ * (`getCarryOverDaysById`), it never guarantees the row comes back. This runs
+ * after generation and appends what the model left out, so the promise holds
+ * without asking the model to keep it.
+ *
+ * Appended in capture order after whatever the model planned: the model ranked
+ * today's work and should keep that ranking, and a carried capture that has been
+ * sitting for a week should not silently take the top slot.
+ *
+ * The way out is `defer` or `delete` on the capture itself — carrying forever is
+ * the point, so the escape has to be an explicit act.
+ */
+export function mergeOpenCapturesIntoPlan(config: AppConfig, planText: string, date: string): string {
+  const plan = parseDailyPlanTodoPlan(planText);
+  if (!plan) return planText;
+  const open = listTodoInboxItems(config).filter((item) => item.status === 'open');
+  if (open.length === 0) return planText;
+  const present = new Set(plan.todos.map((todo) => todo.candidateId));
+  const missing = open.filter((item) => !present.has(`todo_inbox:${item.id}`));
+  if (missing.length === 0) return planText;
+  const todos = [
+    ...plan.todos,
+    ...missing.map((item, index) => ({
+      rank: plan.todos.length + index + 1,
+      text: item.text,
+      candidateId: `todo_inbox:${item.id}`,
+      minutes: CAPTURE_DEFAULT_MINUTES,
+    })),
+  ];
+  return JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) });
+}
+
 export function addTodoInboxItemToTodayPlan(
   config: AppConfig,
   id: string,

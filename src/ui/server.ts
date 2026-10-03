@@ -55,6 +55,7 @@ import {
   openTodoInboxItems,
   resolveCaptureCommand,
   addTodoInboxItemToTodayPlan,
+  carriedCaptureDates,
   syncPlanRowFromTodoInbox,
   syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
@@ -1413,13 +1414,14 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   const config = loadConfig(options.configPath);
   const today = todayInTimezone(config);
   const snapshot = buildTodayPlanSnapshot(config);
-  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, today };
+  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, carriedFrom: {}, today };
   return {
     ok: true,
     plan: { date: snapshot.date, workflow: 'daily_plan', stale: false, generated_at: snapshot.generated_at },
     todos: snapshot.todos,
     feedback: snapshot.feedback,
     notes: snapshot.notes,
+    carriedFrom: carriedCaptureDates(config, today),
     today,
   };
 }
