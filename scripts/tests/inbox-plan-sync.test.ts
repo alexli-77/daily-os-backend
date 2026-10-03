@@ -24,9 +24,13 @@ import { listTodoFeedback, recordTodoFeedback } from '../../src/todo/feedback.js
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
 import {
   addTodoInboxItemToTodayPlan,
+  abandonCaptures,
   carriedCaptureDates,
   handleTodoInboxCommand,
+  listTodoInboxItems,
   mergeOpenCapturesIntoPlan,
+  staleCaptures,
+  STALE_CAPTURE_DAYS,
   syncPlanRowFromTodoInbox,
 } from '../../src/todo/inbox.js';
 import { todayInTimezone } from '../../src/utils/date.js';
@@ -279,6 +283,63 @@ test('a carried row says which day it came from; today\'s does not', () => {
   assert.deepEqual(carriedCaptureDates(config, todayInTimezone(config)), {}, 'captured today, nothing to say');
   const tomorrow = '2026-12-31';
   assert.equal(carriedCaptureDates(config, tomorrow)[`todo_inbox:${id}`], todayInTimezone(config).slice(0, 10));
+});
+
+// --- the way out of carrying forever ----------------------------------------
+
+/** Rewrite a capture's created_at so it looks like it was captured N days ago. */
+function age(config: AppConfig, id: string, days: number): void {
+  const ledger = path.resolve(config.todo_inbox.ledger_path);
+  const when = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const lines = fs.readFileSync(ledger, 'utf8').trim().split('\n').map((line) => {
+    const item = JSON.parse(line);
+    return item.id === id ? JSON.stringify({ ...item, created_at: when }) : line;
+  });
+  fs.writeFileSync(ledger, `${lines.join('\n')}\n`, 'utf8');
+}
+
+test('a capture carried past the threshold is surfaced, a fresh one is not', () => {
+  const config = freshConfig();
+  const old = capture(config, '报税材料');
+  capture(config, '今天刚记的');
+  age(config, old, STALE_CAPTURE_DAYS + 2);
+  const stale = staleCaptures(config, todayInTimezone(config));
+  assert.deepEqual(stale.map((item) => item.text), ['报税材料'], 'only the one that has been sitting');
+  assert.equal(stale[0].days, STALE_CAPTURE_DAYS + 2);
+});
+
+test('the oldest comes first — that is the one to decide about', () => {
+  const config = freshConfig();
+  const a = capture(config, '先记的');
+  const b = capture(config, '后记的');
+  age(config, a, 30);
+  age(config, b, 10);
+  assert.deepEqual(staleCaptures(config, todayInTimezone(config)).map((item) => item.text), ['先记的', '后记的']);
+});
+
+test('abandoning shelves rather than deletes, so it can be found again', () => {
+  const config = freshConfig();
+  const id = capture(config, '放弃这条');
+  assert.deepEqual(abandonCaptures(config, [id]), [id]);
+  const item = listTodoInboxItems(config).find((row) => row.id === id);
+  assert.equal(item?.status, 'deferred', 'shelved, not a tombstone');
+});
+
+test('an abandoned capture stops being carried onto the plan', () => {
+  const config = freshConfig();
+  const id = capture(config, '不做了');
+  const generated = JSON.stringify({ todos: [{ rank: 1, text: '别的事', candidateId: 'linear:LEO-9' }] });
+  assert.notEqual(mergeOpenCapturesIntoPlan(config, generated, '2026-12-01'), generated, 'carried while open');
+  abandonCaptures(config, [id]);
+  assert.equal(mergeOpenCapturesIntoPlan(config, generated, '2026-12-01'), generated, 'and not after');
+});
+
+test('abandoning in bulk skips what is already closed instead of failing', () => {
+  const config = freshConfig();
+  const a = capture(config, '第一条');
+  const b = capture(config, '第二条');
+  abandonCaptures(config, [a]);
+  assert.deepEqual(abandonCaptures(config, [a, b, 'does-not-exist']), [b], 'only the one still open');
 });
 
 let passed = 0;
