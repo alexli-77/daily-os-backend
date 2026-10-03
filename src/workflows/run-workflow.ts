@@ -6,6 +6,7 @@ import { appendDailyMemory, loadMemory, readDailyPlanOutput, writeLatestWorkflow
 import { sendFeishuCard, sendFeishuMessage } from '../connectors/lark-cli.js';
 import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftCard } from '../progress/sync-drift.js';
 import { buildDailyPlanTable, buildWorkflowEvidenceTrace, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, parseDailyPlanTodoPlan } from './summary.js';
+import { mergeOpenCapturesIntoPlan } from '../todo/inbox.js';
 import { buildScoredTodos } from '../todo/scorer.js';
 import { listTodoFeedback, recordTodoPresented } from '../todo/feedback.js';
 import {
@@ -95,7 +96,11 @@ export async function runWorkflowDetailed(
       };
     }
     const memory = loadMemory(config);
-    const text = await runAgentWithNonEmptyOutput({ config, workflow, date, evidence, memory, runId: run.id });
+    const generated = await runAgentWithNonEmptyOutput({ config, workflow, date, evidence, memory, runId: run.id });
+    // Captures go straight onto the sheet and stay there until they are done,
+    // deferred or deleted. The model re-plans from scratch every morning, so the
+    // only way that promise holds is to put them back after it has chosen.
+    const text = workflow === 'daily_plan' ? mergeOpenCapturesIntoPlan(config, generated, date) : generated;
     const evidenceTrace = buildWorkflowEvidenceTrace({ evidence, memory });
 
     appendDailyMemory(config, workflow, date, text);

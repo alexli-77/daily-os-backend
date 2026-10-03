@@ -22,7 +22,13 @@ import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
 import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/memory.js';
 import { listTodoFeedback, recordTodoFeedback } from '../../src/todo/feedback.js';
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
-import { addTodoInboxItemToTodayPlan, handleTodoInboxCommand, syncPlanRowFromTodoInbox } from '../../src/todo/inbox.js';
+import {
+  addTodoInboxItemToTodayPlan,
+  carriedCaptureDates,
+  handleTodoInboxCommand,
+  mergeOpenCapturesIntoPlan,
+  syncPlanRowFromTodoInbox,
+} from '../../src/todo/inbox.js';
 import { todayInTimezone } from '../../src/utils/date.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -219,6 +225,60 @@ test('a row with no note has no entry at all', () => {
   planToday(config, 'linear:LEO-102');
   recordTodoFeedback(config, { date: todayInTimezone(config), event: 'complete', candidateId: 'linear:LEO-102', rank: 1 });
   assert.deepEqual(buildTodayPlanSnapshot(config)?.notes, {});
+});
+
+// --- a capture lands on today's sheet, and keeps coming back ----------------
+
+test('capturing puts it straight on today\'s sheet', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:LEO-1');
+  capture(config, '订牙医');
+  assert.deepEqual(planTexts(config), ['第 1 件', '订牙医'], 'no staging step');
+});
+
+test('captured before today\'s plan exists, it is on the plan once generated', () => {
+  const config = freshConfig();
+  const id = capture(config, '买咖啡豆');   // no plan yet: nothing to append to
+  assert.equal(buildTodayPlanSnapshot(config), null);
+  // The morning run produces a plan that does not mention it...
+  const generated = JSON.stringify({ todos: [{ rank: 1, text: '第 1 件', candidateId: 'linear:LEO-1' }] });
+  const merged = mergeOpenCapturesIntoPlan(config, generated, todayInTimezone(config));
+  const todos = JSON.parse(merged).todos as Array<{ text: string; candidateId: string; minutes?: number }>;
+  assert.deepEqual(todos.map((t) => t.text), ['第 1 件', '买咖啡豆'], '...and it is put back afterwards');
+  assert.equal(todos[1].minutes, 30, 'with the default estimate so the clock still adds up');
+  assert.equal(todos[1].candidateId, `todo_inbox:${id}`);
+});
+
+test('an unfinished capture is carried onto the next day, model or not', () => {
+  const config = freshConfig();
+  capture(config, '报税材料');
+  // Tomorrow's run: the model did not pick it.
+  const generated = JSON.stringify({ todos: [{ rank: 1, text: '别的事', candidateId: 'linear:LEO-9' }] });
+  const merged = mergeOpenCapturesIntoPlan(config, generated, '2026-10-04');
+  assert.deepEqual((JSON.parse(merged).todos as Array<{ text: string }>).map((t) => t.text), ['别的事', '报税材料']);
+});
+
+test('a finished or shelved capture is not carried', () => {
+  const config = freshConfig();
+  capture(config, '交房租');
+  handleTodoInboxCommand(config, { type: 'update', action: 'done', target: '交房租' }, { source: 'test', messageId: 'm' });
+  const generated = JSON.stringify({ todos: [{ rank: 1, text: '别的事', candidateId: 'linear:LEO-9' }] });
+  assert.equal(mergeOpenCapturesIntoPlan(config, generated, '2026-10-04'), generated, 'done is the way out');
+});
+
+test('a capture the model did pick is not duplicated', () => {
+  const config = freshConfig();
+  const id = capture(config, '写周报');
+  const generated = JSON.stringify({ todos: [{ rank: 1, text: '写周报', candidateId: `todo_inbox:${id}` }] });
+  assert.equal(mergeOpenCapturesIntoPlan(config, generated, '2026-10-04'), generated);
+});
+
+test('a carried row says which day it came from; today\'s does not', () => {
+  const config = freshConfig();
+  const id = capture(config, '订牙医');
+  assert.deepEqual(carriedCaptureDates(config, todayInTimezone(config)), {}, 'captured today, nothing to say');
+  const tomorrow = '2026-12-31';
+  assert.equal(carriedCaptureDates(config, tomorrow)[`todo_inbox:${id}`], todayInTimezone(config).slice(0, 10));
 });
 
 let passed = 0;
