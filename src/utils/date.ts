@@ -9,6 +9,27 @@ export function todayInTimezone(config: AppConfig): string {
   }).format(new Date());
 }
 
+/**
+ * The calendar day an instant falls on, in the user's timezone.
+ *
+ * Timestamps are stored as UTC ISO strings, but every day boundary in the
+ * product is the user's — `todayInTimezone` included. Slicing the first ten
+ * characters off an ISO string compares a UTC day against a local one, which is
+ * wrong for a fixed stretch of every evening: something captured at 20:00 in
+ * Toronto is already tomorrow in UTC, so it would read as captured "today" for
+ * one more day than it was.
+ */
+export function dayInTimezone(instant: string, config: AppConfig): string {
+  const parsed = Date.parse(instant);
+  if (Number.isNaN(parsed)) return '';
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: config.user.timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(parsed));
+}
+
 export function addDays(date: string, days: number): string {
   const d = new Date(`${date}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);

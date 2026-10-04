@@ -5,7 +5,7 @@ import type { AppConfig } from '../config/schema.js';
 import { parseWorkflowRevisionItems, type WorkflowRevisionItemType } from '../interaction/workflow-revision.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { readDailyPlanOutput, writeLatestWorkflowOutput } from '../storage/memory.js';
-import { todayInTimezone } from '../utils/date.js';
+import { dayInTimezone, todayInTimezone } from '../utils/date.js';
 import { parseDailyPlanTodoPlan } from '../workflows/summary.js';
 import { recordTodoFeedback } from './feedback.js';
 import { buildTodayPlanSnapshot } from './today-plan.js';
@@ -281,11 +281,75 @@ export const CAPTURE_DEFAULT_MINUTES = 30;
  * survive that. Lives here rather than in `buildPlanSnapshotForDate` because
  * `today-plan.ts` must not depend on this module — it is the other way round.
  */
+/** A capture carried this long is worth a second look rather than another day. */
+export const STALE_CAPTURE_DAYS = 7;
+
+export interface StaleCapture {
+  id: string;
+  text: string;
+  /** Day it was written down, `YYYY-MM-DD`. */
+  capturedOn: string;
+  /** Whole days carried, counted from `capturedOn` to `date`. */
+  days: number;
+}
+
+/**
+ * Open captures that have been carried past `STALE_CAPTURE_DAYS`, oldest first.
+ *
+ * Carrying forever is the point, but it needs a way out that is not "delete it
+ * one at a time": a capture nobody has touched in a week is usually a decision
+ * that was never made, and it still occupies a slot on the sheet and pushes
+ * every later row's time out by its estimate.
+ */
+export function staleCaptures(config: AppConfig, date: string, olderThanDays = STALE_CAPTURE_DAYS): StaleCapture[] {
+  const today = Date.parse(`${date}T00:00:00Z`);
+  if (Number.isNaN(today)) return [];
+  return listTodoInboxItems(config)
+    .filter((item) => item.status === 'open')
+    .map((item) => {
+      const capturedOn = dayInTimezone(item.created_at || '', config);
+      const captured = Date.parse(`${capturedOn}T00:00:00Z`);
+      if (Number.isNaN(captured)) return null;
+      return { id: item.id, text: item.text, capturedOn, days: Math.floor((today - captured) / DAY_MS) };
+    })
+    .filter((item): item is StaleCapture => Boolean(item && item.days >= olderThanDays))
+    .sort((left, right) => right.days - left.days);
+}
+
+/**
+ * Stop carrying these — `deferred`, not `deleted`.
+ *
+ * Shelving is reversible and the console's 已顺延 list still shows them, so
+ * letting go of a pile in one action cannot quietly lose something that mattered.
+ * Deleting is still available per item for things that were never real.
+ *
+ * Returns the ids actually changed; unknown ids and ones already closed are
+ * skipped rather than failing the batch, because the list the client acted on
+ * may be a few seconds old.
+ */
+export function abandonCaptures(config: AppConfig, ids: string[]): string[] {
+  const wanted = new Set(ids.map((id) => id.trim()).filter(Boolean));
+  if (wanted.size === 0) return [];
+  const items = listTodoInboxItems(config);
+  const now = new Date().toISOString();
+  const changed: string[] = [];
+  for (const item of items) {
+    if (!wanted.has(item.id) || item.status !== 'open') continue;
+    item.status = 'deferred';
+    item.updated_at = now;
+    changed.push(item.id);
+  }
+  if (changed.length === 0) return [];
+  writeTodoInboxItems(config, items);
+  syncTodoInboxVaultNote(config);
+  return changed;
+}
+
 export function carriedCaptureDates(config: AppConfig, date: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const item of listTodoInboxItems(config)) {
     if (item.status !== 'open') continue;
-    const captured = (item.created_at || '').slice(0, 10);
+    const captured = dayInTimezone(item.created_at || '', config);
     if (captured && captured < date) out[`todo_inbox:${item.id}`] = captured;
   }
   return out;
