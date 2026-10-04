@@ -33,7 +33,7 @@ import {
   STALE_CAPTURE_DAYS,
   syncPlanRowFromTodoInbox,
 } from '../../src/todo/inbox.js';
-import { todayInTimezone } from '../../src/utils/date.js';
+import { addDays, todayInTimezone } from '../../src/utils/date.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ORIGINAL_CWD = process.cwd();
@@ -281,8 +281,8 @@ test('a carried row says which day it came from; today\'s does not', () => {
   const config = freshConfig();
   const id = capture(config, '订牙医');
   assert.deepEqual(carriedCaptureDates(config, todayInTimezone(config)), {}, 'captured today, nothing to say');
-  const tomorrow = '2026-12-31';
-  assert.equal(carriedCaptureDates(config, tomorrow)[`todo_inbox:${id}`], todayInTimezone(config).slice(0, 10));
+  const later = '2026-12-31';
+  assert.equal(carriedCaptureDates(config, later)[`todo_inbox:${id}`], todayInTimezone(config));
 });
 
 // --- the way out of carrying forever ----------------------------------------
@@ -290,7 +290,11 @@ test('a carried row says which day it came from; today\'s does not', () => {
 /** Rewrite a capture's created_at so it looks like it was captured N days ago. */
 function age(config: AppConfig, id: string, days: number): void {
   const ledger = path.resolve(config.todo_inbox.ledger_path);
-  const when = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  // Counted back from the user's today, not UTC's. Using Date.now() here made
+  // these pass locally and fail on a UTC runner for a few hours every evening.
+  // Noon keeps the instant inside the target day in any timezone.
+  const base = Date.parse(`${todayInTimezone(config)}T12:00:00Z`);
+  const when = new Date(base - days * 24 * 60 * 60 * 1000).toISOString();
   const lines = fs.readFileSync(ledger, 'utf8').trim().split('\n').map((line) => {
     const item = JSON.parse(line);
     return item.id === id ? JSON.stringify({ ...item, created_at: when }) : line;
@@ -340,6 +344,24 @@ test('abandoning in bulk skips what is already closed instead of failing', () =>
   const b = capture(config, '第二条');
   abandonCaptures(config, [a]);
   assert.deepEqual(abandonCaptures(config, [a, b, 'does-not-exist']), [b], 'only the one still open');
+});
+
+test('day boundaries follow the user\'s timezone, not UTC\'s', () => {
+  const config = freshConfig();
+  const id = capture(config, '晚上八点记的');
+  // Stamp it late on the user's evening, which is already tomorrow in UTC:
+  // 03:30Z on the following day is 22:30 or 23:30 the same day in Toronto,
+  // either side of the DST change. Slicing the ISO string would read this as
+  // captured tomorrow, and the row would go a day longer without its marker.
+  const ledger = path.resolve(config.todo_inbox.ledger_path);
+  const today = todayInTimezone(config);
+  const lateTonight = `${addDays(today, 1)}T03:30:00.000Z`;
+  const lines = fs.readFileSync(ledger, 'utf8').trim().split('\n').map((line) => {
+    const item = JSON.parse(line);
+    return item.id === id ? JSON.stringify({ ...item, created_at: lateTonight }) : line;
+  });
+  fs.writeFileSync(ledger, `${lines.join('\n')}\n`, 'utf8');
+  assert.deepEqual(carriedCaptureDates(config, today), {}, 'still today where the user lives');
 });
 
 let passed = 0;

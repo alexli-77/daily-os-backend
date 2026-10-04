@@ -5,7 +5,7 @@ import type { AppConfig } from '../config/schema.js';
 import { parseWorkflowRevisionItems, type WorkflowRevisionItemType } from '../interaction/workflow-revision.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { readDailyPlanOutput, writeLatestWorkflowOutput } from '../storage/memory.js';
-import { todayInTimezone } from '../utils/date.js';
+import { dayInTimezone, todayInTimezone } from '../utils/date.js';
 import { parseDailyPlanTodoPlan } from '../workflows/summary.js';
 import { recordTodoFeedback } from './feedback.js';
 import { buildTodayPlanSnapshot } from './today-plan.js';
@@ -307,7 +307,7 @@ export function staleCaptures(config: AppConfig, date: string, olderThanDays = S
   return listTodoInboxItems(config)
     .filter((item) => item.status === 'open')
     .map((item) => {
-      const capturedOn = (item.created_at || '').slice(0, 10);
+      const capturedOn = dayInTimezone(item.created_at || '', config);
       const captured = Date.parse(`${capturedOn}T00:00:00Z`);
       if (Number.isNaN(captured)) return null;
       return { id: item.id, text: item.text, capturedOn, days: Math.floor((today - captured) / DAY_MS) };
@@ -349,7 +349,7 @@ export function carriedCaptureDates(config: AppConfig, date: string): Record<str
   const out: Record<string, string> = {};
   for (const item of listTodoInboxItems(config)) {
     if (item.status !== 'open') continue;
-    const captured = (item.created_at || '').slice(0, 10);
+    const captured = dayInTimezone(item.created_at || '', config);
     if (captured && captured < date) out[`todo_inbox:${item.id}`] = captured;
   }
   return out;
