@@ -902,7 +902,20 @@ function listCountdownsResponse(options: UiServerOptions): Record<string, unknow
   applyEnv(env);
   const config = loadConfig(options.configPath);
   const today = todayInTimezone(config);
-  return { ok: true, today, items: listCountdowns(config, today) };
+  return { ok: true, ...countdownContext(config), items: listCountdowns(config, today) };
+}
+
+/**
+ * Which day it is and whose day that is.
+ *
+ * Shipped beside every countdown list rather than left implicit. There is one
+ * `user.timezone` for the whole service, so a day count is always *somebody's*
+ * — the owner's — and a client in another zone has no way to work that out from
+ * the numbers alone. Saying so is the difference between a screen that is
+ * right and a screen that can be checked.
+ */
+function countdownContext(config: AppConfig): { today: string; timezone: string } {
+  return { today: todayInTimezone(config), timezone: config.user.timezone };
 }
 
 /** Create a countdown, or update the one carrying `id`. */
@@ -926,7 +939,7 @@ async function saveCountdownEntry(options: UiServerOptions, body: unknown): Prom
     ...(typeof request.note === 'string' ? { note: request.note } : {}),
   });
   const today = todayInTimezone(config);
-  return { ok: true, today, item: resolveCountdown(saved, today), items: listCountdowns(config, today) };
+  return { ok: true, ...countdownContext(config), item: resolveCountdown(saved, today), items: listCountdowns(config, today) };
 }
 
 async function deleteCountdownEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
@@ -938,7 +951,7 @@ async function deleteCountdownEntry(options: UiServerOptions, body: unknown): Pr
   const config = loadConfig(options.configPath);
   if (!deleteCountdown(config, id)) return { ok: false, error: '这条倒数日已经不在了。' };
   const today = todayInTimezone(config);
-  return { ok: true, today, items: listCountdowns(config, today) };
+  return { ok: true, ...countdownContext(config), items: listCountdowns(config, today) };
 }
 
 /**
