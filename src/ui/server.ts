@@ -10,7 +10,7 @@ import { loadConfig } from '../config/load-config.js';
 import { formatDoctor, runDoctor } from '../cli/doctor.js';
 import { collectEvidence } from '../workflows/evidence.js';
 import { runWorkflow } from '../workflows/run-workflow.js';
-import { addDays, todayInTimezone } from '../utils/date.js';
+import { addDays, isKnownTimeZone, todayInTimezone, todayInZone } from '../utils/date.js';
 import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
 import { sendFeishuMessage } from '../connectors/lark-cli.js';
 import { readLatestWorkflowOutput } from '../storage/memory.js';
@@ -62,6 +62,13 @@ import {
   syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
 } from '../todo/inbox.js';
+import {
+  deleteCountdown,
+  isCalendarDate,
+  listCountdowns,
+  resolveCountdown,
+  saveCountdown,
+} from '../countdown/store.js';
 import { recordTodoFeedback } from '../todo/feedback.js';
 import { formatCalendarDraftForFeishu, runCalendarDraft, testCalendarBridge } from '../calendar/bridge.js';
 import {
@@ -437,6 +444,9 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/today/plan-order') return sendJson(response, await reorderTodayPlan(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/plan-add') return sendJson(response, await addCaptureToTodayPlan(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/todo-inbox/abandon') return sendJson(response, await abandonStaleCaptures(options, await readJson(request)));
+    if (request.method === 'GET' && url.pathname === '/api/countdowns') return sendJson(response, listCountdownsResponse(options, url));
+    if (request.method === 'POST' && url.pathname === '/api/countdowns/save') return sendJson(response, await saveCountdownEntry(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/countdowns/delete') return sendJson(response, await deleteCountdownEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') return sendJson(response, await cancelRun(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/runs/rerun') return sendJson(response, await rerunWorkflow(options, await readJson(request)));
@@ -877,6 +887,87 @@ async function abandonStaleCaptures(options: UiServerOptions, body: unknown): Pr
     text: abandoned.length === 0 ? '这些条目已经不在顺延中了。' : `已放弃 ${abandoned.length} 条，可在「已顺延」里找回。`,
     state: await buildState(options),
   };
+}
+
+/**
+ * Every countdown, already resolved against today.
+ *
+ * The day counts are computed here and shipped down rather than left to each
+ * client. Two clients doing their own calendar arithmetic is two chances to
+ * disagree about what day it is, and the native app has no idea what timezone
+ * the user configured.
+ */
+function listCountdownsResponse(options: UiServerOptions, url: URL): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const context = countdownContext(config, url.searchParams.get('tz'));
+  return { ok: true, ...context, items: listCountdowns(config, context.today) };
+}
+
+/**
+ * Which day it is, and whose clock that is.
+ *
+ * A caller may name the zone to count in — the Mac app reports its own, so the
+ * numbers on screen match the machine the person is looking at even when they
+ * have flown somewhere else. Asking the client is better than reading the OS
+ * here: this service runs for weeks under launchd and a long-lived Node process
+ * is not a reliable witness to a timezone that changed under it, whereas the
+ * app is restarted on every flight and knows for certain.
+ *
+ * Without `tz` — the Feishu card, curl, a teammate — it falls back to
+ * `user.timezone`. The card has to: it is sent on a schedule keyed to that same
+ * zone, and there is no client to ask at 08:00. `cardTimezone` is reported
+ * alongside so a screen counting in some other zone can say which clock the
+ * morning card will be on.
+ */
+function countdownContext(
+  config: AppConfig,
+  requested: string | null,
+): { today: string; timezone: string; cardTimezone: string } {
+  const timezone = requested && isKnownTimeZone(requested) ? requested : config.user.timezone;
+  return { today: todayInZone(timezone), timezone, cardTimezone: config.user.timezone };
+}
+
+/** Create a countdown, or update the one carrying `id`. */
+async function saveCountdownEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const title = String(request.title || '').trim();
+  const date = String(request.date || '').trim();
+  if (!title) return { ok: false, error: '倒数日需要一个标题。' };
+  if (!isCalendarDate(date)) return { ok: false, error: `不是合法日期：${date || '（空）'}` };
+
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const saved = saveCountdown(config, {
+    ...(request.id ? { id: String(request.id).trim() } : {}),
+    title,
+    date,
+    ...(request.direction === 'since' || request.direction === 'until' ? { direction: request.direction } : {}),
+    ...(request.repeat === 'yearly' || request.repeat === 'none' ? { repeat: request.repeat } : {}),
+    ...(typeof request.pinned === 'boolean' ? { pinned: request.pinned } : {}),
+    ...(typeof request.note === 'string' ? { note: request.note } : {}),
+  });
+  const context = countdownContext(config, typeof request.tz === 'string' ? request.tz : null);
+  return {
+    ok: true,
+    ...context,
+    item: resolveCountdown(saved, context.today),
+    items: listCountdowns(config, context.today),
+  };
+}
+
+async function deleteCountdownEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const id = String(request.id || '').trim();
+  if (!id) return { ok: false, error: 'id is required.' };
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  if (!deleteCountdown(config, id)) return { ok: false, error: '这条倒数日已经不在了。' };
+  const context = countdownContext(config, typeof request.tz === 'string' ? request.tz : null);
+  return { ok: true, ...context, items: listCountdowns(config, context.today) };
 }
 
 /**

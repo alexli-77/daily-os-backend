@@ -512,6 +512,11 @@ export const AppConfigSchema = z.object({
       vault_path: '',
       vault_relative_path: '99_Meta/daily-os-todo.md',
     }),
+  countdown: z
+    .object({
+      store_path: z.string().default('./data/memory/countdowns.json'),
+    })
+    .default({ store_path: './data/memory/countdowns.json' }),
   chat_analysis: z
     .object({
       enabled: z.boolean().default(true),

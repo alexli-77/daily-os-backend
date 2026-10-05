@@ -219,6 +219,12 @@ todo_inbox:
   # User-readable Markdown note inside the user's Vault knowledge base.
   vault_relative_path: "99_Meta/daily-os-todo.md"
 
+countdown:
+  # Countdown days ("ICSE 截稿 还有 23 天"). A plain JSON array, rewritten whole
+  # on every edit. Pinned entries and anything inside 30 days also get one line
+  # at the top of the morning card. Keep this local and private.
+  store_path: "./data/memory/countdowns.json"
+
 chat_analysis:
   enabled: true
   # manual: latest configured messages
