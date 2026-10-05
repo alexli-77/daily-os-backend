@@ -2,6 +2,7 @@ import type { AppConfig, WorkflowName } from '../config/schema.js';
 import type { MemoryBundle } from '../storage/memory.js';
 import type { Evidence } from './types.js';
 import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftSection } from '../progress/sync-drift.js';
+import { renderCountdownCardLine } from '../countdown/store.js';
 import { linearIssueUrl } from '../utils/linear-link.js';
 
 const MAX_SUMMARY_CHARS = 2200;
@@ -356,6 +357,9 @@ function renderDailyPlanTodoSummary(plan: DailyPlanTodoPlan, date?: string, evid
     `[${identifier}](${linearIssueUrl(identifier, workspace, evidenceUrl)})`;
   const lines: string[] = [];
 
+  const countdowns = countdownLine(config, today);
+  if (countdowns) lines.push(countdowns, '');
+
   if (today && index.size > 0) {
     const urgent = [...index.values()]
       .filter((issue) => issue.dueDate && issue.dueDate <= today && issue.stateType !== 'completed' && issue.stateType !== 'canceled')
@@ -388,6 +392,23 @@ function renderDailyPlanTodoSummary(plan: DailyPlanTodoPlan, date?: string, evid
   if (plan.note) lines.push('', `> ${plan.note}`);
   lines.push('', '完成一条就点它下面的「✅ 完成」按钮；想调整点「我要调整」。');
   return trimSummary(lines.join('\n'), MAX_SUMMARY_CHARS);
+}
+
+/**
+ * The countdown strip above the briefing, or `''`.
+ *
+ * Swallows its own failures. A missing store, an unreadable one, or a config
+ * built without the `countdown` block are all reasons to print one line fewer —
+ * none of them is a reason for the morning card not to go out.
+ */
+function countdownLine(config: AppConfig | undefined, today: string): string {
+  if (!config || !today) return '';
+  try {
+    return renderCountdownCardLine(config, today);
+  } catch (error) {
+    console.warn(`[summary] countdown line skipped: ${error instanceof Error ? error.message : String(error)}`);
+    return '';
+  }
 }
 
 function extractJsonObject(content: string): string | null {

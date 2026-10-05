@@ -179,6 +179,10 @@ try {
     'scripts/tests/cycle-retro-context.test.ts',
     'scripts/tests/plan-candidate-pool.test.ts',
     'scripts/tests/inbox-plan-sync.test.ts',
+    // Countdown days: calendar-day spans across a DST change, the next yearly
+    // occurrence when the anchor is 29 February, and which entries the morning
+    // card may mention. All day counts are the user's timezone, never UTC's.
+    'scripts/tests/countdown.test.ts',
     'scripts/tests/day-history.test.ts',
     // cycle_context: local 20_CYCLES + 10_OKR replace life-review-os reading the
     // Feishu weekly table — 要务 markdown parses back to per-OKR rows, and the
