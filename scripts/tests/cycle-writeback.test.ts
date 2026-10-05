@@ -343,6 +343,9 @@ test('the retro template carries the three Feishu sections in order', () => {
   assert.match(RETRO_TEMPLATE, /精力：/);
   assert.match(RETRO_TEMPLATE, /外部压力：/);
   assert.match(RETRO_TEMPLATE, /计划外吃掉时间的事：/);
+  // The three are prompted one per line. A combined 情绪/精力/外部压力 line on
+  // top of them asked for the same thing twice.
+  assert.doesNotMatch(RETRO_TEMPLATE, /情绪\/精力\/外部压力/);
 });
 
 test('the template matches the headings life-review-os parses back out', () => {
