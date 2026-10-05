@@ -10,7 +10,7 @@ import { loadConfig } from '../config/load-config.js';
 import { formatDoctor, runDoctor } from '../cli/doctor.js';
 import { collectEvidence } from '../workflows/evidence.js';
 import { runWorkflow } from '../workflows/run-workflow.js';
-import { addDays, todayInTimezone } from '../utils/date.js';
+import { addDays, isKnownTimeZone, todayInTimezone, todayInZone } from '../utils/date.js';
 import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
 import { sendFeishuMessage } from '../connectors/lark-cli.js';
 import { readLatestWorkflowOutput } from '../storage/memory.js';
@@ -444,7 +444,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/today/plan-order') return sendJson(response, await reorderTodayPlan(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/plan-add') return sendJson(response, await addCaptureToTodayPlan(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/todo-inbox/abandon') return sendJson(response, await abandonStaleCaptures(options, await readJson(request)));
-    if (request.method === 'GET' && url.pathname === '/api/countdowns') return sendJson(response, listCountdownsResponse(options));
+    if (request.method === 'GET' && url.pathname === '/api/countdowns') return sendJson(response, listCountdownsResponse(options, url));
     if (request.method === 'POST' && url.pathname === '/api/countdowns/save') return sendJson(response, await saveCountdownEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/countdowns/delete') return sendJson(response, await deleteCountdownEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
@@ -897,25 +897,36 @@ async function abandonStaleCaptures(options: UiServerOptions, body: unknown): Pr
  * disagree about what day it is, and the native app has no idea what timezone
  * the user configured.
  */
-function listCountdownsResponse(options: UiServerOptions): Record<string, unknown> {
+function listCountdownsResponse(options: UiServerOptions, url: URL): Record<string, unknown> {
   const env = readEnvFile(options.envPath);
   applyEnv(env);
   const config = loadConfig(options.configPath);
-  const today = todayInTimezone(config);
-  return { ok: true, ...countdownContext(config), items: listCountdowns(config, today) };
+  const context = countdownContext(config, url.searchParams.get('tz'));
+  return { ok: true, ...context, items: listCountdowns(config, context.today) };
 }
 
 /**
- * Which day it is and whose day that is.
+ * Which day it is, and whose clock that is.
  *
- * Shipped beside every countdown list rather than left implicit. There is one
- * `user.timezone` for the whole service, so a day count is always *somebody's*
- * — the owner's — and a client in another zone has no way to work that out from
- * the numbers alone. Saying so is the difference between a screen that is
- * right and a screen that can be checked.
+ * A caller may name the zone to count in — the Mac app reports its own, so the
+ * numbers on screen match the machine the person is looking at even when they
+ * have flown somewhere else. Asking the client is better than reading the OS
+ * here: this service runs for weeks under launchd and a long-lived Node process
+ * is not a reliable witness to a timezone that changed under it, whereas the
+ * app is restarted on every flight and knows for certain.
+ *
+ * Without `tz` — the Feishu card, curl, a teammate — it falls back to
+ * `user.timezone`. The card has to: it is sent on a schedule keyed to that same
+ * zone, and there is no client to ask at 08:00. `cardTimezone` is reported
+ * alongside so a screen counting in some other zone can say which clock the
+ * morning card will be on.
  */
-function countdownContext(config: AppConfig): { today: string; timezone: string } {
-  return { today: todayInTimezone(config), timezone: config.user.timezone };
+function countdownContext(
+  config: AppConfig,
+  requested: string | null,
+): { today: string; timezone: string; cardTimezone: string } {
+  const timezone = requested && isKnownTimeZone(requested) ? requested : config.user.timezone;
+  return { today: todayInZone(timezone), timezone, cardTimezone: config.user.timezone };
 }
 
 /** Create a countdown, or update the one carrying `id`. */
@@ -938,8 +949,13 @@ async function saveCountdownEntry(options: UiServerOptions, body: unknown): Prom
     ...(typeof request.pinned === 'boolean' ? { pinned: request.pinned } : {}),
     ...(typeof request.note === 'string' ? { note: request.note } : {}),
   });
-  const today = todayInTimezone(config);
-  return { ok: true, ...countdownContext(config), item: resolveCountdown(saved, today), items: listCountdowns(config, today) };
+  const context = countdownContext(config, typeof request.tz === 'string' ? request.tz : null);
+  return {
+    ok: true,
+    ...context,
+    item: resolveCountdown(saved, context.today),
+    items: listCountdowns(config, context.today),
+  };
 }
 
 async function deleteCountdownEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
@@ -950,8 +966,8 @@ async function deleteCountdownEntry(options: UiServerOptions, body: unknown): Pr
   applyEnv(env);
   const config = loadConfig(options.configPath);
   if (!deleteCountdown(config, id)) return { ok: false, error: '这条倒数日已经不在了。' };
-  const today = todayInTimezone(config);
-  return { ok: true, ...countdownContext(config), items: listCountdowns(config, today) };
+  const context = countdownContext(config, typeof request.tz === 'string' ? request.tz : null);
+  return { ok: true, ...context, items: listCountdowns(config, context.today) };
 }
 
 /**

@@ -29,7 +29,7 @@ import {
   saveCountdown,
   type Countdown,
 } from '../../src/countdown/store.js';
-import { todayInTimezone } from '../../src/utils/date.js';
+import { isKnownTimeZone, todayInTimezone, todayInZone } from '../../src/utils/date.js';
 import { formatWorkflowSummaryForFeishu } from '../../src/workflows/summary.js';
 
 type TestFn = () => void | Promise<void>;
@@ -310,6 +310,41 @@ test('the page order is pinned, then coming up, then gone by', () => {
       listCountdowns(makeConfig(), '2026-04-01').map((item) => item.id),
       ['pinned', 'soon', 'later', 'passed-recent', 'passed-old'],
     );
+  });
+});
+
+// --- counting in a zone the caller names ------------------------------------
+
+test('a caller can ask for its own zone, and a bad one falls back', () => {
+  // What the route does with `?tz=`, exercised through the two functions it is
+  // built out of. The Mac app reports its own zone so the numbers match the
+  // machine the person is looking at; everything else gets `user.timezone`.
+  assert.equal(isKnownTimeZone('Asia/Shanghai'), true);
+  assert.equal(isKnownTimeZone('America/Toronto'), true);
+  assert.equal(isKnownTimeZone('Mars/Olympus'), false, 'an unknown zone must not throw out of Intl');
+  assert.equal(isKnownTimeZone(''), false);
+  assert.equal(isKnownTimeZone('   '), false);
+
+  // The two are the same calendar day for twelve hours out of every
+  // twenty-four and different for the other twelve, which is the entire reason
+  // the zone has to be named rather than assumed.
+  const shanghai = todayInZone('Asia/Shanghai');
+  const losAngeles = todayInZone('America/Los_Angeles');
+  assert.match(shanghai, /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(
+    diffCalendarDays(losAngeles, shanghai) === 0 || diffCalendarDays(losAngeles, shanghai) === 1,
+    `Shanghai is never behind Los Angeles: ${losAngeles} → ${shanghai}`,
+  );
+});
+
+test('the same entry reads differently from two zones, by exactly one day', () => {
+  withTmpWorkdir(() => {
+    const config = makeConfig('America/Toronto');
+    seed([entry({ id: 'd', title: '截稿', date: '2026-06-01' })]);
+    const fromToronto = listCountdowns(config, '2026-05-01')[0];
+    const fromShanghai = listCountdowns(config, '2026-05-02')[0];
+    assert.equal(fromToronto?.daysLeft, 31);
+    assert.equal(fromShanghai?.daysLeft, 30, '一天之差，不是一小时之差');
   });
 });
 

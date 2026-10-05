@@ -1,12 +1,35 @@
 import type { AppConfig } from '../config/schema.js';
 
 export function todayInTimezone(config: AppConfig): string {
+  return todayInZone(config.user.timezone);
+}
+
+/** Today's calendar date in an arbitrary IANA zone. */
+export function todayInZone(timeZone: string): string {
   return new Intl.DateTimeFormat('en-CA', {
-    timeZone: config.user.timezone,
+    timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
   }).format(new Date());
+}
+
+/**
+ * True when `timeZone` names a zone this runtime knows.
+ *
+ * Checked rather than trusted because the one caller takes it off the wire: a
+ * client reports which zone its clock is in, and an identifier this Node does
+ * not recognise would otherwise throw out of `Intl.DateTimeFormat` and fail a
+ * read that has a perfectly good fallback.
+ */
+export function isKnownTimeZone(timeZone: string): boolean {
+  if (!timeZone.trim()) return false;
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
