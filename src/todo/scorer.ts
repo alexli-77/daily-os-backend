@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
@@ -257,6 +258,25 @@ export function scoreCandidate(
   return { score, breakdown };
 }
 
+// --- candidate ids -----------------------------------------------------------
+
+/**
+ * Candidate ids travel through the model: the prompt lists them, and the plan
+ * the model writes back must quote each one verbatim inside a JSON string.
+ * An id built from free text breaks that — 要务 text with Chinese curly quotes
+ * came back with straight quotes, unescaped, and the whole plan failed to
+ * parse. Even when it parses, a model that "tidies" punctuation hands back an
+ * id that matches nothing.
+ *
+ * So ids carry no free text: a short hash stands in for it. Stable across runs
+ * for the same text, ASCII-only, nothing to escape and nothing to normalise.
+ */
+const SAFE_ID_PART = /^[A-Za-z0-9._/-]+$/;
+
+export function idFragment(text: string): string {
+  return crypto.createHash('sha1').update(text.trim()).digest('hex').slice(0, 8);
+}
+
 // --- source normalizers ----------------------------------------------------
 
 function fromTodoInbox(source: EvidenceSource | undefined, now: Date): TodoCandidate[] {
@@ -316,7 +336,7 @@ function fromVault(source: EvidenceSource | undefined): TodoCandidate[] {
       const summary = typeof item.summary === 'string' ? item.summary : '';
       const due = typeof item.due === 'string' && item.due ? item.due : typeof item.next_review === 'string' ? item.next_review : undefined;
       return {
-        id: `vault:${typeof item.path === 'string' ? item.path : title}`,
+        id: `vault:${typeof item.path === 'string' && SAFE_ID_PART.test(item.path) ? item.path : idFragment(title)}`,
         title,
         source: 'vault' as const,
         ...(due ? { dueDate: due } : {}),
@@ -335,7 +355,7 @@ function fromWeeklyPriorities(source: EvidenceSource | undefined): TodoCandidate
       if (!text || /✅/.test(text)) return null;
       const okrTag = typeof item.okr === 'string' ? item.okr.trim() : '';
       return {
-        id: `weekly:${index}:${text.slice(0, 24)}`,
+        id: `weekly:${index}:${idFragment(text)}`,
         title: text,
         source: 'weekly_priorities' as const,
         ...(okrTag ? { weeklyOkrHit: true } : {}),

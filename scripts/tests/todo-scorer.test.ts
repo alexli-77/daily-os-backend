@@ -171,7 +171,14 @@ test('every scored candidate carries candidateId, matching what the prompt tells
 
 test('resolveDueHintMs turns the capture hints users actually type into real days', () => {
   const saturday = new Date('2026-09-05T12:00:00'); // a Saturday
-  const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString().slice(0, 10));
+  // Local calendar date, like the code under test. `toISOString()` is the UTC
+  // date: local midnight east of UTC is still the previous day there, so this
+  // check only passed on machines west of Greenwich (failed in Asia/Tokyo).
+  const iso = (ms: number | null) => {
+    if (ms === null) return null;
+    const day = new Date(ms);
+    return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+  };
 
   assert.equal(iso(resolveDueHintMs('今天', saturday)), '2026-09-05');
   assert.equal(iso(resolveDueHintMs('明天', saturday)), '2026-09-06');

@@ -231,7 +231,9 @@ test('an overdue work item is never damped — the one thing worth interrupting 
 test('an item due within 24h is not damped either', () => {
   const config = tempConfig();
   const dueToday = candidate('linear', { dueDate: SATURDAY });
-  const result = score(dueToday, SATURDAY, config, new Date(`${SATURDAY}T00:00:00Z`));
+  // Local midnight, as the scorer reads a bare date and as buildScoredTodos sets
+  // `now`. A UTC midnight made "due today" read as overdue east of Greenwich.
+  const result = score(dueToday, SATURDAY, config, new Date(`${SATURDAY}T00:00:00`));
   assert.equal(result.breakdown.dueWithin24h, DEFAULT_SCORER_WEIGHTS.dueWithin24h);
   assert.equal(result.breakdown.restDayDamping, undefined);
 });
@@ -239,7 +241,7 @@ test('an item due within 24h is not damped either', () => {
 test('an item merely due within 72h IS damped — a rest day is not the deadline', () => {
   const config = tempConfig();
   const soon = candidate('linear', { dueDate: '2026-09-14' });
-  const result = score(soon, SATURDAY, config, new Date(`${SATURDAY}T00:00:00Z`));
+  const result = score(soon, SATURDAY, config, new Date(`${SATURDAY}T00:00:00`));
   assert.equal(result.breakdown.dueWithin72h, DEFAULT_SCORER_WEIGHTS.dueWithin72h);
   assert.equal(result.breakdown.restDayDamping, DEFAULT_SCORER_WEIGHTS.restDayWorkDamping);
 });
