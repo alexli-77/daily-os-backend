@@ -129,7 +129,7 @@ export function buildScoredTodos(
   const weights = options.weights ?? loadScorerWeights();
   const dayShape = options.dayShape ?? resolveDayShape(config, date);
   const now = options.now ?? new Date(`${date}T00:00:00`);
-  const all = normalizeCandidates({ config, evidence, date, now });
+  const all = anchorToCycle(normalizeCandidates({ config, evidence, date, now }), evidence, now);
   // Drop what the user already ticked complete. For Linear and inbox rows that
   // means "ticked today"; after that their own state decides (#220).
   const completed = options.completedCandidateIds ?? getCompletedCandidateIds(config, { date });
@@ -179,6 +179,41 @@ export function normalizeCandidates(input: {
   ].map((candidate) => enrichOkr(candidate, okrIndex));
   return dedupeCandidates(raw);
 }
+
+/**
+ * The cycle's 要务 decide which Linear issues are today's work.
+ *
+ * An issue that is open in Linear is not, by that fact, something the user
+ * chose for this cycle. On 2026-10-06 three of seven planned rows were Linear
+ * issues the user had deliberately left out of the new cycle — still open in
+ * Linear, Urgent/High, carrying weeks of carry-over points — so they outscored
+ * the cycle's own priorities and took the plan over. The user's words: not in
+ * my cycle, not in my weekly, why is it here.
+ *
+ * So when the current cycle has 要务, a Linear candidate stays only if one of
+ * those lines names its issue key. The one exception is a hard deadline —
+ * overdue or due within 24h — because dropping that silently is worse than
+ * showing something off-plan. With no cycle 要务 (none written yet, source
+ * missing) nothing is filtered: there is nothing to anchor to.
+ */
+export function anchorToCycle(candidates: TodoCandidate[], evidence: Evidence, now: Date): TodoCandidate[] {
+  const weekly = evidence.sources.weekly_priorities;
+  if (!weekly || weekly.state !== 'available' || !isRecord(weekly.data) || !Array.isArray(weekly.data.items)) return candidates;
+  const items = weekly.data.items.filter(isRecord);
+  if (items.length === 0) return candidates;
+  const named = new Set(
+    items.flatMap((item) => (typeof item.item === 'string' ? item.item.match(ISSUE_KEY) ?? [] : [])).map((key) => key.toUpperCase()),
+  );
+  return candidates.filter((candidate) => {
+    if (candidate.source !== 'linear') return true;
+    const key = candidate.id.slice('linear:'.length).toUpperCase();
+    if (named.has(key)) return true;
+    const dueMs = parseDateMs(candidate.dueDate);
+    return dueMs !== null && dueMs - now.getTime() <= DAY_MS;
+  });
+}
+
+const ISSUE_KEY = /\b[A-Z][A-Z0-9]+-\d+\b/gi;
 
 /**
  * Score + rank candidates, returning the top-N with a per-item breakdown.
