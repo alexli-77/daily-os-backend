@@ -425,6 +425,27 @@ function extractJsonObject(content: string): string | null {
  * optional ```json fence. Unlike extractJsonObject this does not require a closing
  * `}`, so it still catches output truncated mid-object at the token cap.
  */
+/**
+ * Why a JSON workflow output cannot be read, or null when it can (or is not
+ * JSON at all — prose falls through to the legacy render as before).
+ *
+ * A daily plan whose JSON does not parse used to be saved as a *successful*
+ * run: the Today page then showed a plan with zero rows and nothing said why.
+ * The run now treats this as a failed attempt instead (see run-workflow).
+ * Valid JSON with an empty `todos` is not an error — a quiet day is allowed.
+ */
+export function workflowJsonError(content: string): string | null {
+  if (!looksLikeJsonObject(content)) return null;
+  const json = extractJsonObject(content);
+  if (!json) return 'output starts like a JSON object but has no complete object';
+  try {
+    JSON.parse(json);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 function looksLikeJsonObject(content: string): boolean {
   return content.trim().replace(/^```(?:json)?\s*/i, '').trimStart().startsWith('{');
 }

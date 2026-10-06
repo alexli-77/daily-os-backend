@@ -5,7 +5,7 @@ import { todayInTimezone } from '../utils/date.js';
 import { appendDailyMemory, loadMemory, readDailyPlanOutput, writeLatestWorkflowOutput, writeWorkflowDetailCache } from '../storage/memory.js';
 import { sendFeishuCard, sendFeishuMessage } from '../connectors/lark-cli.js';
 import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftCard } from '../progress/sync-drift.js';
-import { buildDailyPlanTable, buildWorkflowEvidenceTrace, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, parseDailyPlanTodoPlan } from './summary.js';
+import { buildDailyPlanTable, buildWorkflowEvidenceTrace, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, parseDailyPlanTodoPlan, workflowJsonError } from './summary.js';
 import { mergeOpenCapturesIntoPlan } from '../todo/inbox.js';
 import { buildScoredTodos } from '../todo/scorer.js';
 import { listTodoFeedback, recordTodoPresented } from '../todo/feedback.js';
@@ -171,10 +171,18 @@ function loadTodayPlanTodos(config: AppConfig, date: string): Array<{ rank: numb
 
 async function runAgentWithNonEmptyOutput(input: Parameters<typeof runAgent>[0]): Promise<string> {
   const attempts = 2;
+  let lastProblem = 'empty output';
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const text = (await runAgent(input)).trim();
-    if (text.length > 0) return text;
-    console.warn(`[workflow] ${input.workflow} returned empty output on attempt ${attempt}/${attempts}.`);
+    // Broken JSON is retried like empty output, and for the same reason: saved,
+    // it becomes a "successful" run whose plan has zero readable rows. On
+    // 2026-10-05 five reruns in a row did exactly that — the model echoed a
+    // candidate id containing a quote without escaping it — and every one
+    // reported success.
+    const jsonError = text.length > 0 && (input.workflow === 'daily_plan' || input.workflow === 'daily_review') ? workflowJsonError(text) : null;
+    if (text.length > 0 && !jsonError) return text;
+    lastProblem = jsonError ? `unparseable JSON (${jsonError})` : 'empty output';
+    console.warn(`[workflow] ${input.workflow} returned ${lastProblem} on attempt ${attempt}/${attempts}.`);
   }
-  throw new Error(`${input.workflow} generated empty output after ${attempts} attempts; refusing to save or send an empty workflow card.`);
+  throw new Error(`${input.workflow} returned ${lastProblem} after ${attempts} attempts; refusing to save or send it.`);
 }
