@@ -143,19 +143,25 @@ export function readDailyPlanOutput(config: AppConfig, date: string): LatestWork
   // between the morning plan and the first workflow that follows it.
   const latest = readLatestWorkflowOutput(config);
   if (latest && latest.workflow === 'daily_plan' && latest.date === date) return latest;
+  return listCachedDailyPlanOutputs(config, date)[0] ?? null;
+}
 
+/**
+ * Every cached `daily_plan` output for one date, newest first. A rerun
+ * supersedes the earlier plan, and `generated_at` is the only ordering the
+ * cache carries — the file names are random UUIDs. The past-days view walks
+ * this list to skip a version that cannot be read (see `readDayHistory`).
+ */
+export function listCachedDailyPlanOutputs(config: AppConfig, date: string): WorkflowDetailCache[] {
   const cacheDir = workflowDetailCacheDir(config);
-  if (!fs.existsSync(cacheDir)) return null;
-  let best: WorkflowDetailCache | null = null;
+  if (!fs.existsSync(cacheDir)) return [];
+  const outputs: WorkflowDetailCache[] = [];
   for (const name of fs.readdirSync(cacheDir)) {
     if (!name.endsWith('.json')) continue;
     const cached = readWorkflowDetailCache(config, name.slice(0, -'.json'.length));
-    if (!cached || cached.workflow !== 'daily_plan' || cached.date !== date) continue;
-    // A rerun supersedes the earlier plan, and `generated_at` is the only
-    // ordering the cache carries — the file names are random UUIDs.
-    if (!best || cached.generated_at > best.generated_at) best = cached;
+    if (cached && cached.workflow === 'daily_plan' && cached.date === date) outputs.push(cached);
   }
-  return best;
+  return outputs.sort((left, right) => (left.generated_at < right.generated_at ? 1 : left.generated_at > right.generated_at ? -1 : 0));
 }
 
 export function appendLongTermMemory(config: AppConfig, content: string, source = 'manual'): void {
