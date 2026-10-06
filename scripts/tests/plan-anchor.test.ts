@@ -6,13 +6,19 @@
  *
  * And the rows that did come from the cycle were rewritten with details lifted
  * from yesterday's plan and the previous cycle. The prompt now forbids that;
- * the last test only guards that the rule stays in the prompt.
+ * the prompt tests only guard that the rules stay in the prompt.
+ *
+ * 2026-10-07: the rows were clean, but the plan's note still said "CUTTO-1022
+ * has dragged for weeks, close it today" — an issue the user had ticked done
+ * that morning. Filtering the candidates was not enough while the raw Linear
+ * list still went into the prompt beside them.
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { anchorToCycle, normalizeCandidates } from '../../src/todo/scorer.js';
+import { fitEvidenceToBudget } from '../../src/workflows/evidence-budget.js';
 import type { Evidence } from '../../src/workflows/types.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -90,6 +96,30 @@ test('the prompt keeps its "only this candidate\'s own content" rule', () => {
   assert.match(prompt, /只用这条候选自己的内容/);
   assert.match(prompt, /昨天的计划不是今天的候选/);
   assert.match(prompt, /写得朴素也比编得具体好/);
+});
+
+test('an issue the cycle left out does not reach the plan prompt at all, only the anchored ones do', () => {
+  const evidence = {
+    generated_at: '',
+    date: '2026-10-06',
+    sources: {
+      linear: { state: 'available', data: { items: [issue('ABC-1'), issue('ABC-2')] } },
+      weekly_priorities: { state: 'available', data: { items: [{ item: '补齐 Demo（ABC-1）', okr: 'O' }] } },
+    },
+  } as unknown as Evidence;
+  const candidates = normalizeCandidates({ config: {} as never, evidence, date: '2026-10-06', now: NOW });
+  evidence.sources.todo_scored = { state: 'available', data: { top: anchorToCycle(candidates, evidence, NOW) } };
+
+  const prompt = JSON.stringify(fitEvidenceToBudget(evidence, 'daily_plan').evidence);
+  assert.ok(prompt.includes('ABC-1'), 'the anchored issue is still there, as a candidate');
+  assert.ok(!prompt.includes('ABC-2'), 'nothing left for the note to bring up');
+  assert.ok(JSON.stringify(fitEvidenceToBudget(evidence, 'daily_review').evidence).includes('ABC-2'), 'the review still sees every issue');
+});
+
+test('the prompt keeps the note to the rows it planned', () => {
+  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  assert.match(prompt, /备注只谈今天排了的条目/);
+  assert.match(prompt, /没进候选，就不是今天的事/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

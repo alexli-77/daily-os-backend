@@ -90,6 +90,12 @@ const KEEP_ORDER = [
 const WORKFLOW_DROPS: Partial<Record<WorkflowName, Array<{ source: string; path: string[]; why: string }>>> = {
   daily_plan: [
     { source: 'linear', path: ['data', 'recently_completed'], why: '已完成的 issue 不会成为今天的待办' },
+    // The raw open-issue list. Every issue that may be planned today is already
+    // in `todo_scored`, filtered by `anchorToCycle`; the rest are exactly the
+    // ones the user left out of the cycle. Shown them anyway, the model wrote
+    // one into the plan's note — an issue the user had ticked done that
+    // morning, which the plan run cannot see.
+    { source: 'linear', path: ['data', 'items'], why: '能排的 issue 已在 todo_scored 里，其余是用户没放进本期要务的' },
   ],
 };
 
