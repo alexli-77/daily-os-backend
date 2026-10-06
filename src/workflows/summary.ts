@@ -446,7 +446,7 @@ export function workflowJsonError(content: string): string | null {
   }
 }
 
-function looksLikeJsonObject(content: string): boolean {
+export function looksLikeJsonObject(content: string): boolean {
   return content.trim().replace(/^```(?:json)?\s*/i, '').trimStart().startsWith('{');
 }
 

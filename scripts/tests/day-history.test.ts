@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
-import { appendDailyMemory } from '../../src/storage/memory.js';
+import { appendDailyMemory, writeWorkflowDetailCache } from '../../src/storage/memory.js';
 import { recordTodoFeedback } from '../../src/todo/feedback.js';
 import { isHistoryDate, listPlanDates, readDailyMemorySections, readDayHistory } from '../../src/todo/day-history.js';
 
@@ -108,6 +108,68 @@ test('the day list is newest first and only counts days that had a plan', () => 
   appendDailyMemory(config, 'daily_review', '2026-09-23', review);
   fs.writeFileSync(path.resolve(config.memory.daily_dir, 'notes.md'), 'not a day');
   assert.deepEqual(listPlanDates(config), ['2026-09-24', '2026-09-22']);
+});
+
+// --- a broken rerun does not supersede a working plan --------------------------
+//
+// 2026-10-05: the morning plan had five rows, then five reruns all produced JSON
+// that did not parse. "Last one wins" showed the day as zero rows plus a block
+// of raw JSON.
+
+/** The exact shape that broke: an id echoed back with unescaped quotes. */
+const BROKEN = '{"todos":[{"rank":1,"text":"x","candidateId":"weekly:0:以"某某"为中心","minutes":45}]}';
+
+/** Cache entry with an explicit timestamp — two writes in one millisecond would otherwise tie. */
+function cachePlan(config: AppConfig, content: string, at: string): void {
+  const entry = writeWorkflowDetailCache(config, 'daily_plan', '2026-10-05', content);
+  const file = path.resolve(config.memory.daily_dir, '.workflow-detail-cache', `${entry.id}.json`);
+  fs.writeFileSync(file, JSON.stringify({ ...entry, generated_at: at }), 'utf8');
+}
+
+test('from the daily file: broken reruns are skipped back to the last plan that parses', () => {
+  const config = freshConfig();
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', plan('早上', '的', '计划'));
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', BROKEN);
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', BROKEN);
+  const day = readDayHistory(config, '2026-10-05');
+  assert.deepEqual(day.todos.map((todo) => todo.text), ['早上', '的', '计划']);
+  assert.equal(day.rawPlan, undefined, 'no raw JSON dumped on the page');
+});
+
+test('from the cache: same rule, and the readable version keeps its own generated_at', () => {
+  const config = freshConfig();
+  cachePlan(config, plan('早上的计划'), '2026-10-05T12:02:12.000Z');
+  cachePlan(config, BROKEN, '2026-10-05T23:34:21.000Z');
+  cachePlan(config, BROKEN, '2026-10-06T03:44:58.000Z');
+  const day = readDayHistory(config, '2026-10-05');
+  assert.deepEqual(day.todos.map((todo) => todo.text), ['早上的计划']);
+  assert.equal(day.plan?.generated_at, '2026-10-05T12:02:12.000Z', 'the time shown is the plan shown');
+});
+
+test('a newer plan that parses still wins — only broken ones are skipped', () => {
+  const config = freshConfig();
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', plan('旧的'));
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', BROKEN);
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', plan('新的'));
+  assert.deepEqual(readDayHistory(config, '2026-10-05').todos.map((todo) => todo.text), ['新的']);
+});
+
+test('a valid plan with no todos is a real answer, not something to skip past', () => {
+  const config = freshConfig();
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', plan('早上'));
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', JSON.stringify({ todos: [], note: '今天休息' }));
+  const day = readDayHistory(config, '2026-10-05');
+  assert.deepEqual(day.todos, []);
+  assert.ok(day.plan, 'still a day with a plan');
+});
+
+test('when every version is broken the day still had a plan, with no rows and no raw JSON', () => {
+  const config = freshConfig();
+  appendDailyMemory(config, 'daily_plan', '2026-10-05', BROKEN);
+  const day = readDayHistory(config, '2026-10-05');
+  assert.ok(day.plan);
+  assert.deepEqual(day.todos, []);
+  assert.equal(day.rawPlan, undefined);
 });
 
 test('dates are validated before they reach a file path', () => {

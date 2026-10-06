@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppConfig, WorkflowName } from '../config/schema.js';
-import { readDailyPlanOutput } from '../storage/memory.js';
-import { parseDailyReviewReconciliation, type DailyReviewReconciliation, type DailyPlanTodo } from '../workflows/summary.js';
+import { listCachedDailyPlanOutputs, readDailyPlanOutput } from '../storage/memory.js';
+import { looksLikeJsonObject, parseDailyReviewReconciliation, workflowJsonError, type DailyReviewReconciliation, type DailyPlanTodo } from '../workflows/summary.js';
 import { buildPlanSnapshotForDate } from './today-plan.js';
 
 /**
@@ -93,7 +93,7 @@ export function readDayHistory(config: AppConfig, date: string): DayHistory {
   const lastOf = (workflow: WorkflowName): string | undefined =>
     sections.filter((section) => section.workflow === workflow).at(-1)?.content;
 
-  const output = readDailyPlanOutput(config, date) ?? toOutput(lastOf('daily_plan'), date);
+  const output = pickReadablePlan(config, date, sections);
   const snapshot = buildPlanSnapshotForDate(config, date, output);
   const reviewText = lastOf('daily_review');
   const review = reviewText ? parseDailyReviewReconciliation(reviewText) : null;
@@ -106,14 +106,48 @@ export function readDayHistory(config: AppConfig, date: string): DayHistory {
     notes: snapshot?.notes ?? {},
     review,
   };
-  if (output && history.todos.length === 0 && output.content.trim()) {
+  // Only prose goes out as text. A plan that is JSON reached here either parsed
+  // (and has its todos above) or is the broken newest version of a day with no
+  // readable one — and raw broken JSON is not something to show anyone.
+  if (output && history.todos.length === 0 && output.content.trim() && !looksLikeJsonObject(output.content)) {
     history.rawPlan = output.content.trim().slice(0, MAX_RAW_CHARS);
   }
   return history;
 }
 
-function toOutput(content: string | undefined, date: string): { date: string; generated_at: string; content: string } | null {
-  return content ? { date, generated_at: '', content } : null;
+type PlanOutput = { date?: string; generated_at: string; content: string };
+
+/**
+ * The newest version of the day's plan that can actually be read.
+ *
+ * "Last one wins" was right until a rerun produced a plan whose JSON did not
+ * parse: on 2026-10-05 the morning plan had five rows and the five reruns after
+ * it were all broken, so the past-days view showed that day as zero rows and a
+ * block of raw JSON. A broken rerun does not supersede a working plan — it
+ * failed to produce one. (#232 stops new broken runs from being saved; this
+ * reads the days that were saved before it.)
+ *
+ * Versions are tried newest first: the detail cache (which has
+ * `generated_at`), then the daily memory file from its last section back
+ * (which outlives the cache's pruning). Prose counts as readable — that is a
+ * pre-JSON plan, shown as text. When nothing is readable the newest version is
+ * returned anyway, so the day still reads as "had a plan".
+ */
+function pickReadablePlan(
+  config: AppConfig,
+  date: string,
+  sections: Array<{ workflow: WorkflowName; content: string }>,
+): PlanOutput | null {
+  const latest = readDailyPlanOutput(config, date);
+  const versions: PlanOutput[] = [
+    ...(latest ? [latest] : []),
+    ...listCachedDailyPlanOutputs(config, date),
+    ...sections
+      .filter((section) => section.workflow === 'daily_plan')
+      .reverse()
+      .map((section) => ({ date, generated_at: '', content: section.content })),
+  ];
+  return versions.find((version) => workflowJsonError(version.content) === null) ?? versions[0] ?? null;
 }
 
 function dailyFile(config: AppConfig, date: string): string | null {
