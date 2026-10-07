@@ -52,6 +52,8 @@ function freshConfig(): AppConfig {
   parsed.memory.repository_path = dir;
   parsed.todo_inbox.ledger_path = path.join(dir, 'todo-inbox.jsonl');
   parsed.todo_inbox.vault_path = path.join(dir, 'todo-inbox.md');
+  // No meal rows (LEO-332): these tests compare whole row lists.
+  parsed.user.rhythm.meal_blocks = [];
   return AppConfigSchema.parse(parsed);
 }
 

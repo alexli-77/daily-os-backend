@@ -1012,6 +1012,9 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     if (event === 'place' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) {
       return { ok: false, error: 'place needs start as "HH:mm".' };
     }
+    // `update` may carry the row's new wording (LEO-332). Blank means "not
+    // editing the text", never "erase it".
+    const text = event === 'update' && typeof request.text === 'string' ? request.text.trim().slice(0, 500) : '';
     const note = typeof request.note === 'string' ? request.note.trim() : '';
     const rank = Number(request.rank) || 0;
     // Only on `update`: complete and defer say nothing about how long the thing
@@ -1037,7 +1040,13 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
       ...(note ? { note } : {}),
       ...(minutes ? { minutes } : clearsMinutes ? { minutes: 0 } : {}),
       ...(event === 'place' ? { start } : {}),
+      ...(text ? { text } : {}),
     });
+    // A capture's row *is* the capture: its own text follows the edit, or the
+    // next plan would bring the old wording back.
+    if (text && candidateId.startsWith('todo_inbox:')) {
+      updateTodoInboxItemById(config, candidateId.slice('todo_inbox:'.length), { text });
+    }
     // An inbox-sourced plan row is the inbox item; keep the inbox's own status
     // in step so the next plan does not re-propose it (#220).
     syncTodoInboxFromPlanRow(config, candidateId, event);
@@ -1061,6 +1070,8 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
                   ? `已放到 ${start}`
                   : event === 'unplace'
                     ? '已取消固定，回到自动排'
+                    : text
+                      ? '已改好'
               : minutes
                 ? `已改为 ${minutes} 分钟`
                 : clearsMinutes
