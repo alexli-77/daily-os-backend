@@ -169,6 +169,8 @@ try {
     // LEO-329 deleting a row from today's sheet: day-scoped, undoable, and a
     // capture's row deletes the capture.
     'scripts/tests/plan-row-remove.test.ts',
+    // LEO-331 pinning a row to a time: day-scoped, survives a rerun, unplace releases.
+    'scripts/tests/plan-row-place.test.ts',
     // Shipped templates and prompts found from a working directory that is not
     // the checkout — the split the bundled Mac app introduced.
     'scripts/tests/install-root.test.ts',

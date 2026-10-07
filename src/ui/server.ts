@@ -69,7 +69,7 @@ import {
   resolveCountdown,
   saveCountdown,
 } from '../countdown/store.js';
-import { recordTodoFeedback } from '../todo/feedback.js';
+import { recordTodoFeedback, type TodoFeedbackEvent } from '../todo/feedback.js';
 import { formatCalendarDraftForFeishu, runCalendarDraft, testCalendarBridge } from '../calendar/bridge.js';
 import {
   SESSION_COOKIE,
@@ -1003,8 +1003,14 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     // only this gate refused it, which made ticking a plan row the one action in
     // the product with no way back. A mis-click is not a decision.
     // `remove` takes the row off today's sheet (LEO-329); `reopen` puts it back.
-    if (event !== 'complete' && event !== 'partial' && event !== 'defer' && event !== 'update' && event !== 'reopen' && event !== 'remove') {
-      return { ok: false, error: 'event must be complete, partial, defer, update, reopen or remove.' };
+    // `place` pins it to a time on the timeline, `unplace` releases it (LEO-331).
+    const events = ['complete', 'partial', 'defer', 'update', 'reopen', 'remove', 'place', 'unplace'];
+    if (!events.includes(event)) {
+      return { ok: false, error: `event must be one of ${events.join(', ')}.` };
+    }
+    const start = typeof request.start === 'string' ? request.start.trim() : '';
+    if (event === 'place' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) {
+      return { ok: false, error: 'place needs start as "HH:mm".' };
     }
     const note = typeof request.note === 'string' ? request.note.trim() : '';
     const rank = Number(request.rank) || 0;
@@ -1024,12 +1030,13 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     const config = loadConfig(options.configPath);
     recordTodoFeedback(config, {
       date: todayInTimezone(config),
-      event,
+      event: event as TodoFeedbackEvent,
       candidateId,
       rank,
       source: 'console-today',
       ...(note ? { note } : {}),
       ...(minutes ? { minutes } : clearsMinutes ? { minutes: 0 } : {}),
+      ...(event === 'place' ? { start } : {}),
     });
     // An inbox-sourced plan row is the inbox item; keep the inbox's own status
     // in step so the next plan does not re-propose it (#220).
@@ -1050,6 +1057,10 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
               ? '已恢复'
               : event === 'remove'
                 ? '已从今天删除'
+                : event === 'place'
+                  ? `已放到 ${start}`
+                  : event === 'unplace'
+                    ? '已取消固定，回到自动排'
               : minutes
                 ? `已改为 ${minutes} 分钟`
                 : clearsMinutes
