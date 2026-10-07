@@ -69,7 +69,7 @@ import {
   resolveCountdown,
   saveCountdown,
 } from '../countdown/store.js';
-import { recordTodoFeedback, type TodoFeedbackEvent } from '../todo/feedback.js';
+import { PLAN_ROW_COLORS, PLAN_ROW_TEXT_MAX, recordTodoFeedback, type TodoFeedbackEvent } from '../todo/feedback.js';
 import { formatCalendarDraftForFeishu, runCalendarDraft, testCalendarBridge } from '../calendar/bridge.js';
 import {
   SESSION_COOKIE,
@@ -1014,7 +1014,12 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     }
     // `update` may carry the row's new wording (LEO-332). Blank means "not
     // editing the text", never "erase it".
-    const text = event === 'update' && typeof request.text === 'string' ? request.text.trim().slice(0, 500) : '';
+    const text = event === 'update' && typeof request.text === 'string' ? Array.from(request.text.trim()).slice(0, PLAN_ROW_TEXT_MAX).join('') : '';
+    // `update` may also recolour the row for today (LEO-334); `auto` resets it.
+    const color = event === 'update' && typeof request.color === 'string' ? request.color.trim() : '';
+    if (color && color !== 'auto' && !(PLAN_ROW_COLORS as readonly string[]).includes(color)) {
+      return { ok: false, error: `color must be auto or one of ${PLAN_ROW_COLORS.join(', ')}.` };
+    }
     const note = typeof request.note === 'string' ? request.note.trim() : '';
     const rank = Number(request.rank) || 0;
     // Only on `update`: complete and defer say nothing about how long the thing
@@ -1041,6 +1046,7 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
       ...(minutes ? { minutes } : clearsMinutes ? { minutes: 0 } : {}),
       ...(event === 'place' ? { start } : {}),
       ...(text ? { text } : {}),
+      ...(color ? { color } : {}),
     });
     // A capture's row *is* the capture: its own text follows the edit, or the
     // next plan would bring the old wording back.

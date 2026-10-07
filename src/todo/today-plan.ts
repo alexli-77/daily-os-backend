@@ -131,12 +131,18 @@ export function buildPlanSnapshotForDate(
   const pinned = new Map<string, string | null>();
   // The user's own wording for a row today (LEO-332); latest wins.
   const editedText = new Map<string, string>();
+  // The colour the user gave a row today (LEO-334); `auto` clears it.
+  const editedColor = new Map<string, string>();
   for (const entry of listTodoFeedback(config)) {
     if (entry.date !== date) continue;
     if (entry.event === 'remove') removed.add(entry.candidateId);
     if (entry.event === 'place' && entry.start) pinned.set(entry.candidateId, entry.start);
     if (entry.event === 'unplace') pinned.set(entry.candidateId, null);
     if (entry.event === 'update' && entry.text?.trim()) editedText.set(entry.candidateId, entry.text.trim());
+    if (entry.event === 'update' && entry.color) {
+      if (entry.color === 'auto') editedColor.delete(entry.candidateId);
+      else editedColor.set(entry.candidateId, entry.color);
+    }
     if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
@@ -169,7 +175,8 @@ export function buildPlanSnapshotForDate(
         const { start: defaultStart, ...plain } = row as DailyPlanTodo;
         const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : defaultStart;
         const text = editedText.get(plain.candidateId);
-        const todo = { ...plain, ...(start ? { start } : {}), ...(text ? { text } : {}) };
+        const color = editedColor.get(plain.candidateId);
+        const todo = { ...plain, ...(start ? { start } : {}), ...(text ? { text } : {}), ...(color ? { color } : {}) };
         const edited = editedMinutes.get(todo.candidateId);
         if (edited === undefined) return todo;
         if (edited > 0) return { ...todo, minutes: edited };

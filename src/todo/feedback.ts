@@ -70,7 +70,19 @@ export interface TodoFeedbackEntry {
    * not the Linear issue or cycle priority the row came from.
    */
   text?: string;
+  /**
+   * On `update`: the colour the user gave the row today (LEO-334), one of
+   * `PLAN_ROW_COLORS`, or `auto` to go back to colouring by source. Scoped to
+   * the entry's date like every other plan-row edit.
+   */
+  color?: string;
 }
+
+/** The colours a plan row can be given, as the clients name them. */
+export const PLAN_ROW_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'] as const;
+
+/** Longest row text a user edit may set, matching the daily_plan prompt's rule. */
+export const PLAN_ROW_TEXT_MAX = 40;
 
 export const TODO_FEEDBACK_PATH = 'data/runtime/todo-feedback.jsonl';
 
