@@ -459,6 +459,48 @@ test('the prompt carries working-hours and meal guidance when rhythm is enabled'
   assert.match(section, /不要从早上一路堆到中午/);
 });
 
+// --- fixed blocks: routines and meetings that are not in a calendar (LEO-330) ---
+
+const FIXED = [
+  { label: '英语口语', start: '07:00', end: '08:00', note: '前 30 分钟出声说' },
+  { label: '周会', start: '11:00', end: '12:30', kind: 'meeting', days: ['tue'] },
+  { label: 'Session', start: '13:00', end: '15:00', kind: 'meeting', dates: [SATURDAY] },
+  { label: '坏的', start: '7:00', end: '08:00' },
+  { label: '倒着的', start: '10:00', end: '09:00' },
+];
+
+test('fixed blocks apply every day, on listed weekdays, or on listed dates', () => {
+  const config = tempConfig((raw) => {
+    raw.user.rhythm.fixed_blocks = FIXED;
+  });
+  const labels = (date: string): string[] => resolveDayShape(config, date).fixedBlocks.map((block) => block.label);
+  assert.deepEqual(labels(TUESDAY), ['英语口语', '周会'], 'weekday match, case-insensitive');
+  assert.deepEqual(labels(SATURDAY), ['英语口语', 'Session'], 'date match');
+  assert.deepEqual(labels(SUNDAY), ['英语口语'], 'only the every-day block');
+});
+
+test('a malformed or backwards fixed block is dropped, and kind defaults to routine', () => {
+  const config = tempConfig((raw) => {
+    raw.user.rhythm.fixed_blocks = FIXED;
+  });
+  const [english] = resolveDayShape(config, SUNDAY).fixedBlocks;
+  assert.deepEqual(english, { label: '英语口语', start: '07:00', end: '08:00', kind: 'routine', note: '前 30 分钟出声说' });
+  assert.equal(resolveDayShape(config, SUNDAY).fixedBlocks.length, 1);
+});
+
+test('no fixed blocks configured is an empty list, not an error', () => {
+  assert.deepEqual(resolveDayShape(tempConfig(), TUESDAY).fixedBlocks, []);
+});
+
+test('the prompt names today\'s fixed blocks, and only today\'s', () => {
+  const config = tempConfig((raw) => {
+    raw.user.rhythm.fixed_blocks = FIXED;
+  });
+  const section = renderRhythmPromptSection(config, TUESDAY);
+  assert.match(section, /今天的固定日程：07:00–08:00 英语口语、11:00–12:30 周会（会议）/);
+  assert.doesNotMatch(section, /Session/);
+});
+
 test('rhythm off means no working-hours guidance in the prompt', () => {
   const config = tempConfig((raw) => {
     raw.user = { ...raw.user, rhythm: { enabled: false } };

@@ -65,6 +65,35 @@ const mealBlocks = z
   .default(DEFAULT_MEAL_BLOCKS.map((block) => ({ ...block })));
 
 /**
+ * A wall-clock block that is not a task: a routine (起床、英语口语、晚饭) or a
+ * fixed meeting that does not live in a calendar the service can read. Applies
+ * every day unless `days` (weekday codes) or `dates` (YYYY-MM-DD) narrow it;
+ * when both are given, either matching is enough. Tasks are laid out around
+ * these the same way they are around meals (LEO-330).
+ */
+const fixedBlock = z.object({
+  label: z.string().min(1),
+  start: z.string().regex(HHMM),
+  end: z.string().regex(HHMM),
+  kind: z.enum(['routine', 'meeting']).catch('routine').default('routine'),
+  note: z.string().optional().catch(undefined),
+  days: z.array(z.string()).optional().catch(undefined),
+  dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).optional().catch(undefined),
+});
+
+// Same tolerance as `mealBlocks`: one malformed entry is dropped, not fatal.
+const fixedBlocks = z
+  .array(z.unknown())
+  .transform((entries) =>
+    entries.flatMap((entry) => {
+      const parsed = fixedBlock.safeParse(entry);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  )
+  .catch([])
+  .default([]);
+
+/**
  * The user's weekly rhythm. See `src/user/rhythm.ts` for why this is split into a
  * structured half (here) and a prose half (`rhythm.md` in the memory vault).
  *
@@ -90,6 +119,8 @@ const userRhythm = z
     working_hours: workingHours,
     /** Blocks to keep tasks out of (meals). Invalid entries are dropped. */
     meal_blocks: mealBlocks,
+    /** Routines and fixed meetings, laid out on the Today timeline. */
+    fixed_blocks: fixedBlocks,
   })
   .default({
     enabled: true,
@@ -98,6 +129,7 @@ const userRhythm = z
     work_task_cap_on_rest_days: 1,
     working_hours: { ...DEFAULT_WORKING_HOURS },
     meal_blocks: DEFAULT_MEAL_BLOCKS.map((block) => ({ ...block })),
+    fixed_blocks: [],
   });
 
 const feishuProfile = enabled.extend({

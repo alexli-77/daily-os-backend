@@ -1506,6 +1506,9 @@ function readRhythmState(config: AppConfig): Record<string, unknown> {
     // client decodes one canonical shape (`state.rhythm.working_hours` etc.).
     working_hours: config.user.rhythm.working_hours,
     meal_blocks: config.user.rhythm.meal_blocks,
+    // Today's routines and fixed meetings, already narrowed by weekday/date in
+    // the user's timezone, so the client never re-implements that rule.
+    fixed_blocks: resolveDayShape(config, today).fixedBlocks,
     today: resolveDayShape(config, today),
     tomorrow: resolveDayShape(config, addDays(today, 1)),
   };
