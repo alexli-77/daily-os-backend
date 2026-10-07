@@ -29,6 +29,11 @@ export interface DailyPlanTodo {
    * feedback ledger. Absent = laid out automatically.
    */
   start?: string;
+  /**
+   * The colour the user gave this row today (LEO-334). Overlaid from the
+   * feedback ledger like `start`; absent = coloured by source.
+   */
+  color?: string;
 }
 
 /** Bounds on a plan estimate, in minutes. */

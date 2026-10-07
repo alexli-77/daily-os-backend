@@ -88,6 +88,39 @@ test('a text edit made on another day does not touch today', () => {
   assert.equal(row(config, 'linear:XX-1')?.text, '第 1 件');
 });
 
+// --- colour (LEO-334) ----------------------------------------------------------------
+
+test('an update with a colour recolours the row for today; auto resets it', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:XX-1');
+  feedback(config, 'update', 'linear:XX-1', { color: 'red' });
+  assert.equal(row(config, 'linear:XX-1')?.color, 'red');
+  feedback(config, 'update', 'linear:XX-1', { color: 'auto' });
+  assert.equal(row(config, 'linear:XX-1')?.color, undefined);
+});
+
+test('a colour given on another day does not touch today', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:XX-1');
+  recordTodoFeedback(config, { date: addDays(todayInTimezone(config), -1), event: 'update', candidateId: 'linear:XX-1', rank: 1, color: 'blue' });
+  assert.equal(row(config, 'linear:XX-1')?.color, undefined);
+});
+
+test('one update can carry text, colour and a note together', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:XX-1');
+  feedback(config, 'update', 'linear:XX-1', { text: '写摘要', color: 'green', note: '先写了一半' });
+  const snapshot = buildTodayPlanSnapshot(config);
+  assert.equal(snapshot?.todos[0]?.text, '写摘要');
+  assert.equal(snapshot?.todos[0]?.color, 'green');
+  assert.equal(snapshot?.notes['linear:XX-1'], '先写了一半');
+});
+
+test('the plan prompt asks for rows of at most 40 characters', () => {
+  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  assert.match(prompt, /每条不超过 40 个字/);
+});
+
 // --- meals as rows ------------------------------------------------------------------
 
 test('a meal block is a row after the plan, at its configured time and length', () => {
