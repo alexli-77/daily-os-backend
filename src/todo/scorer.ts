@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import type { Evidence, EvidenceSource } from '../workflows/types.js';
 import { DEFAULT_TOP_N, loadScorerWeights, type ScorerWeights } from './scorer-config.js';
-import { getCarryOverDaysById, getCompletedCandidateIds } from './feedback.js';
+import { getCarryOverDaysById, getCompletedCandidateIds, getRemovedCandidateIds } from './feedback.js';
 import { resolveDayShape, type DayShape } from '../user/rhythm.js';
 
 /**
@@ -94,6 +94,11 @@ export interface ScoreAndRankOptions {
    */
   completedCandidateIds?: Set<string>;
   /**
+   * candidateIds deleted from the plan date's sheet. Injectable for tests; falls
+   * back to `getRemovedCandidateIds` in `buildScoredTodos`.
+   */
+  removedCandidateIds?: Set<string>;
+  /**
    * What kind of day this is for the user. On a rest day, work-sourced
    * candidates are damped so the ranking the model receives is already shaped
    * like a weekend instead of leaving the model to notice on its own.
@@ -133,7 +138,11 @@ export function buildScoredTodos(
   // Drop what the user already ticked complete. For Linear and inbox rows that
   // means "ticked today"; after that their own state decides (#220).
   const completed = options.completedCandidateIds ?? getCompletedCandidateIds(config, { date });
-  const candidates = completed.size ? all.filter((candidate) => !completed.has(candidate.id)) : all;
+  // And what they deleted from today's sheet, so a rerun today does not put it
+  // straight back. Today only — see `getRemovedCandidateIds` (LEO-329).
+  const removed = options.removedCandidateIds ?? getRemovedCandidateIds(config, date);
+  const excluded = new Set([...completed, ...removed]);
+  const candidates = excluded.size ? all.filter((candidate) => !excluded.has(candidate.id)) : all;
   // LEO-232: overlay the carry-over streak (from the daily-review reconciliation
   // ledger) so a task the user keeps deferring gains carryOverDays even when its
   // source (e.g. Linear/vault) carries no creation timestamp.

@@ -166,6 +166,9 @@ try {
     // Dragging today's plan into your own order: the ledger overlay, and what
     // happens when the plan changes underneath a recorded order.
     'scripts/tests/plan-order.test.ts',
+    // LEO-329 deleting a row from today's sheet: day-scoped, undoable, and a
+    // capture's row deletes the capture.
+    'scripts/tests/plan-row-remove.test.ts',
     // Shipped templates and prompts found from a working directory that is not
     // the checkout — the split the bundled Mac app introduced.
     'scripts/tests/install-root.test.ts',

@@ -87,8 +87,11 @@ export function buildPlanSnapshotForDate(
   // The user's own ordering, latest write wins. Kept separate from `feedback`
   // because it is not a state a row can be *in* — it is where the row sits.
   const userRank = new Map<string, number>();
+  // Rows deleted from this day's sheet (LEO-329); `reopen` brings one back.
+  const removed = new Set<string>();
   for (const entry of listTodoFeedback(config)) {
     if (entry.date !== date) continue;
+    if (entry.event === 'remove') removed.add(entry.candidateId);
     if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
@@ -99,7 +102,10 @@ export function buildPlanSnapshotForDate(
     // Ledger order is append order, so a `reopen` after a tick wins and the row
     // comes back untouched. Deleting rather than recording `reopen` as a state:
     // "was completed and then wasn't" is history, and this map is the present.
-    if (entry.event === 'reopen') delete feedback[entry.candidateId];
+    if (entry.event === 'reopen') {
+      delete feedback[entry.candidateId];
+      removed.delete(entry.candidateId);
+    }
     // `!== undefined` and not truthiness: 0 is the recorded "back to unknown",
     // and treating it as absent would make an estimate impossible to unset.
     if (entry.minutes !== undefined) editedMinutes.set(entry.candidateId, entry.minutes);
@@ -112,7 +118,7 @@ export function buildPlanSnapshotForDate(
     // than shipped as a second map: a client that renders `minutes` should not
     // have to know an override mechanism exists to render the right number.
     todos: applyUserOrder(
-      todos.map((todo) => {
+      todos.filter((todo) => !removed.has(todo.candidateId)).map((todo) => {
         const edited = editedMinutes.get(todo.candidateId);
         if (edited === undefined) return todo;
         if (edited > 0) return { ...todo, minutes: edited };
