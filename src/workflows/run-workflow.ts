@@ -8,7 +8,7 @@ import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftCard } from '
 import { buildDailyPlanTable, buildWorkflowEvidenceTrace, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, parseDailyPlanTodoPlan, workflowJsonError } from './summary.js';
 import { mergeOpenCapturesIntoPlan } from '../todo/inbox.js';
 import { buildScoredTodos } from '../todo/scorer.js';
-import { listTodoFeedback, recordTodoPresented } from '../todo/feedback.js';
+import { getRemovedCandidateIds, listTodoFeedback, recordTodoPresented } from '../todo/feedback.js';
 import {
   markWorkflowRunFailed,
   markWorkflowRunGenerated,
@@ -166,7 +166,11 @@ function loadTodayPlanTodos(config: AppConfig, date: string): Array<{ rank: numb
   const latest = readDailyPlanOutput(config, date);
   if (!latest) return null;
   const plan = parseDailyPlanTodoPlan(latest.content);
-  return plan && plan.todos.length > 0 ? plan.todos : null;
+  // A row deleted from the sheet was never part of the day's plan as far as
+  // the user is concerned; reconciling it would report it as not done.
+  const removed = getRemovedCandidateIds(config, date);
+  const todos = plan ? plan.todos.filter((todo) => !removed.has(todo.candidateId)) : [];
+  return todos.length > 0 ? todos : null;
 }
 
 async function runAgentWithNonEmptyOutput(input: Parameters<typeof runAgent>[0]): Promise<string> {

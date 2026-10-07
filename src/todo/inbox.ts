@@ -234,12 +234,20 @@ export function updateTodoInboxItemById(config: AppConfig, id: string, update: T
  *
  * `defer` is deliberately not mapped: on the plan it means "tomorrow", which is
  * still open work, not the inbox's `deferred` (shelved, out of the plan).
+ * `remove` is: deleting a capture's row deletes the capture (LEO-329), and the
+ * `reopen` that undoes it opens the capture again.
  * Returns whether the inbox changed; unknown ids and non-inbox rows are no-ops.
  */
 export function syncTodoInboxFromPlanRow(config: AppConfig, candidateId: string, event: string): boolean {
   if (!candidateId.startsWith('todo_inbox:')) return false;
   const status: TodoInboxStatus | undefined =
-    event === 'complete' ? 'done' : event === 'reopen' || event === 'partial' ? 'open' : undefined;
+    event === 'complete'
+      ? 'done'
+      : event === 'remove'
+        ? 'deleted'
+        : event === 'reopen' || event === 'partial'
+          ? 'open'
+          : undefined;
   if (!status) return false;
   const id = candidateId.slice('todo_inbox:'.length);
   const match = listTodoInboxItems(config).find((item) => item.id === id);

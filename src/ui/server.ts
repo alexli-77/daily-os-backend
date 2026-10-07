@@ -1002,8 +1002,9 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     // Todos restore path, and already honoured by `getCompletedCandidateIds` —
     // only this gate refused it, which made ticking a plan row the one action in
     // the product with no way back. A mis-click is not a decision.
-    if (event !== 'complete' && event !== 'partial' && event !== 'defer' && event !== 'update' && event !== 'reopen') {
-      return { ok: false, error: 'event must be complete, partial, defer, update or reopen.' };
+    // `remove` takes the row off today's sheet (LEO-329); `reopen` puts it back.
+    if (event !== 'complete' && event !== 'partial' && event !== 'defer' && event !== 'update' && event !== 'reopen' && event !== 'remove') {
+      return { ok: false, error: 'event must be complete, partial, defer, update, reopen or remove.' };
     }
     const note = typeof request.note === 'string' ? request.note.trim() : '';
     const rank = Number(request.rank) || 0;
@@ -1047,6 +1048,8 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
             ? '已延期'
             : event === 'reopen'
               ? '已恢复'
+              : event === 'remove'
+                ? '已从今天删除'
               : minutes
                 ? `已改为 ${minutes} 分钟`
                 : clearsMinutes
