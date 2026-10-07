@@ -33,7 +33,9 @@ export type TodoFeedbackEvent =
   | 'carry_over'
   | 'update'
   | 'reopen'
-  | 'remove';
+  | 'remove'
+  | 'place'
+  | 'unplace';
 
 export interface TodoFeedbackEntry {
   ts: string;
@@ -55,6 +57,13 @@ export interface TodoFeedbackEntry {
    * existing estimate alone.
    */
   minutes?: number;
+  /**
+   * On `place`: where the user dropped the row on the day's timeline, "HH:mm"
+   * (LEO-331). Scoped to the entry's date like every other plan-row edit, so a
+   * rerun that day keeps the row where it was put and the next day starts clean.
+   * `unplace` hands the row back to automatic layout.
+   */
+  start?: string;
 }
 
 export const TODO_FEEDBACK_PATH = 'data/runtime/todo-feedback.jsonl';

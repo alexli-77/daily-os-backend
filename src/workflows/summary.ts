@@ -23,6 +23,12 @@ export interface DailyPlanTodo {
    * guess would make that check meaningless.
    */
   minutes?: number;
+  /**
+   * Where the user pinned this row on today's timeline, "HH:mm" (LEO-331).
+   * Never written by the model: `buildPlanSnapshotForDate` overlays it from the
+   * feedback ledger. Absent = laid out automatically.
+   */
+  start?: string;
 }
 
 /** Bounds on a plan estimate, in minutes. */

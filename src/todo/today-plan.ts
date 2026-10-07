@@ -89,9 +89,13 @@ export function buildPlanSnapshotForDate(
   const userRank = new Map<string, number>();
   // Rows deleted from this day's sheet (LEO-329); `reopen` brings one back.
   const removed = new Set<string>();
+  // Rows the user pinned to a time on the timeline (LEO-331); latest wins.
+  const pinned = new Map<string, string>();
   for (const entry of listTodoFeedback(config)) {
     if (entry.date !== date) continue;
     if (entry.event === 'remove') removed.add(entry.candidateId);
+    if (entry.event === 'place' && entry.start) pinned.set(entry.candidateId, entry.start);
+    if (entry.event === 'unplace') pinned.delete(entry.candidateId);
     if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
@@ -118,7 +122,9 @@ export function buildPlanSnapshotForDate(
     // than shipped as a second map: a client that renders `minutes` should not
     // have to know an override mechanism exists to render the right number.
     todos: applyUserOrder(
-      todos.filter((todo) => !removed.has(todo.candidateId)).map((todo) => {
+      todos.filter((todo) => !removed.has(todo.candidateId)).map((plain) => {
+        const start = pinned.get(plain.candidateId);
+        const todo = start ? { ...plain, start } : plain;
         const edited = editedMinutes.get(todo.candidateId);
         if (edited === undefined) return todo;
         if (edited > 0) return { ...todo, minutes: edited };
