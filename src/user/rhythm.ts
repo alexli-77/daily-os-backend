@@ -86,6 +86,18 @@ export interface MealBlock {
   end: string;
 }
 
+/**
+ * A routine or fixed meeting on one day, resolved from `user.rhythm.fixed_blocks`
+ * (which may narrow an entry to some weekdays or dates). "HH:mm" 24h.
+ */
+export interface FixedBlock {
+  label: string;
+  start: string;
+  end: string;
+  kind: 'routine' | 'meeting';
+  note?: string;
+}
+
 export const DEFAULT_WORKING_HOURS: WorkingHours = { start: '09:30', end: '18:30' };
 export const DEFAULT_MEAL_BLOCKS: MealBlock[] = [{ label: '午餐', start: '12:00', end: '13:00' }];
 
@@ -109,6 +121,8 @@ export interface DayShape {
   workingHours: WorkingHours;
   /** Blocks the plan should not schedule tasks into (meals). */
   mealBlocks: MealBlock[];
+  /** Routines and fixed meetings that apply on this date, in start order. */
+  fixedBlocks: FixedBlock[];
 }
 
 export interface RhythmFiles {
@@ -196,7 +210,38 @@ export function resolveDayShape(config: AppConfig, date: string): DayShape {
     // covers the hand-built config objects `scoreCandidate` is also reached with.
     workingHours: rhythm?.working_hours ?? DEFAULT_WORKING_HOURS,
     mealBlocks: rhythm?.meal_blocks ?? DEFAULT_MEAL_BLOCKS,
+    fixedBlocks: fixedBlocksOn(rhythm?.fixed_blocks ?? [], date, weekday),
   };
+}
+
+/**
+ * The entries of `user.rhythm.fixed_blocks` that apply on `date`.
+ *
+ * An entry with neither `days` nor `dates` is every day. With either, it applies
+ * when the weekday is listed or the date is — so a residency's sessions can be
+ * written as specific dates and a weekly class as a weekday, side by side.
+ */
+export function fixedBlocksOn(
+  entries: ReadonlyArray<{ label: string; start: string; end: string; kind?: 'routine' | 'meeting'; note?: string; days?: string[]; dates?: string[] }>,
+  date: string,
+  weekday: WeekdayCode = weekdayCode(date),
+): FixedBlock[] {
+  return entries
+    .filter((entry) => {
+      const days = normalizeRestDays(entry.days ?? []);
+      const dates = entry.dates ?? [];
+      if (days.length === 0 && dates.length === 0) return true;
+      return days.includes(weekday) || dates.includes(date);
+    })
+    .filter((entry) => entry.end > entry.start)
+    .map((entry) => ({
+      label: entry.label,
+      start: entry.start,
+      end: entry.end,
+      kind: entry.kind ?? 'routine',
+      ...(entry.note ? { note: entry.note } : {}),
+    }))
+    .sort((left, right) => (left.start < right.start ? -1 : left.start > right.start ? 1 : 0));
 }
 
 /**
@@ -236,6 +281,12 @@ export function renderRhythmPromptSection(config: AppConfig, date: string): stri
   lines.push(
     `工作时间 ${shape.workingHours.start}–${shape.workingHours.end}${meals ? `；${meals}` : ''}。把任务安排在工作时间内，不要排进上面这些用餐时段；条目之间留合理间歇，不要从早上一路堆到中午。`,
   );
+  if (shape.fixedBlocks.length > 0) {
+    const blocks = shape.fixedBlocks
+      .map((block) => `${block.start}–${block.end} ${block.label}${block.kind === 'meeting' ? '（会议）' : ''}`)
+      .join('、');
+    lines.push(`今天的固定日程：${blocks}。这些时段已经被占用，任务要排在它们之外的时间里，按剩下的空档估算今天能做多少。`);
+  }
   if (shape.isRestDay) {
     lines.push(
       shape.workTaskCap === 0

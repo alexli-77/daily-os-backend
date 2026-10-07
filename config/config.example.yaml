@@ -25,6 +25,25 @@ user:
       - label: "午餐"
         start: "12:00"
         end: "13:00"
+    # 作息和不在日历里的固定会议，今日时间轴会把它们画出来，任务排在它们之外。
+    # 不写 days / dates 就是每天；写了就只在那些星期几（MON..SUN）或日期生效。
+    # kind: routine（作息，默认）| meeting（会议）；note 是块里的第二行小字。
+    fixed_blocks: []
+    # fixed_blocks:
+    #   - label: "英语口语"
+    #     start: "07:00"
+    #     end: "08:00"
+    #     note: "前 30 分钟出声说"
+    #   - label: "周会"
+    #     start: "11:00"
+    #     end: "12:30"
+    #     kind: meeting
+    #     days: [TUE]
+    #   - label: "Market Input Session"
+    #     start: "13:00"
+    #     end: "15:00"
+    #     kind: meeting
+    #     dates: ["2026-10-06"]
 
 llm:
   # 程序化调度请使用 API-key provider（anthropic / openai）。
