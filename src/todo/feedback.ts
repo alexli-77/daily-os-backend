@@ -32,7 +32,8 @@ export type TodoFeedbackEvent =
   | 'reorder'
   | 'carry_over'
   | 'update'
-  | 'reopen';
+  | 'reopen'
+  | 'remove';
 
 export interface TodoFeedbackEntry {
   ts: string;
@@ -172,6 +173,28 @@ export function getCompletedCandidateIds(config: AppConfig, options: { date?: st
     out.add(candidateId);
   }
   return out;
+}
+
+/**
+ * LEO-329 — rows the user deleted from the plan of `date`.
+ *
+ * `remove` means "not on today's sheet", and only that: it is scoped to the
+ * day it was made on, unlike `complete`, which for weekly and vault rows is
+ * permanent. A Linear issue or a cycle priority taken off today's sheet is
+ * still open work, and tomorrow's scorer may propose it again. A capture is
+ * different only because its own status goes to `deleted` at the same time
+ * (`syncTodoInboxFromPlanRow`), so it leaves the pool through the inbox.
+ *
+ * `reopen` after `remove` brings the row back — the undo.
+ */
+export function getRemovedCandidateIds(config: AppConfig, date: string): Set<string> {
+  const removed = new Set<string>();
+  for (const entry of listTodoFeedback(config)) {
+    if (entry.date !== date) continue;
+    if (entry.event === 'remove') removed.add(entry.candidateId);
+    else if (entry.event === 'reopen') removed.delete(entry.candidateId);
+  }
+  return removed;
 }
 
 /**
