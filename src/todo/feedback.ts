@@ -64,6 +64,12 @@ export interface TodoFeedbackEntry {
    * `unplace` hands the row back to automatic layout.
    */
   start?: string;
+  /**
+   * On `update`: the row's text as the user rewrote it (LEO-332). Like an
+   * estimate edit it belongs to its day — it changes what today's sheet says,
+   * not the Linear issue or cycle priority the row came from.
+   */
+  text?: string;
 }
 
 export const TODO_FEEDBACK_PATH = 'data/runtime/todo-feedback.jsonl';

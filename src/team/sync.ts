@@ -20,7 +20,7 @@ import {
   writeTeamCacheState,
 } from './cache.js';
 import type { CachedCycle, CachedDailyPlan, TeamCacheState } from './cache.js';
-import { buildTodayPlanSnapshot } from '../todo/today-plan.js';
+import { buildTodayPlanSnapshot, isRhythmRow } from '../todo/today-plan.js';
 import { addDays, todayInTimezone } from '../utils/date.js';
 import { onLocalChange } from '../utils/change-events.js';
 import type { LocalChangeKind } from '../utils/change-events.js';
@@ -498,7 +498,10 @@ async function pushTodayPlan(
   const snapshot = buildTodayPlanSnapshot(config);
   if (!snapshot || !isPlanDate(snapshot.date)) return 0;
 
-  const payload = { generated_at: snapshot.generated_at, todos: snapshot.todos, feedback: snapshot.feedback };
+  // Meal rows are the owner's own day, not work a teammate needs to see (LEO-332).
+  const todos = snapshot.todos.filter((todo) => !isRhythmRow(todo.candidateId));
+  const feedback = Object.fromEntries(Object.entries(snapshot.feedback).filter(([id]) => !isRhythmRow(id)));
+  const payload = { generated_at: snapshot.generated_at, todos, feedback };
   // `generated_at` is shipped but deliberately left out of the dedupe key: one
   // run stamps it twice (`writeLatestWorkflowOutput` and
   // `writeWorkflowDetailCache` each call `new Date()`), so the same plan carries
@@ -508,7 +511,7 @@ async function pushTodayPlan(
   // the next writer free to break it again; the question this key answers is
   // "does what the teammate sees differ?", and that is the rows and their
   // states. A rerun that produces a byte-identical list is not news.
-  const hash = crypto.createHash('sha256').update(JSON.stringify({ todos: snapshot.todos, feedback: snapshot.feedback })).digest('hex');
+  const hash = crypto.createHash('sha256').update(JSON.stringify({ todos, feedback })).digest('hex');
   if (state.pushedPlans[snapshot.date] === hash) return 0;
 
   assertOwnedBySelf(session, session.userId);

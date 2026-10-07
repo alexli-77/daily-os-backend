@@ -5,6 +5,38 @@ import { extractDailyPlanTodos, type DailyPlanTodo } from '../workflows/summary.
 import { listTodoFeedback } from './feedback.js';
 
 /**
+ * Plan rows the snapshot adds for the user's meal blocks (LEO-332). A meal is
+ * time the user may move, shorten, skip or tick like any task, so it is a row,
+ * pinned by default to the time in `user.rhythm.meal_blocks`. Never a scorer
+ * candidate, never reconciled by the review, never pushed to teammates.
+ */
+export const RHYTHM_ROW_PREFIX = 'rhythm:';
+
+export function isRhythmRow(candidateId: string): boolean {
+  return candidateId.startsWith(RHYTHM_ROW_PREFIX);
+}
+
+function minutesBetween(start: string, end: string): number {
+  const toMinutes = (clock: string): number => Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5));
+  return toMinutes(end) - toMinutes(start);
+}
+
+/** One row per meal block, after the plan's own rows. */
+function mealRows(config: AppConfig, after: number): Array<DailyPlanTodo & { start: string }> {
+  const blocks = config.user?.rhythm?.meal_blocks ?? [];
+  const seen = new Set<string>();
+  return blocks
+    .filter((block) => minutesBetween(block.start, block.end) > 0)
+    .flatMap((block) => {
+      const candidateId = `${RHYTHM_ROW_PREFIX}meal:${block.label}`;
+      if (seen.has(candidateId)) return [];
+      seen.add(candidateId);
+      return [{ candidateId, text: block.label, minutes: minutesBetween(block.start, block.end), start: block.start }];
+    })
+    .map((row, index) => ({ ...row, rank: after + index + 1 }));
+}
+
+/**
  * Today's plan as one value: the ranked todos today's last `daily_plan` run
  * produced, with the user's own edits (estimate, order) folded in, plus the
  * complete / defer / update state per row for that day.
@@ -57,7 +89,8 @@ export function applyUserOrder(todos: DailyPlanTodo[], userRank: Map<string, num
  * flag only because the Mac client requires the field.
  */
 export function buildTodayPlanSnapshot(config: AppConfig): TodayPlanSnapshot | null {
-  return buildPlanSnapshotForDate(config, todayInTimezone(config));
+  const date = todayInTimezone(config);
+  return buildPlanSnapshotForDate(config, date, readDailyPlanOutput(config, date), { mealRows: true });
 }
 
 /**
@@ -73,6 +106,9 @@ export function buildPlanSnapshotForDate(
   config: AppConfig,
   date: string,
   output: { date?: string; generated_at?: string; content: string } | null = readDailyPlanOutput(config, date),
+  // Today's sheet only: 往日 replays a day as it was, and those days had no
+  // meal rows (LEO-332).
+  options: { mealRows?: boolean } = {},
 ): TodayPlanSnapshot | null {
   const latest = output;
   if (!latest) return null;
@@ -90,12 +126,17 @@ export function buildPlanSnapshotForDate(
   // Rows deleted from this day's sheet (LEO-329); `reopen` brings one back.
   const removed = new Set<string>();
   // Rows the user pinned to a time on the timeline (LEO-331); latest wins.
-  const pinned = new Map<string, string>();
+  // `null` records an explicit `unplace`, which a meal row needs to tell apart
+  // from "never touched" (that one sits at its configured time).
+  const pinned = new Map<string, string | null>();
+  // The user's own wording for a row today (LEO-332); latest wins.
+  const editedText = new Map<string, string>();
   for (const entry of listTodoFeedback(config)) {
     if (entry.date !== date) continue;
     if (entry.event === 'remove') removed.add(entry.candidateId);
     if (entry.event === 'place' && entry.start) pinned.set(entry.candidateId, entry.start);
-    if (entry.event === 'unplace') pinned.delete(entry.candidateId);
+    if (entry.event === 'unplace') pinned.set(entry.candidateId, null);
+    if (entry.event === 'update' && entry.text?.trim()) editedText.set(entry.candidateId, entry.text.trim());
     if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
       feedback[entry.candidateId] = entry.event;
     }
@@ -122,9 +163,13 @@ export function buildPlanSnapshotForDate(
     // than shipped as a second map: a client that renders `minutes` should not
     // have to know an override mechanism exists to render the right number.
     todos: applyUserOrder(
-      todos.filter((todo) => !removed.has(todo.candidateId)).map((plain) => {
-        const start = pinned.get(plain.candidateId);
-        const todo = start ? { ...plain, start } : plain;
+      // A plan with no rows (a prose plan, a rest day's empty list) gets no meal
+      // rows either: lunch alone is not a plan.
+      [...todos, ...(options.mealRows && todos.length > 0 ? mealRows(config, todos.length) : [])].filter((todo) => !removed.has(todo.candidateId)).map((row) => {
+        const { start: defaultStart, ...plain } = row as DailyPlanTodo;
+        const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : defaultStart;
+        const text = editedText.get(plain.candidateId);
+        const todo = { ...plain, ...(start ? { start } : {}), ...(text ? { text } : {}) };
         const edited = editedMinutes.get(todo.candidateId);
         if (edited === undefined) return todo;
         if (edited > 0) return { ...todo, minutes: edited };
