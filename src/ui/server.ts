@@ -1167,7 +1167,14 @@ async function rerunWorkflow(options: UiServerOptions, body: unknown): Promise<R
   // under "In flight" on reload) and the response returns right away instead
   // of blocking the button for the whole workflow. Mirrors the scheduler's IM
   // behavior (send: true) so a console-triggered run also notifies Feishu.
-  void runWorkflow(config, workflow, { send: true, trigger: 'ui', source: 'console-rerun' }).catch((error) => {
+  // 明日计划: only daily_plan, only today or tomorrow. Tomorrow's is not sent
+  // to Feishu — the morning run will be, and one plan a day is enough noise.
+  const today = todayInTimezone(config);
+  const date = typeof request.date === 'string' && request.date.trim() ? request.date.trim() : today;
+  if (date !== today && !(workflow === 'daily_plan' && date === addDays(today, 1))) {
+    return { ok: false, error: '只能生成今天的，或者明天的日计划。' };
+  }
+  void runWorkflow(config, workflow, { send: date === today, trigger: 'ui', source: 'console-rerun', ...(date !== today ? { date } : {}) }).catch((error) => {
     console.warn(`[console-rerun] ${workflow} failed: ${error instanceof Error ? error.message : String(error)}`);
   });
   return { ok: true, workflow, started: true, text: `已启动 ${workflow}，见 In flight;完成后会同步发送 IM。` };
