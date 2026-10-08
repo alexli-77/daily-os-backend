@@ -38,6 +38,12 @@ export interface ScheduleSession {
   minutes: number;
   /** A slot reserved before anything else is planned around it. */
   bigRock?: boolean;
+  /**
+   * What this session does — one step of the 要务, not the 要务 again. A 要务
+   * worked over several days is a sequence ("整理回访表格", then "海外邮件引流
+   * 进 Discord"); the day's to-do is written from this.
+   */
+  step?: string;
 }
 
 export interface ScheduleDeadline {
@@ -66,6 +72,8 @@ export interface ScheduleItem {
 
 export const SCHEDULE_MIN_MINUTES = 15;
 export const SCHEDULE_MAX_MINUTES = 240;
+/** Longest step text, in characters — one line on a calendar block. */
+export const SCHEDULE_STEP_MAX = 80;
 
 export function scheduleFilePath(config: AppConfig, cycleId: string): string {
   if (!parseCycleId(cycleId)) throw new Error(`Invalid cycle id: ${cycleId}`);
@@ -142,6 +150,7 @@ export function normalizeSchedule(
     if (minutes === null) { dropped += 1; continue; }
     const start = typeof entry.start === 'string' && CLOCK.test(entry.start.trim()) ? entry.start.trim() : undefined;
     const id = typeof entry.id === 'string' && /^[a-z0-9-]{1,40}$/.test(entry.id) ? entry.id : `s-${idFragment(`${itemKey}|${date}|${sessions.length}`)}`;
+    const step = typeof entry.step === 'string' ? Array.from(entry.step.trim()).slice(0, SCHEDULE_STEP_MAX).join('') : '';
     sessions.push({
       id,
       itemKey,
@@ -151,6 +160,7 @@ export function normalizeSchedule(
       minutes,
       // A big rock is a reserved slot: without a time it is just a day.
       ...(entry.bigRock === true && start ? { bigRock: true } : {}),
+      ...(step ? { step } : {}),
     });
   }
   sessions.sort((left, right) => (left.date + (left.start ?? '99')).localeCompare(right.date + (right.start ?? '99')));

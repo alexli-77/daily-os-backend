@@ -206,6 +206,27 @@ await test('scheduled rows survive ranking even with the lowest scores, within t
   assert.deepEqual(result.top[0]?.scheduled, { minutes: 90, bigRock: false });
 });
 
+await test('each session can say what it does; the plan gets today\'s step, two steps on one day joined', () => {
+  const { config, id, days } = setup();
+  const items = cycleScheduleItems(readCycle(config, id)!);
+  const { schedule } = normalizeSchedule(
+    { sessions: [
+      { itemKey: DRAFT, date: days[5], minutes: 60, step: '  整理表格，分析用户  ' },
+      { itemKey: DRAFT, date: days[6], minutes: 60, step: 'x'.repeat(200) },
+      { itemKey: SPORT, date: days[6], minutes: 60 },
+    ] },
+    { cycleId: id, items, days, generatedAt: 'now' },
+  );
+  assert.equal(schedule.sessions[0]?.step, '整理表格，分析用户');
+  assert.equal(schedule.sessions[1]?.step?.length, 80, 'one line on a calendar block');
+  assert.equal(schedule.sessions[2]?.step, undefined);
+  const { scheduled } = applyCycleSchedule([weekly('写完方案初稿 **MIT**', 0)], {
+    today: [{ itemKey: DRAFT, minutes: 60, step: '整理表格' }, { itemKey: DRAFT, minutes: 30, step: '发第一批邮件' }],
+    elsewhere: new Set(),
+  });
+  assert.equal(scheduled[0]?.scheduled?.step, '整理表格；发第一批邮件');
+});
+
 await test('the schedule\'s slice for a date, and what waits for another day', () => {
   const { config, id, today, days } = setup();
   writeSchedule(config, {
@@ -266,8 +287,10 @@ await test('the prompts carry the contract', () => {
   assert.match(schedule, /给优先级排日程/);
   assert.match(schedule, /`nowClock`/);
   assert.match(schedule, /`events` 占用的时段不能排任何东西/);
+  assert.match(schedule, /每个格子写 `step`/);
   const plan = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
   assert.match(plan, /关于 `scheduled`（双周排期）/);
+  assert.match(plan, /有 `scheduled.step` 的，`text` 就按这一步写/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
