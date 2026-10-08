@@ -430,7 +430,7 @@ function countdownLine(config: AppConfig | undefined, today: string): string {
   }
 }
 
-function extractJsonObject(content: string): string | null {
+export function extractJsonObject(content: string): string | null {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const source = (fenced ?? content).trim();
   const start = source.indexOf('{');

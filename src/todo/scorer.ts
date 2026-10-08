@@ -33,6 +33,19 @@ export interface TodoCandidate {
   isCustomerFacing?: boolean;
   /** Weaker OKR signal that only comes from a Feishu weekly-priority tag. */
   weeklyOkrHit?: boolean;
+  /**
+   * The cycle schedule puts this 要务 on the plan date: how long, and — for a
+   * big rock — when. See `applyCycleSchedule`.
+   */
+  scheduled?: { minutes: number; start?: string; bigRock: boolean };
+}
+
+/** The slice of the cycle schedule the plan for one date needs. */
+export interface ScheduleSlice {
+  /** That date's sessions. */
+  today: Array<{ itemKey: string; minutes: number; start?: string; bigRock?: boolean }>;
+  /** Item keys scheduled on other days and not on this one. */
+  elsewhere: Set<string>;
 }
 
 export interface ScoreBreakdown {
@@ -87,6 +100,12 @@ export interface ScoreAndRankOptions {
    * tests; falls back to reading the ledger from disk in `buildScoredTodos`.
    */
   carryOverDaysById?: Map<string, number>;
+  /**
+   * The cycle schedule's slice for the plan date. When given, 要务 scheduled
+   * today lead the list carrying their slot, and 要务 scheduled only on other
+   * days are left for those days. Absent = no schedule, rank as before.
+   */
+  schedule?: ScheduleSlice;
   /**
    * candidateIds already marked complete (Feishu ✅ / console "完成"), excluded from
    * the candidate pool. Injectable for tests; falls back to the ledger in
@@ -153,7 +172,8 @@ export function buildScoredTodos(
         return days && days > (candidate.carryOverDays ?? 0) ? { ...candidate, carryOverDays: days } : candidate;
       })
     : candidates;
-  const top = scoreAndRank(enriched, { ...options, weights, now, dayShape });
+  const { scheduled, rest } = applyCycleSchedule(enriched, options.schedule);
+  const top = rankWithSchedule(scheduled, rest, { ...options, weights, now, dayShape });
   return {
     generated_at: new Date().toISOString(),
     weights,
@@ -227,6 +247,61 @@ const ISSUE_KEY = /\b[A-Z][A-Z0-9]+-\d+\b/gi;
 /**
  * Score + rank candidates, returning the top-N with a per-item breakdown.
  */
+/**
+ * Slice the candidates by the cycle schedule (双周排期). A 要务 scheduled on
+ * the plan date is pulled out and carries its slot; one scheduled only on
+ * other days is dropped — the schedule already decided when it happens, and
+ * re-deciding it every morning is what made the daily plan wrong every day.
+ * Everything else (Linear, captures, unscheduled 要务) is untouched.
+ */
+export function applyCycleSchedule(
+  candidates: TodoCandidate[],
+  schedule: ScheduleSlice | undefined,
+): { scheduled: TodoCandidate[]; rest: TodoCandidate[] } {
+  if (!schedule) return { scheduled: [], rest: candidates };
+  const slots = new Map<string, { minutes: number; start?: string; bigRock: boolean }>();
+  for (const session of schedule.today) {
+    const slot = slots.get(session.itemKey);
+    // Two sessions of one 要务 on one day are one row of their combined length.
+    const start = [slot?.start, session.start].filter((value): value is string => Boolean(value)).sort()[0];
+    slots.set(session.itemKey, {
+      minutes: (slot?.minutes ?? 0) + session.minutes,
+      ...(start ? { start } : {}),
+      bigRock: Boolean(slot?.bigRock || session.bigRock),
+    });
+  }
+  const scheduled: TodoCandidate[] = [];
+  const rest: TodoCandidate[] = [];
+  for (const candidate of candidates) {
+    const key = candidate.source === 'weekly_priorities' ? candidate.id.split(':')[2] ?? '' : '';
+    const slot = key ? slots.get(key) : undefined;
+    if (slot) scheduled.push({ ...candidate, scheduled: slot });
+    else if (key && schedule.elsewhere.has(key)) continue;
+    else rest.push(candidate);
+  }
+  // Big rocks first, by their time; then the day's other sessions in list order.
+  scheduled.sort((left, right) => {
+    const a = left.scheduled!;
+    const b = right.scheduled!;
+    if (a.bigRock !== b.bigRock) return a.bigRock ? -1 : 1;
+    return (a.start ?? '99').localeCompare(b.start ?? '99');
+  });
+  return { scheduled, rest };
+}
+
+/** Scheduled rows lead, always kept; the scored rest fills the remaining places. */
+function rankWithSchedule(scheduled: TodoCandidate[], rest: TodoCandidate[], options: ScoreAndRankOptions): ScoredTodoCandidate[] {
+  const weights = options.weights ?? loadScorerWeights();
+  const now = options.now ?? new Date();
+  const lead = scheduled.map((candidate) => {
+    const { score, breakdown } = scoreCandidate(candidate, weights, now, options.dayShape);
+    return { ...candidate, score, breakdown, rank: 0, candidateId: candidate.id };
+  });
+  const topN = options.topN ?? DEFAULT_TOP_N;
+  const tail = scoreAndRank(rest, { ...options, topN: Math.max(0, topN - lead.length) });
+  return [...lead, ...tail].map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+}
+
 export function scoreAndRank(candidates: TodoCandidate[], options: ScoreAndRankOptions = {}): ScoredTodoCandidate[] {
   const weights = options.weights ?? loadScorerWeights();
   const now = options.now ?? new Date();

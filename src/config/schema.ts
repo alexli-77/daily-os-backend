@@ -736,4 +736,4 @@ export const AppConfigSchema = z.object({
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 
-export type WorkflowName = 'daily_plan' | 'daily_review' | 'weekly_review';
+export type WorkflowName = 'daily_plan' | 'daily_review' | 'weekly_review' | 'cycle_schedule';
