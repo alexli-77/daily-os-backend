@@ -121,6 +121,58 @@ test('the plan prompt asks for rows of at most 150 characters', () => {
   assert.match(prompt, /每条不超过 150 个字/);
 });
 
+// --- MIT ------------------------------------------------------------------------------
+
+function planWith(config: AppConfig, todos: Array<Record<string, unknown>>): void {
+  const date = todayInTimezone(config);
+  const content = JSON.stringify({ todos });
+  appendDailyMemory(config, 'daily_plan', date, content);
+  writeLatestWorkflowOutput(config, 'daily_plan', date, content);
+}
+
+const mits = (config: AppConfig) => (buildTodayPlanSnapshot(config)?.todos ?? []).filter((todo) => todo.mit).map((todo) => todo.candidateId);
+
+test('the MIT is what the model marked, not whatever happens to be first', () => {
+  const config = freshConfig();
+  planWith(config, [
+    { rank: 1, text: '开晨会', candidateId: 'todo_inbox:a' },
+    { rank: 2, text: '写方案', candidateId: 'weekly:0:aaaaaaaa', mit: true },
+  ]);
+  assert.deepEqual(mits(config), ['weekly:0:aaaaaaaa']);
+});
+
+test('a plan that marks none suggests its first row, as plans always have', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:XX-1', 'linear:XX-2');
+  assert.deepEqual(mits(config), ['linear:XX-1']);
+  assert.equal(row(config, 'linear:XX-2')?.mit, undefined, 'an unmarked row carries no field');
+});
+
+test('the user can add a MIT and take the suggested one off, for today only', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:XX-1', 'linear:XX-2');
+  feedback(config, 'update', 'linear:XX-2', { mit: true });
+  feedback(config, 'update', 'linear:XX-1', { mit: false });
+  assert.deepEqual(mits(config), ['linear:XX-2']);
+  assert.equal(row(config, 'linear:XX-2')?.mitByUser, true);
+  assert.equal(row(config, 'linear:XX-1')?.mitByUser, true, 'taking it off is a choice too');
+  recordTodoFeedback(config, { date: addDays(todayInTimezone(config), -1), event: 'update', candidateId: 'linear:XX-1', rank: 1, mit: true });
+  assert.deepEqual(mits(config), ['linear:XX-2'], 'yesterday\'s choice does not reach today');
+});
+
+test('editing a ticked row leaves it ticked', () => {
+  const config = freshConfig();
+  planToday(config, 'linear:XX-1');
+  feedback(config, 'complete', 'linear:XX-1');
+  feedback(config, 'update', 'linear:XX-1', { text: '改个说法', mit: true });
+  assert.equal(buildTodayPlanSnapshot(config)?.feedback['linear:XX-1'], 'complete');
+});
+
+test('the plan prompt lets the model suggest the MIT', () => {
+  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  assert.match(prompt, /`mit` 可选/);
+});
+
 // --- meals as rows ------------------------------------------------------------------
 
 test('a meal block is a row after the plan, at its configured time and length', () => {

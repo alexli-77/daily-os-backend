@@ -1020,6 +1020,8 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     if (color && color !== 'auto' && !(PLAN_ROW_COLORS as readonly string[]).includes(color)) {
       return { ok: false, error: `color must be auto or one of ${PLAN_ROW_COLORS.join(', ')}.` };
     }
+    // `update` may make the row today's MIT or take it off (true / false).
+    const mit = event === 'update' && typeof request.mit === 'boolean' ? request.mit : undefined;
     const note = typeof request.note === 'string' ? request.note.trim() : '';
     const rank = Number(request.rank) || 0;
     // Only on `update`: complete and defer say nothing about how long the thing
@@ -1047,6 +1049,7 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
       ...(event === 'place' ? { start } : {}),
       ...(text ? { text } : {}),
       ...(color ? { color } : {}),
+      ...(mit !== undefined ? { mit } : {}),
     });
     // A capture's row *is* the capture: its own text follows the edit, or the
     // next plan would bring the old wording back.

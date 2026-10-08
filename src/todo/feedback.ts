@@ -76,6 +76,11 @@ export interface TodoFeedbackEntry {
    * the entry's date like every other plan-row edit.
    */
   color?: string;
+  /**
+   * On `update`: the user made this row today's MIT (`true`) or took it off
+   * (`false`). Overrides the plan's own suggestion for the entry's date only.
+   */
+  mit?: boolean;
 }
 
 /** The colours a plan row can be given, as the clients name them. */
