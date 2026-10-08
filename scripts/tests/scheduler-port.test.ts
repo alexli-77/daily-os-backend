@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { AppConfig, WorkflowName } from '../../src/config/schema.js';
-import { acquireSchedulerLock, releaseSchedulerLock } from '../../src/service/launchd.js';
+import { acquireSchedulerLock, createSchedulerState, releaseSchedulerLock, runSchedulerTick } from '../../src/service/launchd.js';
 import {
   LoopDriver,
   createScheduler,
@@ -51,6 +51,24 @@ const config = {
 const BEFORE_DUE = new Date('2026-07-17T07:00:00-04:00'); // 07:00 Toronto — before 08:00
 const AFTER_DUE = new Date('2026-07-17T08:05:00-04:00'); // 08:05 Toronto — daily_plan due
 const DAILY_PLAN_KEY = '2026-07-17:daily_plan:08:00';
+
+// --- a plan made the evening before is kept ---------------------------------
+
+test('the morning daily_plan keeps a plan already made for the day (the evening before)', async () => {
+  await withTmpWorkdir(async () => {
+    const calls: WorkflowName[] = [];
+    const runWorkflow = async (_c: AppConfig, workflow: WorkflowName): Promise<string> => {
+      calls.push(workflow);
+      return 'ok';
+    };
+    const kept = createSchedulerState();
+    await runSchedulerTick(config, kept, { now: () => AFTER_DUE, runWorkflow, hasPlanFor: () => true });
+    assert.deepEqual(calls, [], 'a plan exists: not replaced');
+    assert.ok(kept.fired.has(DAILY_PLAN_KEY), 'and not retried every minute');
+    await runSchedulerTick(config, createSchedulerState(), { now: () => AFTER_DUE, runWorkflow, hasPlanFor: () => false });
+    assert.deepEqual(calls, ['daily_plan'], 'no plan yet: the morning run makes one');
+  });
+});
 
 // --- LoopDriver: fire once, no repeat --------------------------------------
 

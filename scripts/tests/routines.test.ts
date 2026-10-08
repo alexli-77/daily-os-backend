@@ -14,6 +14,7 @@ import yaml from 'js-yaml';
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
 import { nowLine } from '../../src/agent/openai-agent.js';
 import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/memory.js';
+import { recordTodoFeedback } from '../../src/todo/feedback.js';
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
 import { renderRhythmPromptSection, resolveDayShape } from '../../src/user/rhythm.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
@@ -178,6 +179,40 @@ test('a plan row keeps the slot start the model gave it, and a meal row is not a
     assert.equal(todos.find((todo) => todo.candidateId === 'weekly:0:aaaaaaaa')?.start, '13:00');
     assert.equal(todos.find((todo) => todo.candidateId === 'linear:XX-1')?.start, undefined, 'a time that is not one is dropped');
     assert.ok(!todos.some((todo) => todo.candidateId.startsWith('rhythm:meal:')), 'lunch is the routine\'s fixed block, not a second row');
+  } finally {
+    process.chdir(process_);
+  }
+});
+
+test('habit slots are to-dos on today\'s sheet: a row each, unless the plan already put one there', () => {
+  const cfg = config();
+  const today = todayInTimezone(cfg);
+  writeRoutines(cfg, { periods: [{ ...PERIOD, from: addDays(today, -1), to: addDays(today, 1),
+    categories: [{ key: 'habit', label: '习惯', color: 'blue', habit: true }, { key: 'work', label: '工作', color: 'green' }],
+    dayTypes: [{ label: '每天', weekdays: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'], modes: [{ label: '一种', blocks: [
+      { id: 'english', start: '07:00', end: '08:00', title: '英语口语', note: '出声说', category: 'habit', kind: 'slot' },
+      { id: 'read', start: '09:30', end: '10:00', title: '看书', category: 'habit', kind: 'slot' },
+      { id: 'deep', start: '13:00', end: '18:00', title: '专注', category: 'work', kind: 'slot' },
+    ] }] }] }] });
+  const content = JSON.stringify({ todos: [
+    { rank: 1, text: '读完第三章', candidateId: 'weekly:1:bbbbbbbb', minutes: 30, start: '09:30' },
+    { rank: 2, text: '做方案', candidateId: 'weekly:0:aaaaaaaa', minutes: 90, start: '13:00' },
+  ] });
+  const process_ = process.cwd();
+  process.chdir(fs.mkdtempSync(path.join(os.tmpdir(), 'daily-os-routine-cwd-')));
+  try {
+    appendDailyMemory(cfg, 'daily_plan', today, content);
+    writeLatestWorkflowOutput(cfg, 'daily_plan', today, content);
+    const todos = buildTodayPlanSnapshot(cfg)?.todos ?? [];
+    const english = todos.find((todo) => todo.candidateId === 'rhythm:habit:english');
+    assert.deepEqual([english?.text, english?.start, english?.minutes, english?.habit], ['英语口语：出声说', '07:00', 60, true]);
+    assert.ok(!todos.some((todo) => todo.candidateId === 'rhythm:habit:read'), 'the plan already put a row in 看书');
+    assert.equal(todos.find((todo) => todo.candidateId === 'weekly:1:bbbbbbbb')?.habit, true, 'and that row is a habit');
+    assert.equal(todos.find((todo) => todo.candidateId === 'weekly:0:aaaaaaaa')?.habit, undefined, 'a work slot is not');
+    recordTodoFeedback(cfg, { date: today, event: 'complete', candidateId: 'rhythm:habit:english', rank: 3 });
+    assert.equal(buildTodayPlanSnapshot(cfg)?.feedback['rhythm:habit:english'], 'complete', 'ticked like any row');
+    recordTodoFeedback(cfg, { date: today, event: 'remove', candidateId: 'rhythm:habit:english', rank: 3 });
+    assert.ok(!buildTodayPlanSnapshot(cfg)?.todos.some((todo) => todo.candidateId === 'rhythm:habit:english'), 'and let go on a day it cannot happen');
   } finally {
     process.chdir(process_);
   }

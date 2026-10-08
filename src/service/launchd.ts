@@ -5,6 +5,7 @@ import type { AppConfig, WorkflowName } from '../config/schema.js';
 import { runCommand } from '../utils/command.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { runWorkflow } from '../workflows/run-workflow.js';
+import { readDailyPlanOutput } from '../storage/memory.js';
 import { collectProgressCandidates, hasConfirmedProgress, type ProgressCandidate } from '../progress/capture.js';
 import { renderProgressConfirmationCard } from '../progress/card.js';
 import { sendFeishuCard } from '../connectors/lark-cli.js';
@@ -45,6 +46,11 @@ export type WorkflowRunner = (
 export interface SchedulerTickOptions {
   now?: () => Date;
   runWorkflow?: WorkflowRunner;
+  /**
+   * Whether a plan for `date` already exists. Injectable for tests; reads the
+   * plan store otherwise.
+   */
+  hasPlanFor?: (config: AppConfig, date: string) => boolean;
 }
 
 export interface SchedulerControls {
@@ -118,6 +124,14 @@ export async function runScheduler(
   };
 }
 
+function planExistsFor(config: AppConfig, date: string): boolean {
+  try {
+    return Boolean(readDailyPlanOutput(config, date));
+  } catch {
+    return false;
+  }
+}
+
 async function safeTick(configProvider: ConfigProvider, state: SchedulerRuntimeState, options: SchedulerTickOptions): Promise<void> {
   try {
     await tick(configProvider, state, options);
@@ -155,6 +169,12 @@ async function tick(configProvider: ConfigProvider, state: SchedulerRuntimeState
     }
     const key = `${date}:${item.workflow}:${item.time}`;
     if (state.fired.has(key) || isRetryBlocked(state, key, now)) continue;
+    // A plan made the evening before is the one the user already looked at
+    // and accepted; the morning run would replace it with a fresh guess.
+    if (item.workflow === 'daily_plan' && (options.hasPlanFor ?? planExistsFor)(config, date)) {
+      if (claimFired(state, key)) console.info(`[scheduler] daily_plan for ${date} already exists; keeping it`);
+      continue;
+    }
     if (!claimFired(state, key)) continue;
     try {
       await runWorkflowFn(config, item.workflow, { trigger: 'scheduler', source: key });
