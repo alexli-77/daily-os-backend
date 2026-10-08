@@ -15,7 +15,7 @@ import yaml from 'js-yaml';
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
 import { buildCycleId, writeCycle } from '../../src/cycles/file.js';
 import { readSchedule, scheduledSessionsFor, writeSchedule } from '../../src/cycles/schedule.js';
-import { addAdhocSession, deferScheduled, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../../src/cycles/schedule-writeback.js';
+import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../../src/cycles/schedule-writeback.js';
 import { applyOverride, changeDayOverride, normalizeRoutines, readRoutines, routineForDate, writeRoutines } from '../../src/user/routine.js';
 import { addDays } from '../../src/utils/date.js';
 
@@ -101,6 +101,15 @@ test('a 临时安排 of a 要务 counts as one of the cycle\'s: the next one is 
   assert.ok(removeAdhocSession(config, DAYS[3]!, added.sessionId));
   assert.equal(session(config, 's2')?.skipped, undefined);
   assert.ok(!readSchedule(config, ID)!.sessions.some((entry) => entry.adhoc));
+});
+
+test('an ad-hoc session can be given its id, and follows its row when moved or stretched', () => {
+  const config = setup();
+  addAdhocSession(config, DAYS[3]!, 'bbbbbbbb', { start: '19:00', minutes: 60, step: '打球' }, { id: 'a-row1' });
+  assert.ok(moveAdhocSession(config, DAYS[3]!, 'a-row1', { start: '20:00' }));
+  assert.ok(moveAdhocSession(config, DAYS[3]!, 'a-row1', { minutes: 120 }));
+  assert.deepEqual([session(config, 'a-row1')?.start, session(config, 'a-row1')?.minutes], ['20:00', 120]);
+  assert.equal(moveAdhocSession(config, DAYS[3]!, 'nope', { start: '20:00' }), false);
 });
 
 test('an extra one takes nothing', () => {
