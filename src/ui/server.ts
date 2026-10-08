@@ -53,7 +53,7 @@ import {
 } from '../cycles/schedule.js';
 import { fetchAgenda } from '../calendar/agenda.js';
 import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
-import { addAdhocSession, deferScheduled, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
+import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
 import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
@@ -1084,6 +1084,10 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     // A row from the cycle schedule: the schedule follows (顺延 moves it, 删除
     // skips it, 恢复 undoes either), so the two never disagree.
     const scheduleNote = scheduleWriteBack(config, todayInTimezone(config), candidateId, event);
+    // A row added by clicking empty time on Today carries room in the 作息 and,
+    // for a 要务, a schedule session. They follow the row: moved with it,
+    // stretched with it, gone when it is deleted.
+    adhocFollowsRow(config, todayInTimezone(config), candidateId, event, { start, minutes });
     return {
       ok: true,
       candidateId,
@@ -1840,6 +1844,46 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
 
 // --- 作息 ---------------------------------------------------------------------------
 
+/** The 作息 room and schedule session an ad-hoc capture owns, by capture id. */
+function adhocClearId(captureId: string): string {
+  return `x-${captureId.slice(-6)}`;
+}
+
+function adhocSessionId(captureId: string): string {
+  return `a-${captureId.slice(-8).replace(/[^a-z0-9]/g, '')}`;
+}
+
+function clockPlus(clock: string, minutes: number): string {
+  const total = Math.min(24 * 60, Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5)) + minutes);
+  return total >= 24 * 60 ? '24:00' : `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function adhocFollowsRow(config: AppConfig, date: string, candidateId: string, event: string, change: { start: string; minutes?: number }): void {
+  if (!candidateId.startsWith('todo_inbox:')) return;
+  const captureId = candidateId.slice('todo_inbox:'.length);
+  const clearId = adhocClearId(captureId);
+  const sessionId = adhocSessionId(captureId);
+  try {
+    const clear = readRoutines(config).dayOverrides[date]?.clears.find((entry) => entry.id === clearId);
+    if (event === 'remove') {
+      if (clear) changeDayOverride(config, date, { type: 'unclear', id: clearId });
+      removeAdhocSession(config, date, sessionId);
+      return;
+    }
+    if (!clear) return;
+    const length = (Number(clear.end.slice(0, 2)) * 60 + Number(clear.end.slice(3, 5))) - (Number(clear.start.slice(0, 2)) * 60 + Number(clear.start.slice(3, 5)));
+    if (event === 'place' && change.start) {
+      changeDayOverride(config, date, { type: 'clear', id: clearId, start: change.start, end: clockPlus(change.start, length), label: clear.label });
+      moveAdhocSession(config, date, sessionId, { start: change.start });
+    } else if (event === 'update' && change.minutes && change.minutes > 0) {
+      changeDayOverride(config, date, { type: 'clear', id: clearId, start: clear.start, end: clockPlus(clear.start, change.minutes), label: clear.label });
+      moveAdhocSession(config, date, sessionId, { minutes: change.minutes });
+    }
+  } catch (error) {
+    console.warn(`[adhoc] follow-up skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** Today → schedule, for a weekly row. Never fails the feedback it rides on. */
 function scheduleWriteBack(config: AppConfig, date: string, candidateId: string, event: string): string | null {
   const itemKey = weeklyItemKey(candidateId);
@@ -1899,7 +1943,7 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
   recordTodoFeedback(config, { date, event: 'place', candidateId, rank, source: 'console-today', start });
 
   const notes: string[] = [`${start}–${end} ${title} 放进今天了`];
-  const clearId = `x-${item.id.slice(-6)}`;
+  const clearId = adhocClearId(item.id);
   let cleared = false;
   try {
     if (routineForDate(config, date)) {
@@ -1912,7 +1956,7 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
   }
 
   const itemKey = typeof request.itemKey === 'string' && /^[0-9a-f]{8}$/.test(request.itemKey) ? request.itemKey : '';
-  const session = itemKey ? addAdhocSession(config, date, itemKey, { start, minutes, step: title }, { extra: request.extra === true }) : null;
+  const session = itemKey ? addAdhocSession(config, date, itemKey, { start, minutes, step: title }, { extra: request.extra === true, id: adhocSessionId(item.id) }) : null;
   if (session) notes.push(session.text);
 
   const displaced: Array<{ candidateId: string; rank: number; action: string }> = [];

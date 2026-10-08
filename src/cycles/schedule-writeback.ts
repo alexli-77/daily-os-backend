@@ -110,12 +110,12 @@ export function addAdhocSession(
   date: string,
   itemKey: string,
   session: { start: string; minutes: number; step: string },
-  options: { extra?: boolean } = {},
+  options: { extra?: boolean; id?: string } = {},
 ): { sessionId: string; takenDate?: string; text: string } | null {
   const loaded = load(config, date);
   if (!loaded) return null;
   const label = loaded.schedule.sessions.find((existing) => existing.itemKey === itemKey)?.label ?? session.step;
-  const id = `a-${idFragment(`${itemKey}|${date}|${session.start}|${Date.now()}`)}`;
+  const id = options.id && /^[a-z0-9-]{1,40}$/.test(options.id) ? options.id : `a-${idFragment(`${itemKey}|${date}|${session.start}|${Date.now()}`)}`;
   const added: ScheduleSession = { id, itemKey, label, date, start: session.start, minutes: session.minutes, bigRock: true, step: session.step, adhoc: true };
   let taken: ScheduleSession | undefined;
   if (!options.extra) {
@@ -150,6 +150,18 @@ export function removeAdhocSession(config: AppConfig, date: string, sessionId: s
     }
   }
   if (loaded.schedule.sessions.length === before) return false;
+  writeSchedule(config, loaded.schedule);
+  return true;
+}
+
+/** An ad-hoc session's time follows its row when the row is moved on Today. */
+export function moveAdhocSession(config: AppConfig, date: string, sessionId: string, change: { start?: string; minutes?: number }): boolean {
+  const loaded = load(config, date);
+  if (!loaded) return false;
+  const session = loaded.schedule.sessions.find((existing) => existing.id === sessionId);
+  if (!session) return false;
+  if (change.start) session.start = change.start;
+  if (change.minutes && change.minutes > 0) session.minutes = change.minutes;
   writeSchedule(config, loaded.schedule);
   return true;
 }
