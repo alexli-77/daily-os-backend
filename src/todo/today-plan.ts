@@ -25,9 +25,10 @@ function minutesBetween(start: string, end: string): number {
 
 /** One row per meal block, after the plan's own rows. */
 function mealRows(config: AppConfig, date: string, after: number): Array<DailyPlanTodo & { start: string }> {
-  // Through the day shape: under a 作息 the routine carries its own meals as
-  // fixed blocks, and these rows would put lunch on the sheet twice.
-  const blocks = resolveDayShape(config, date).mealBlocks;
+  // Under a 作息 the routine carries its own meals as fixed blocks, and these
+  // rows would put lunch on the sheet twice. Otherwise the configured meals
+  // only — not the day shape's default lunch for a config that set none.
+  const blocks = resolveDayShape(config, date).routine ? [] : (config.user?.rhythm?.meal_blocks ?? []);
   const seen = new Set<string>();
   return blocks
     .filter((block) => minutesBetween(block.start, block.end) > 0)
