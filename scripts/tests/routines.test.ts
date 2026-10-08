@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
+import { nowLine } from '../../src/agent/openai-agent.js';
 import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/memory.js';
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
 import { renderRhythmPromptSection, resolveDayShape } from '../../src/user/rhythm.js';
@@ -180,6 +181,17 @@ test('a plan row keeps the slot start the model gave it, and a meal row is not a
   } finally {
     process.chdir(process_);
   }
+});
+
+test('a plan run for today is told what time it is; another day\'s is not', () => {
+  const cfg = config();
+  cfg.user.timezone = 'Asia/Tokyo';
+  const today = todayInTimezone(cfg);
+  const line = nowLine({ config: cfg, date: today }, new Date('2026-10-08T08:22:00Z'));
+  assert.match(line, /现在 17:22/);
+  assert.equal(nowLine({ config: cfg, date: addDays(today, 1) }), '');
+  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  assert.match(prompt, /不能早于 Date 里写的「现在」/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -8,6 +8,7 @@ import { billingFromConfig, checkBudget, estimateCostUsd, recordUsage } from './
 import { bundledAsset } from '../utils/install-root.js';
 import { fitEvidenceToBudget } from '../workflows/evidence-budget.js';
 import { renderRhythmPromptSection, resolveDayShape } from '../user/rhythm.js';
+import { todayInTimezone } from '../utils/date.js';
 import { AgentTimeoutError, describeAgentTimeout, resolveAgentTimeoutMs } from './runtime-env.js';
 
 export interface AgentInput {
@@ -83,7 +84,7 @@ export function buildUserPrompt(input: AgentInput): string {
     `# Workflow\n${workflowPrompt}`,
     `# User\n${JSON.stringify(input.config.user, null, 2)}`,
     `# Planning Configuration\n${JSON.stringify(input.config.planning, null, 2)}`,
-    `# Date\n${input.date} ${shape.weekdayLabel}${shape.enabled ? `（${shape.dayTypeLabel}）` : ''}`,
+    `# Date\n${input.date} ${shape.weekdayLabel}${shape.enabled ? `（${shape.dayTypeLabel}）` : ''}${nowLine(input)}`,
     ...(rhythmSection ? [`# 作息\n${rhythmSection}`] : []),
     `# Memory\n${JSON.stringify(input.memory, null, 2)}`,
     // Compact rather than indented. Two-space indentation on a JSON document
@@ -93,6 +94,16 @@ export function buildUserPrompt(input: AgentInput): string {
     '# 输出',
     '只返回最终可直接发送到飞书的消息。不要包含工具调用或隐藏推理过程。',
   ].join('\n\n');
+}
+
+/**
+ * "，现在 17:22" when the run is for today. A plan regenerated mid-afternoon
+ * placed rows at 11:00 and 13:00: nothing told it the morning was over.
+ */
+export function nowLine(input: Pick<AgentInput, 'config' | 'date'>, now: Date = new Date()): string {
+  if (input.date !== todayInTimezone(input.config)) return '';
+  const clock = new Intl.DateTimeFormat('en-GB', { timeZone: input.config.user.timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now);
+  return `，现在 ${clock}（今天的条目只能排在这之后）`;
 }
 
 export function normalizeAgentOutput(text: string): string {
