@@ -24,6 +24,7 @@ Evidence 里有一个 `todo_scored` 源（`sources.todo_scored.data`）：
 
 - 它们排在 `top` 最前面，**全部要进今日清单**，不要剔除，也不要往后挪。
 - `minutes` 用 `scheduled.minutes`。
+- 有 `scheduled.step` 的，`text` 就按这一步写：这是用户在排期里定好的**今天这一步**，不要改写回整条要务，也不要换成别的步骤。
 - `scheduled.bigRock: true` 的是大石头：已经占好了 `scheduled.start` 那个时段，标 `"mit": true`。
 - 要务排在别的日子的，已经不在 `top` 里了，不要从别处把它们找回来。
 

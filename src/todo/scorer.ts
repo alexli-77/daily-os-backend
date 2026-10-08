@@ -37,13 +37,13 @@ export interface TodoCandidate {
    * The cycle schedule puts this 要务 on the plan date: how long, and — for a
    * big rock — when. See `applyCycleSchedule`.
    */
-  scheduled?: { minutes: number; start?: string; bigRock: boolean };
+  scheduled?: { minutes: number; start?: string; bigRock: boolean; step?: string };
 }
 
 /** The slice of the cycle schedule the plan for one date needs. */
 export interface ScheduleSlice {
   /** That date's sessions. */
-  today: Array<{ itemKey: string; minutes: number; start?: string; bigRock?: boolean }>;
+  today: Array<{ itemKey: string; minutes: number; start?: string; bigRock?: boolean; step?: string }>;
   /** Item keys scheduled on other days and not on this one. */
   elsewhere: Set<string>;
 }
@@ -259,15 +259,17 @@ export function applyCycleSchedule(
   schedule: ScheduleSlice | undefined,
 ): { scheduled: TodoCandidate[]; rest: TodoCandidate[] } {
   if (!schedule) return { scheduled: [], rest: candidates };
-  const slots = new Map<string, { minutes: number; start?: string; bigRock: boolean }>();
+  const slots = new Map<string, { minutes: number; start?: string; bigRock: boolean; step?: string }>();
   for (const session of schedule.today) {
     const slot = slots.get(session.itemKey);
     // Two sessions of one 要务 on one day are one row of their combined length.
     const start = [slot?.start, session.start].filter((value): value is string => Boolean(value)).sort()[0];
+    const step = [slot?.step, session.step].filter((value): value is string => Boolean(value)).join('；');
     slots.set(session.itemKey, {
       minutes: (slot?.minutes ?? 0) + session.minutes,
       ...(start ? { start } : {}),
       bigRock: Boolean(slot?.bigRock || session.bigRock),
+      ...(step ? { step } : {}),
     });
   }
   const scheduled: TodoCandidate[] = [];
