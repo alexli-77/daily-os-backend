@@ -193,6 +193,7 @@ try {
     'scripts/tests/day-history.test.ts',
     'scripts/tests/safe-candidate-ids.test.ts',
     'scripts/tests/plan-anchor.test.ts',
+    'scripts/tests/cycle-schedule.test.ts',
     // cycle_context: local 20_CYCLES + 10_OKR replace life-review-os reading the
     // Feishu weekly table — 要务 markdown parses back to per-OKR rows, and the
     // previous/target cycle are assembled from local files (null → Feishu fallback).

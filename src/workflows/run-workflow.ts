@@ -1,6 +1,7 @@
 import type { AppConfig, WorkflowName } from '../config/schema.js';
 import { runAgent } from '../agent/index.js';
 import { collectEvidence } from './evidence.js';
+import { hasCycleSchedule, scheduledElsewhere, scheduledSessionsFor } from '../cycles/schedule.js';
 import { todayInTimezone } from '../utils/date.js';
 import { appendDailyMemory, loadMemory, readDailyPlanOutput, writeLatestWorkflowOutput, writeWorkflowDetailCache } from '../storage/memory.js';
 import { sendFeishuCard, sendFeishuMessage } from '../connectors/lark-cli.js';
@@ -68,7 +69,11 @@ export async function runWorkflowDetailed(
     if (workflow === 'daily_plan') {
       // LEO-209: programmatically score the four todo sources and hand the LLM a
       // ranked top-N (with breakdown) instead of an unscored blob.
-      evidence.sources.todo_scored = { state: 'available', data: buildScoredTodos(config, evidence, date) };
+      // The cycle schedule's slice for today, when the cycle has one (双周排期).
+      const schedule = hasCycleSchedule(config, date)
+        ? { today: scheduledSessionsFor(config, date), elsewhere: scheduledElsewhere(config, date) }
+        : undefined;
+      evidence.sources.todo_scored = { state: 'available', data: buildScoredTodos(config, evidence, date, { schedule }) };
     }
     if (workflow === 'daily_review') {
       // LEO-232: reconcile the review against the morning todo. Inject (1) today's

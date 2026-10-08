@@ -20,6 +20,13 @@ Evidence 里有一个 `todo_scored` 源（`sources.todo_scored.data`）：
 - `In Review` 表示已交出去等别人看。除非逾期，否则不要让它挤掉 `In Progress` 的活。
 - 今日清单里**至少保留 1 条 `In Progress` 的候选**（`top` 里确实一条都没有时除外）。
 
+关于 `scheduled`（双周排期）：带这个字段的候选，是用户在这一期的排期里定好**今天做**的要务。
+
+- 它们排在 `top` 最前面，**全部要进今日清单**，不要剔除，也不要往后挪。
+- `minutes` 用 `scheduled.minutes`。
+- `scheduled.bigRock: true` 的是大石头：已经占好了 `scheduled.start` 那个时段，标 `"mit": true`。
+- 要务排在别的日子的，已经不在 `top` 里了，不要从别处把它们找回来。
+
 关于 `breakdown.restDayDamping`（负分）：今天是用户的休息日，而这条候选来自工作源
 （Linear / 每周要务）且既没逾期也不是今天到期，所以被扣了分。它没有被删掉，只是不该
 按工作日的密度排。

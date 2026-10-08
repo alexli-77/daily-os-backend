@@ -1,4 +1,5 @@
 import type { AppConfig } from '../config/schema.js';
+import { scheduledSessionsFor } from '../cycles/schedule.js';
 import { readDailyPlanOutput } from '../storage/memory.js';
 import { todayInTimezone } from '../utils/date.js';
 import { extractDailyPlanTodos, type DailyPlanTodo } from '../workflows/summary.js';
@@ -172,6 +173,13 @@ export function buildPlanSnapshotForDate(
   // marked none, including every plan written before the field existed — its
   // first row, which the prompt asks to be the most important.
   const suggested = new Set(todos.filter((todo) => todo.mit).map((todo) => todo.candidateId));
+  // Today's sheet only: a big rock from the cycle schedule sits at its reserved
+  // time unless the user moved it (双周排期). 往日 replays the day as it was.
+  const rockStart = new Map(
+    options.mealRows
+      ? scheduledSessionsFor(config, date).filter((session) => session.bigRock && session.start).map((session) => [session.itemKey, session.start!] as const)
+      : [],
+  );
   if (suggested.size === 0 && todos[0]) suggested.add(todos[0].candidateId);
 
   return {
@@ -185,7 +193,7 @@ export function buildPlanSnapshotForDate(
       // rows either: lunch alone is not a plan.
       [...todos, ...(options.mealRows && todos.length > 0 ? mealRows(config, todos.length) : [])].filter((todo) => !removed.has(todo.candidateId)).map((row) => {
         const { start: defaultStart, ...plain } = row as DailyPlanTodo;
-        const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : defaultStart;
+        const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : (defaultStart ?? rockStart.get(plain.candidateId.split(':')[2] ?? ''));
         const text = editedText.get(plain.candidateId);
         const color = editedColor.get(plain.candidateId);
         const userMit = editedMit.get(plain.candidateId);

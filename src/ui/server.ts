@@ -42,6 +42,15 @@ import { normalizeOkrMarkdown } from '../okr/normalize.js';
 import type { OkrLevel } from '../okr/editor.js';
 import { CYCLE_SECTIONS, cycleFilePath, cyclesDir, listCycles, parseCycleId, readCycle, writeCycle, writeSection } from '../cycles/file.js';
 import type { CycleSection } from '../cycles/file.js';
+import {
+  cycleDays,
+  cycleScheduleItems,
+  generateCycleSchedule,
+  normalizeSchedule,
+  readCycleOrThrow,
+  readSchedule,
+  writeSchedule,
+} from '../cycles/schedule.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
 import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
@@ -519,6 +528,9 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // network-free like /api/cycles/state; the 60s sync loop is what fills it.
     if (request.method === 'GET' && url.pathname === '/api/team/today') return sendJson(response, await readTeamTodayPage(options));
     if (request.method === 'POST' && url.pathname === '/api/cycles/section') return sendJson(response, await saveCycleSection(options, await readJson(request)));
+    if (request.method === 'GET' && url.pathname === '/api/cycles/schedule') return sendJson(response, await readCycleSchedule(options, url.searchParams.get('id') || ''));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/schedule') return sendJson(response, await saveCycleSchedule(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/schedule/generate') return sendJson(response, await startCycleSchedule(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/review') return sendJson(response, await generateCycleReviewSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/create') return sendJson(response, await createCycle(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/replan') return sendJson(response, await replanCycle(options, await readJson(request)));
@@ -1810,6 +1822,75 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
     hadRetro: Boolean(retro.trim()),
     savedAt: saved?.sections.review?.updatedAt || '',
   };
+}
+
+// --- 双周排期 -----------------------------------------------------------------------
+
+/**
+ * Generation takes a minute or two, so it runs in the background and the
+ * client polls the schedule. One run per cycle at a time; the last failure is
+ * kept so the page can say why nothing changed.
+ */
+const scheduleRuns = new Map<string, { startedAt: string; error?: string }>();
+
+async function readCycleSchedule(options: UiServerOptions, id: string): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const doc = readCycleOrThrow(config, id.trim());
+  const run = scheduleRuns.get(doc.id);
+  return {
+    ok: true,
+    id: doc.id,
+    today: todayInTimezone(config),
+    schedule: readSchedule(config, doc.id),
+    items: cycleScheduleItems(doc),
+    days: cycleDays(doc).map((date) => {
+      const shape = resolveDayShape(config, date);
+      return { date, weekday: shape.weekdayLabel, restDay: shape.isRestDay };
+    }),
+    running: Boolean(run && !run.error),
+    ...(run?.error ? { error: run.error } : {}),
+  };
+}
+
+async function startCycleSchedule(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  await assertLocalCycleWriteTarget(config, request.owner ?? request.ownerId);
+  const doc = readCycleOrThrow(config, String(request.id || '').trim());
+  const current = scheduleRuns.get(doc.id);
+  if (current && !current.error) return { ok: true, id: doc.id, started: false, text: '排期已经在生成了。' };
+  scheduleRuns.set(doc.id, { startedAt: new Date().toISOString() });
+  void generateCycleSchedule(config, doc.id, { today: todayInTimezone(config) })
+    .then(() => scheduleRuns.delete(doc.id))
+    .catch((error: unknown) => {
+      scheduleRuns.set(doc.id, { startedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
+    });
+  return { ok: true, id: doc.id, started: true, text: '开始排期，一两分钟后出来。' };
+}
+
+async function saveCycleSchedule(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  await assertLocalCycleWriteTarget(config, request.owner ?? request.ownerId);
+  const doc = readCycleOrThrow(config, String(request.id || '').trim());
+  const previous = readSchedule(config, doc.id);
+  const now = new Date().toISOString();
+  const { schedule, dropped } = normalizeSchedule(request, {
+    cycleId: doc.id,
+    items: cycleScheduleItems(doc),
+    days: cycleDays(doc),
+    generatedAt: previous?.generatedAt ?? now,
+    editedAt: now,
+  });
+  if (previous?.note && !schedule.note) schedule.note = previous.note;
+  writeSchedule(config, schedule);
+  return { ok: true, id: doc.id, schedule, dropped };
 }
 
 async function saveCycleSection(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {

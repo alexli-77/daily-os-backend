@@ -78,7 +78,7 @@ export function parseCyclePriorities(markdown: string, week: string, source = 'l
  * start date is what pins it; the label supplies the end. Narrowest wins when
  * two overlap, same rule as the Feishu header lookup.
  */
-function currentCycle(config: AppConfig, date: string): ReturnType<typeof listCycles>[number] | null {
+export function currentCycle(config: AppConfig, date: string): ReturnType<typeof listCycles>[number] | null {
   let best: { doc: ReturnType<typeof listCycles>[number]; span: number } | null = null;
   for (const doc of listCycles(config)) {
     if (!doc.startDate || doc.startDate > date) continue;
@@ -153,7 +153,7 @@ function resolveWeekLabel(docs: Array<{ name: string; content: string }>, date: 
  * year, so try the neighbouring years too — that is what makes a wrap-around
  * range like "12.29-1.4" resolve for a January date.
  */
-function labelSpanCoveringDate(label: string, date: string): number | null {
+export function labelSpanCoveringDate(label: string, date: string): number | null {
   const parts = compactLabel(label).match(/^(\d{1,2})\.(\d{1,2})-(\d{1,2})\.(\d{1,2})$/);
   if (!parts) return null;
   const [startMonth, startDay, endMonth, endDay] = parts.slice(1).map(Number);
