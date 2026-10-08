@@ -1826,6 +1826,11 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
 
 // --- 双周排期 -----------------------------------------------------------------------
 
+/** "HH:mm" now, in the user's timezone. */
+function clockInTimezone(config: AppConfig): string {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: config.user.timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date());
+}
+
 /**
  * Generation takes a minute or two, so it runs in the background and the
  * client polls the schedule. One run per cycle at a time; the last failure is
@@ -1864,7 +1869,7 @@ async function startCycleSchedule(options: UiServerOptions, body: unknown): Prom
   const current = scheduleRuns.get(doc.id);
   if (current && !current.error) return { ok: true, id: doc.id, started: false, text: '排期已经在生成了。' };
   scheduleRuns.set(doc.id, { startedAt: new Date().toISOString() });
-  void generateCycleSchedule(config, doc.id, { today: todayInTimezone(config) })
+  void generateCycleSchedule(config, doc.id, { today: todayInTimezone(config), nowClock: clockInTimezone(config) })
     .then(() => scheduleRuns.delete(doc.id))
     .catch((error: unknown) => {
       scheduleRuns.set(doc.id, { startedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });

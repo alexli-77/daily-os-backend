@@ -224,11 +224,13 @@ export function scheduledElsewhere(config: AppConfig, date: string): Set<string>
  * and roles, the days still to plan with their day type and fixed blocks, and
  * the sessions already behind us (kept as they were).
  */
-export function buildScheduleEvidence(config: AppConfig, doc: CycleDoc, today: string, existing: CycleSchedule | null) {
+export function buildScheduleEvidence(config: AppConfig, doc: CycleDoc, today: string, existing: CycleSchedule | null, nowClock?: string) {
   const days = cycleDays(doc).filter((day) => day >= today);
   return {
     cycle: { id: doc.id, label: doc.cycle, first: cycleDays(doc)[0] ?? doc.startDate, last: cycleDays(doc).at(-1) ?? '' },
     today,
+    // Generated mid-day, today's slots before now are already gone.
+    ...(nowClock ? { nowClock } : {}),
     items: cycleScheduleItems(doc).map((item) => ({ itemKey: item.key, text: item.text, role: item.okr, mit: item.mit })),
     days: days.map((day) => {
       const shape = resolveDayShape(config, day);
@@ -272,7 +274,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export async function generateCycleSchedule(
   config: AppConfig,
   cycleId: string,
-  options: { today: string; now?: string; run?: (input: Parameters<typeof runAgent>[0]) => Promise<string> },
+  options: { today: string; nowClock?: string; now?: string; run?: (input: Parameters<typeof runAgent>[0]) => Promise<string> },
 ): Promise<{ schedule: CycleSchedule; dropped: number }> {
   const doc = readCycleOrThrow(config, cycleId);
   const items = cycleScheduleItems(doc);
@@ -280,7 +282,7 @@ export async function generateCycleSchedule(
   const allDays = cycleDays(doc);
   if (allDays.length === 0) throw new Error(`周期 ${doc.cycle || cycleId} 的标签读不出起止日期。`);
   const existing = readSchedule(config, cycleId);
-  const input = buildScheduleEvidence(config, doc, options.today, existing);
+  const input = buildScheduleEvidence(config, doc, options.today, existing, options.nowClock);
   if (input.days.length === 0) throw new Error(`周期 ${doc.cycle || cycleId} 已经过完了。`);
 
   const text = await (options.run ?? runAgent)({

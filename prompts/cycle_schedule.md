@@ -8,6 +8,7 @@ Evidence 里的 `cycle_schedule_input`（`sources.cycle_schedule_input.data`）�
 
 - `cycle`：这一期的 id、标签、第一天、最后一天。
 - `today`：今天。**只排 `days` 里的日子**（今天到这一期最后一天），不要排过去的日子。
+- `nowClock`：现在几点。今天的时段必须排在它之后；今天剩下的时间不够，就把事情排到后面的日子。
 - `items`：这一期的要务。每条有：
   - `itemKey`：**必须原样回填**，不要改、不要编。
   - `text`：用户写的原文。

@@ -127,6 +127,7 @@ await test('generation plans from today on, keeps what was behind it, and saves 
   let seen: any = null;
   const { schedule } = await generateCycleSchedule(config, id, {
     today,
+    nowClock: '14:20',
     now: 'now',
     run: async (input) => {
       seen = input.evidence.sources.cycle_schedule_input?.data;
@@ -141,6 +142,7 @@ await test('generation plans from today on, keeps what was behind it, and saves 
     },
   });
   assert.equal(seen.days[0].date, today, 'the model only gets the days still ahead');
+  assert.equal(seen.nowClock, '14:20', 'and knows how much of today is left');
   assert.deepEqual(seen.pastSessions.map((session: any) => session.id), ['s-old']);
   assert.deepEqual(schedule.sessions.map((session) => session.id === 's-old' || session.date === today), [true, true], 'the past is kept; the model cannot rewrite it');
   assert.equal(readSchedule(config, id)?.note, '先保住方案');
@@ -239,6 +241,7 @@ await test('the prompts carry the contract', () => {
   const schedule = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'cycle_schedule.md'), 'utf8');
   assert.match(schedule, /itemKey.*原样回填/);
   assert.match(schedule, /给优先级排日程/);
+  assert.match(schedule, /`nowClock`/);
   const plan = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
   assert.match(plan, /关于 `scheduled`（双周排期）/);
 });
