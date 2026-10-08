@@ -97,6 +97,8 @@ export interface FixedBlock {
   end: string;
   kind: 'routine' | 'meeting';
   note?: string;
+  /** The 作息 block this came from, so Today can change it for the day. */
+  routineBlockId?: string;
 }
 
 export const DEFAULT_WORKING_HOURS: WorkingHours = { start: '09:30', end: '18:30' };
@@ -258,7 +260,7 @@ function withRoutine(
   const slots = routine.blocks.filter((block) => block.kind === 'slot');
   const fixed: FixedBlock[] = routine.blocks
     .filter((block) => block.kind === 'fixed')
-    .map((block) => ({ label: block.title, start: block.start, end: block.end, kind: 'routine' as const, ...(block.note ? { note: block.note } : {}) }));
+    .map((block) => ({ label: block.title, start: block.start, end: block.end, kind: 'routine' as const, ...(block.note ? { note: block.note } : {}), routineBlockId: block.id }));
   const meetings = base.configured.filter((block) => block.kind === 'meeting');
   return {
     date: base.date,

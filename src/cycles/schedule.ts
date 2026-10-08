@@ -44,6 +44,17 @@ export interface ScheduleSession {
    * 进 Discord"); the day's to-do is written from this.
    */
   step?: string;
+  /**
+   * Not happening — dropped from Today, or taken by an ad-hoc session. Kept
+   * rather than deleted so undoing it on Today can put it back.
+   */
+  skipped?: boolean;
+  /** Set when Today pushed this session here from that date (顺到明天). */
+  movedFrom?: string;
+  /** Added from Today (临时安排), not by the schedule. */
+  adhoc?: boolean;
+  /** The ad-hoc session that took this one's place. */
+  takenBy?: string;
 }
 
 export interface ScheduleDeadline {
@@ -161,6 +172,10 @@ export function normalizeSchedule(
       // A big rock is a reserved slot: without a time it is just a day.
       ...(entry.bigRock === true && start ? { bigRock: true } : {}),
       ...(step ? { step } : {}),
+      ...(entry.skipped === true ? { skipped: true } : {}),
+      ...(typeof entry.movedFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.movedFrom) ? { movedFrom: entry.movedFrom } : {}),
+      ...(entry.adhoc === true ? { adhoc: true } : {}),
+      ...(typeof entry.takenBy === 'string' && /^[a-z0-9-]{1,40}$/.test(entry.takenBy) ? { takenBy: entry.takenBy } : {}),
     });
   }
   sessions.sort((left, right) => (left.date + (left.start ?? '99')).localeCompare(right.date + (right.start ?? '99')));
@@ -215,7 +230,7 @@ export function hasCycleSchedule(config: AppConfig, date: string): boolean {
 export function scheduledSessionsFor(config: AppConfig, date: string): ScheduleSession[] {
   const doc = currentCycle(config, date);
   if (!doc) return [];
-  return (readSchedule(config, doc.id)?.sessions ?? []).filter((session) => session.date === date);
+  return (readSchedule(config, doc.id)?.sessions ?? []).filter((session) => session.date === date && !session.skipped);
 }
 
 /**
@@ -225,7 +240,7 @@ export function scheduledSessionsFor(config: AppConfig, date: string): ScheduleS
 export function scheduledElsewhere(config: AppConfig, date: string): Set<string> {
   const doc = currentCycle(config, date);
   if (!doc) return new Set();
-  const sessions = readSchedule(config, doc.id)?.sessions ?? [];
+  const sessions = (readSchedule(config, doc.id)?.sessions ?? []).filter((session) => !session.skipped);
   const today = new Set(sessions.filter((session) => session.date === date).map((session) => session.itemKey));
   return new Set(sessions.filter((session) => session.date !== date && !today.has(session.itemKey)).map((session) => session.itemKey));
 }

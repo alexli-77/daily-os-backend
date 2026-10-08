@@ -79,6 +79,19 @@ export interface RoutineFile {
   periods: RoutinePeriod[];
   /** The mode picked for a date, when it is not the day type's default. */
   dayModes: Record<string, string>;
+  /** Changes to one date only, made from the Today page. The template is untouched. */
+  dayOverrides: Record<string, DayOverride>;
+}
+
+/**
+ * One date's departures from its template: blocks hidden, blocks edited (by
+ * id), and windows cleared for something that came up (临时安排) — template
+ * blocks inside a cleared window give way for that day.
+ */
+export interface DayOverride {
+  hidden: string[];
+  edits: RoutineBlock[];
+  clears: Array<{ id: string; start: string; end: string; label: string }>;
 }
 
 /** What the routine says about one date. */
@@ -100,7 +113,7 @@ export function readRoutines(config: AppConfig): RoutineFile {
   try {
     return normalizeRoutines(JSON.parse(fs.readFileSync(routinesPath(config), 'utf8')) as unknown).routines;
   } catch {
-    return { periods: [], dayModes: {} };
+    return { periods: [], dayModes: {}, dayOverrides: {} };
   }
 }
 
@@ -146,13 +159,14 @@ export function resolveRoutine(routines: RoutineFile, date: string): ResolvedRou
     ?? dayType.modes.find((candidate) => candidate.id === dayType.defaultMode)
     ?? dayType.modes[0]!;
   const categories = new Map(period.categories.map((category) => [category.key, category]));
+  const blocks = applyOverride(mode.blocks, routines.dayOverrides[date]);
   return {
     date,
     period: { id: period.id, name: period.name, ...(period.wake ? { wake: period.wake } : {}), ...(period.sleep ? { sleep: period.sleep } : {}), rules: period.rules },
     dayType: { id: dayType.id, label: dayType.label },
     mode: { id: mode.id, label: mode.label },
     modes: dayType.modes.map((candidate) => ({ id: candidate.id, label: candidate.label })),
-    blocks: mode.blocks.map((block) => {
+    blocks: blocks.map((block) => {
       const category = block.category ? categories.get(block.category) : undefined;
       return { ...block, ...(category ? { categoryLabel: category.label, color: category.color } : {}) };
     }),
@@ -248,18 +262,108 @@ export function normalizeRoutines(raw: unknown): { routines: RoutineFile; proble
       rules: (Array.isArray(entry.rules) ? entry.rules : []).map(text).filter(Boolean),
     });
   }
+  const dayOverrides: Record<string, DayOverride> = {};
+  if (isRecord(record.dayOverrides)) {
+    for (const [date, raw] of Object.entries(record.dayOverrides)) {
+      if (!DATE.test(date) || !isRecord(raw)) continue;
+      const override = normalizeOverride(raw);
+      if (override.hidden.length || override.edits.length || override.clears.length) dayOverrides[date] = override;
+    }
+  }
   const dayModes: Record<string, string> = {};
   if (isRecord(record.dayModes)) {
     for (const [date, mode] of Object.entries(record.dayModes)) {
       if (DATE.test(date) && slug(mode)) dayModes[date] = slug(mode);
     }
   }
-  return { routines: { periods: periods.sort((left, right) => left.from.localeCompare(right.from)), dayModes }, problems };
+  return { routines: { periods: periods.sort((left, right) => left.from.localeCompare(right.from)), dayModes, dayOverrides }, problems };
 }
 
 /** Same names as the plan rows' colours (`PLAN_ROW_COLORS`). */
 const PLAN_ROW_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'] as const;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A change to one date's 作息, from the Today page. */
+export type DayOverrideChange =
+  | { type: 'edit'; block: RoutineBlock }
+  | { type: 'hide'; blockId: string }
+  | { type: 'reset'; blockId: string }
+  | { type: 'clear'; id: string; start: string; end: string; label: string }
+  | { type: 'unclear'; id: string };
+
+/** Apply one change to one date's override and save. Returns the resolved day. */
+export function changeDayOverride(config: AppConfig, date: string, change: DayOverrideChange): ResolvedRoutineDay {
+  const routines = readRoutines(config);
+  if (!resolveRoutine(routines, date)) throw new Error(`${date} 不在任何作息时期里。`);
+  const current = routines.dayOverrides[date] ?? { hidden: [], edits: [], clears: [] };
+  const next: DayOverride = { hidden: [...current.hidden], edits: [...current.edits], clears: [...current.clears] };
+  if (change.type === 'edit') {
+    next.edits = [...next.edits.filter((block) => block.id !== change.block.id), change.block];
+    next.hidden = next.hidden.filter((id) => id !== change.block.id);
+  } else if (change.type === 'hide') {
+    next.hidden = [...new Set([...next.hidden, change.blockId])];
+  } else if (change.type === 'reset') {
+    next.hidden = next.hidden.filter((id) => id !== change.blockId);
+    next.edits = next.edits.filter((block) => block.id !== change.blockId);
+  } else if (change.type === 'clear') {
+    next.clears = [...next.clears.filter((clear) => clear.id !== change.id), { id: change.id, start: change.start, end: change.end, label: change.label }];
+  } else {
+    next.clears = next.clears.filter((clear) => clear.id !== change.id);
+  }
+  const dayOverrides = { ...routines.dayOverrides, [date]: next };
+  const saved = writeRoutines(config, { ...routines, dayOverrides }).routines;
+  return resolveRoutine(saved, date)!;
+}
+
+/**
+ * The template's blocks for one date, with that date's override applied:
+ * hidden ones go, edited ones replace theirs, and anything inside a cleared
+ * window gives way (trimmed, or split around it).
+ */
+export function applyOverride(blocks: RoutineBlock[], override: DayOverride | undefined): RoutineBlock[] {
+  if (!override) return blocks;
+  const edits = new Map(override.edits.map((block) => [block.id, block]));
+  let result = blocks.filter((block) => !override.hidden.includes(block.id)).map((block) => edits.get(block.id) ?? block);
+  for (const clear of override.clears) {
+    result = result.flatMap((block): RoutineBlock[] => {
+      if (block.end <= clear.start || block.start >= clear.end) return [block];
+      const parts: RoutineBlock[] = [];
+      if (block.start < clear.start) parts.push({ ...block, id: `${block.id}-a`, end: clear.start });
+      if (block.end > clear.end) parts.push({ ...block, id: `${block.id}-b`, start: clear.end });
+      return parts;
+    });
+  }
+  return result.sort((left, right) => left.start.localeCompare(right.start));
+}
+
+function normalizeOverride(raw: Record<string, unknown>): DayOverride {
+  const edits: RoutineBlock[] = [];
+  for (const block of Array.isArray(raw.edits) ? raw.edits : []) {
+    if (!isRecord(block)) continue;
+    const id = slug(block.id);
+    const start = text(block.start);
+    const end = text(block.end);
+    const title = text(block.title);
+    if (!id || !CLOCK.test(start) || !(CLOCK.test(end) || end === '24:00') || end <= start || !title) continue;
+    edits.push({
+      id, start, end, title,
+      ...(text(block.note) ? { note: text(block.note) } : {}),
+      ...(slug(block.category) ? { category: slug(block.category) } : {}),
+      kind: block.kind === 'slot' ? 'slot' : 'fixed',
+      ...(block.floor === true && block.kind === 'slot' ? { floor: true } : {}),
+    });
+  }
+  const clears: DayOverride['clears'] = [];
+  for (const clear of Array.isArray(raw.clears) ? raw.clears : []) {
+    if (!isRecord(clear)) continue;
+    const id = slug(clear.id);
+    const start = text(clear.start);
+    const end = text(clear.end);
+    if (!id || !CLOCK.test(start) || !(CLOCK.test(end) || end === '24:00') || end <= start) continue;
+    clears.push({ id, start, end, label: text(clear.label) || '临时安排' });
+  }
+  return { hidden: (Array.isArray(raw.hidden) ? raw.hidden : []).map(slug).filter(Boolean), edits, clears };
+}
 const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function text(value: unknown): string {
