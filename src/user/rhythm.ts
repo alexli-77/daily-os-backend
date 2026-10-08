@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { resolveMemoryRepositoryPath } from '../storage/memory.js';
 import { isWeekdayCode, weekdayCode, weekdayLabelZh, type WeekdayCode } from '../utils/date.js';
+import { routineForDate, type ResolvedRoutineDay } from './routine.js';
 
 /**
  * The user's weekly rhythm — which days are work days, which are rest days, and
@@ -123,6 +124,21 @@ export interface DayShape {
   mealBlocks: MealBlock[];
   /** Routines and fixed meetings that apply on this date, in start order. */
   fixedBlocks: FixedBlock[];
+  /**
+   * The 作息 covering this date, when there is one. Its fixed blocks are
+   * already in `fixedBlocks` (and replace the meal blocks); its slots are the
+   * time kept for each category, which the day's to-dos go into.
+   */
+  routine?: DayRoutine;
+}
+
+export interface DayRoutine {
+  period: string;
+  dayType: string;
+  mode: { id: string; label: string };
+  modes: Array<{ id: string; label: string }>;
+  slots: Array<{ start: string; end: string; title: string; category?: string; color?: string; floor?: boolean; note?: string }>;
+  rules: string[];
 }
 
 export interface RhythmFiles {
@@ -195,9 +211,11 @@ export function resolveDayShape(config: AppConfig, date: string): DayShape {
   const rhythm = config.user?.rhythm;
   const weekday = weekdayCode(date);
   const weekdayLabel = weekdayLabelZh(date);
-  const enabled = Boolean(rhythm?.enabled);
+  const routine = safeRoutine(config, date);
+  const enabled = Boolean(rhythm?.enabled) || Boolean(routine);
   const restDays = normalizeRestDays(rhythm?.rest_days ?? []);
   const isRestDay = enabled && restDays.includes(weekday);
+  if (routine) return withRoutine(routine, { date, weekday, weekdayLabel, isRestDay, rhythm, configured: fixedBlocksOn(rhythm?.fixed_blocks ?? [], date, weekday) });
   return {
     date,
     weekday,
@@ -211,6 +229,67 @@ export function resolveDayShape(config: AppConfig, date: string): DayShape {
     workingHours: rhythm?.working_hours ?? DEFAULT_WORKING_HOURS,
     mealBlocks: rhythm?.meal_blocks ?? DEFAULT_MEAL_BLOCKS,
     fixedBlocks: fixedBlocksOn(rhythm?.fixed_blocks ?? [], date, weekday),
+  };
+}
+
+/**
+ * The routine for `date`, or null. Never throws: the scorer reaches
+ * `resolveDayShape` with hand-built configs that have no vault at all, and a
+ * missing or broken routine file must degrade to the plain rhythm.
+ */
+function safeRoutine(config: AppConfig, date: string): ResolvedRoutineDay | null {
+  try {
+    return config.memory ? routineForDate(config, date) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The day shape when a 作息 covers the date. Its fixed blocks become the day's
+ * fixed blocks and replace the meal blocks (the routine has its own meals);
+ * fixed meetings from the settings still apply. The work span runs from the
+ * first slot to the last, so the timeline starts where the day's work does.
+ */
+function withRoutine(
+  routine: ResolvedRoutineDay,
+  base: { date: string; weekday: WeekdayCode; weekdayLabel: string; isRestDay: boolean; rhythm: AppConfig['user']['rhythm'] | undefined; configured: FixedBlock[] },
+): DayShape {
+  const slots = routine.blocks.filter((block) => block.kind === 'slot');
+  const fixed: FixedBlock[] = routine.blocks
+    .filter((block) => block.kind === 'fixed')
+    .map((block) => ({ label: block.title, start: block.start, end: block.end, kind: 'routine' as const, ...(block.note ? { note: block.note } : {}) }));
+  const meetings = base.configured.filter((block) => block.kind === 'meeting');
+  return {
+    date: base.date,
+    weekday: base.weekday,
+    weekdayLabel: base.weekdayLabel,
+    isRestDay: base.isRestDay,
+    dayTypeLabel: routine.dayType.label,
+    workTaskCap: base.isRestDay ? Math.max(0, base.rhythm?.work_task_cap_on_rest_days ?? 1) : null,
+    enabled: true,
+    workingHours: {
+      start: slots[0]?.start ?? routine.period.wake ?? DEFAULT_WORKING_HOURS.start,
+      end: slots.at(-1)?.end ?? routine.period.sleep ?? DEFAULT_WORKING_HOURS.end,
+    },
+    mealBlocks: [],
+    fixedBlocks: [...fixed, ...meetings].sort((left, right) => left.start.localeCompare(right.start)),
+    routine: {
+      period: routine.period.name,
+      dayType: routine.dayType.label,
+      mode: routine.mode,
+      modes: routine.modes,
+      slots: slots.map((slot) => ({
+        start: slot.start,
+        end: slot.end,
+        title: slot.title,
+        ...(slot.categoryLabel ? { category: slot.categoryLabel } : {}),
+        ...(slot.color ? { color: slot.color } : {}),
+        ...(slot.floor ? { floor: true } : {}),
+        ...(slot.note ? { note: slot.note } : {}),
+      })),
+      rules: routine.period.rules,
+    },
   };
 }
 
@@ -295,8 +374,24 @@ export function renderRhythmPromptSection(config: AppConfig, date: string): stri
       '注意：`todo_scored.top` 里工作来源（linear / weekly_priorities）的候选今天已经被降权，`breakdown.restDayDamping` 就是扣掉的分。这不是让你忽略它们，是提醒你今天不该按工作日的密度排。',
     );
   }
+  if (shape.routine) lines.push('', ...renderRoutineLines(shape.routine));
   if (notes && !rhythmNotesAreTemplate(notes)) {
     lines.push('', '用户自己写的作息表（优先级高于上面的默认规则，冲突时听用户的）：', '', notes);
   }
   return lines.join('\n');
+}
+
+/**
+ * The day's 作息 for the plan prompt: the time kept for each category, which
+ * the to-dos go into, and the rules the user wrote for the period.
+ */
+export function renderRoutineLines(routine: DayRoutine): string[] {
+  const slots = routine.slots
+    .map((slot) => `- ${slot.start}–${slot.end} ${slot.title}${slot.category ? `〔${slot.category}${slot.floor ? '·保底' : ''}〕` : slot.floor ? '〔保底〕' : ''}${slot.note ? `：${slot.note}` : ''}`);
+  return [
+    `今天按作息「${routine.period} · ${routine.dayType} · ${routine.mode.label}」过。上面的「固定日程」就是作息里的固定块，不排任何 to-do。`,
+    '时段格子（每条 to-do 放进类别对应的格子里）：',
+    ...slots,
+    ...(routine.rules.length > 0 ? ['这个时期的规则：', ...routine.rules.map((rule) => `- ${rule}`)] : []),
+  ];
 }

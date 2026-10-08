@@ -24,9 +24,10 @@ export interface DailyPlanTodo {
    */
   minutes?: number;
   /**
-   * Where the user pinned this row on today's timeline, "HH:mm" (LEO-331).
-   * Never written by the model: `buildPlanSnapshotForDate` overlays it from the
-   * feedback ledger. Absent = laid out automatically.
+   * Where this row sits on today's timeline, "HH:mm". The model writes it when
+   * the day has a 作息 (a slot of the row's category); the user's own move,
+   * from the feedback ledger, overrides it (LEO-331). Absent = laid out
+   * automatically.
    */
   start?: string;
   /**
@@ -89,7 +90,10 @@ export function parseDailyPlanTodoPlan(content: string): DailyPlanTodoPlan | nul
       const rank = typeof record.rank === 'number' && Number.isFinite(record.rank) ? record.rank : index + 1;
       const candidateId = typeof record.candidateId === 'string' ? record.candidateId : '';
       const minutes = normalizePlanMinutes(record.minutes);
-      return { rank, text, candidateId, ...(minutes ? { minutes } : {}), ...(record.mit === true ? { mit: true } : {}) };
+      // A start the model gave from the day's 作息 slots; the user's own move
+      // (the ledger) still wins in the snapshot.
+      const start = typeof record.start === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(record.start.trim()) ? record.start.trim() : '';
+      return { rank, text, candidateId, ...(minutes ? { minutes } : {}), ...(start ? { start } : {}), ...(record.mit === true ? { mit: true } : {}) };
     })
     .filter((todo): todo is DailyPlanTodo => Boolean(todo))
     .sort((left, right) => left.rank - right.rank)
