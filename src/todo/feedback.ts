@@ -82,7 +82,7 @@ export interface TodoFeedbackEntry {
 export const PLAN_ROW_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'] as const;
 
 /** Longest row text a user edit may set, matching the daily_plan prompt's rule. */
-export const PLAN_ROW_TEXT_MAX = 40;
+export const PLAN_ROW_TEXT_MAX = 150;
 
 export const TODO_FEEDBACK_PATH = 'data/runtime/todo-feedback.jsonl';
 
