@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config/schema.js';
 import { scheduledSessionsFor } from '../cycles/schedule.js';
+import { resolveDayShape } from '../user/rhythm.js';
 import { readDailyPlanOutput } from '../storage/memory.js';
 import { todayInTimezone } from '../utils/date.js';
 import { extractDailyPlanTodos, type DailyPlanTodo } from '../workflows/summary.js';
@@ -23,8 +24,10 @@ function minutesBetween(start: string, end: string): number {
 }
 
 /** One row per meal block, after the plan's own rows. */
-function mealRows(config: AppConfig, after: number): Array<DailyPlanTodo & { start: string }> {
-  const blocks = config.user?.rhythm?.meal_blocks ?? [];
+function mealRows(config: AppConfig, date: string, after: number): Array<DailyPlanTodo & { start: string }> {
+  // Through the day shape: under a 作息 the routine carries its own meals as
+  // fixed blocks, and these rows would put lunch on the sheet twice.
+  const blocks = resolveDayShape(config, date).mealBlocks;
   const seen = new Set<string>();
   return blocks
     .filter((block) => minutesBetween(block.start, block.end) > 0)
@@ -191,7 +194,7 @@ export function buildPlanSnapshotForDate(
     todos: applyUserOrder(
       // A plan with no rows (a prose plan, a rest day's empty list) gets no meal
       // rows either: lunch alone is not a plan.
-      [...todos, ...(options.mealRows && todos.length > 0 ? mealRows(config, todos.length) : [])].filter((todo) => !removed.has(todo.candidateId)).map((row) => {
+      [...todos, ...(options.mealRows && todos.length > 0 ? mealRows(config, date, todos.length) : [])].filter((todo) => !removed.has(todo.candidateId)).map((row) => {
         const { start: defaultStart, ...plain } = row as DailyPlanTodo;
         const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : (defaultStart ?? rockStart.get(plain.candidateId.split(':')[2] ?? ''));
         const text = editedText.get(plain.candidateId);

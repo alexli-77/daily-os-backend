@@ -249,6 +249,10 @@ export function buildScheduleEvidence(
         workingHours: shape.workingHours,
         meals: shape.mealBlocks.map((block) => `${block.start}-${block.end} ${block.label}`),
         fixed: shape.fixedBlocks.map((block) => `${block.start}-${block.end} ${block.label}`),
+        // The 作息's time kept per category, when one covers the day.
+        ...(shape.routine
+          ? { routine: { mode: shape.routine.mode.label, slots: shape.routine.slots.map((slot) => `${slot.start}-${slot.end} ${slot.title}${slot.category ? `〔${slot.category}${slot.floor ? '·保底' : ''}〕` : ''}`) } }
+          : {}),
         // The user's calendar: meetings already accepted are not free time.
         events: events
           .filter((event) => event.date === day)

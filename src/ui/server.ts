@@ -52,6 +52,7 @@ import {
   writeSchedule,
 } from '../cycles/schedule.js';
 import { fetchAgenda } from '../calendar/agenda.js';
+import { readRoutines, resolveRoutine, setDayMode, writeRoutines } from '../user/routine.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
 import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
@@ -517,6 +518,9 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/capture') return sendJson(response, await captureTodo(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/todo-inbox') return sendJson(response, await updateTodoInbox(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/decision-policy') return sendJson(response, await saveDecisionPolicy(options, await readJson(request)));
+    if (request.method === 'GET' && url.pathname === '/api/routines') return sendJson(response, await readRoutinesState(options, url.searchParams.get('date') || ''));
+    if (request.method === 'POST' && url.pathname === '/api/routines') return sendJson(response, await saveRoutines(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/routines/day-mode') return sendJson(response, await saveDayMode(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/rhythm') return sendJson(response, await saveRhythm(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/strategy') return sendJson(response, await saveStrategy(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/okr') return sendJson(response, await saveOkr(options, await readJson(request)));
@@ -1823,6 +1827,38 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
     hadRetro: Boolean(retro.trim()),
     savedAt: saved?.sections.review?.updatedAt || '',
   };
+}
+
+// --- 作息 ---------------------------------------------------------------------------
+
+async function readRoutinesState(options: UiServerOptions, date: string): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = todayInTimezone(config);
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : today;
+  const routines = readRoutines(config);
+  return { ok: true, today, ...routines, day: resolveRoutine(routines, day) };
+}
+
+async function saveRoutines(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const request = readRecord(body);
+  // The day-mode picks are not the editor's to overwrite: keep what is stored.
+  const { routines, problems } = writeRoutines(config, { periods: request.periods, dayModes: readRoutines(config).dayModes });
+  return { ok: true, ...routines, problems };
+}
+
+async function saveDayMode(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const request = readRecord(body);
+  const date = String(request.date || todayInTimezone(config)).trim();
+  const day = setDayMode(config, date, String(request.mode || '').trim());
+  return { ok: true, day, text: `${date} 按「${day.mode.label}」过` };
 }
 
 // --- 双周排期 -----------------------------------------------------------------------
