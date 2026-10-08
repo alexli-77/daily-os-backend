@@ -116,9 +116,9 @@ test('one update can carry text, colour and a note together', () => {
   assert.equal(snapshot?.notes['linear:XX-1'], '先写了一半');
 });
 
-test('the plan prompt asks for rows of at most 40 characters', () => {
+test('the plan prompt asks for rows of at most 150 characters', () => {
   const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
-  assert.match(prompt, /每条不超过 40 个字/);
+  assert.match(prompt, /每条不超过 150 个字/);
 });
 
 // --- meals as rows ------------------------------------------------------------------
