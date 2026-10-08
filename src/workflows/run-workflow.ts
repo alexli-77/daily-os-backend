@@ -30,7 +30,7 @@ export interface WorkflowRunResult {
 export async function runWorkflow(
   config: AppConfig,
   workflow: WorkflowName,
-  options: { send?: boolean; trigger?: WorkflowRunTrigger; source?: string } = {},
+  options: { send?: boolean; trigger?: WorkflowRunTrigger; source?: string; date?: string } = {},
 ): Promise<string> {
   return (await runWorkflowDetailed(config, workflow, options)).text;
 }
@@ -38,9 +38,13 @@ export async function runWorkflow(
 export async function runWorkflowDetailed(
   config: AppConfig,
   workflow: WorkflowName,
-  options: { send?: boolean; trigger?: WorkflowRunTrigger; source?: string } = {},
+  /**
+   * `date` plans a day other than today — tomorrow's plan, made the evening
+   * before. Absent = today, as every scheduled run is.
+   */
+  options: { send?: boolean; trigger?: WorkflowRunTrigger; source?: string; date?: string } = {},
 ): Promise<WorkflowRunResult> {
-  const date = todayInTimezone(config);
+  const date = options.date ?? todayInTimezone(config);
   const sendRequested = options.send ?? true;
   const sendEnabled = sendRequested && config.output.feishu.enabled;
   let run = startWorkflowRun(config, {
