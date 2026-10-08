@@ -43,6 +43,8 @@ export interface DailyPlanTodo {
   mit?: boolean;
   /** Set by the snapshot when `mit` is the user's choice rather than a suggestion. */
   mitByUser?: boolean;
+  /** A habit (a slot of a habit category in today's 作息), not a one-off item. */
+  habit?: boolean;
 }
 
 /** Bounds on a plan estimate, in minutes. */

@@ -139,7 +139,7 @@ export interface DayRoutine {
   dayType: string;
   mode: { id: string; label: string };
   modes: Array<{ id: string; label: string }>;
-  slots: Array<{ start: string; end: string; title: string; category?: string; color?: string; floor?: boolean; note?: string }>;
+  slots: Array<{ id: string; start: string; end: string; title: string; category?: string; color?: string; floor?: boolean; note?: string; habit?: boolean }>;
   rules: string[];
 }
 
@@ -282,6 +282,7 @@ function withRoutine(
       mode: routine.mode,
       modes: routine.modes,
       slots: slots.map((slot) => ({
+        id: slot.id,
         start: slot.start,
         end: slot.end,
         title: slot.title,
@@ -289,6 +290,7 @@ function withRoutine(
         ...(slot.color ? { color: slot.color } : {}),
         ...(slot.floor ? { floor: true } : {}),
         ...(slot.note ? { note: slot.note } : {}),
+        ...(slot.habit ? { habit: true } : {}),
       })),
       rules: routine.period.rules,
     },

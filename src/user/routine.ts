@@ -58,6 +58,11 @@ export interface RoutineCategory {
   label: string;
   /** One of `PLAN_ROW_COLORS`. */
   color: string;
+  /**
+   * A habit category (英语, 看书, 画画…): each of its slots is a to-do on
+   * Today — ticked, moved, or let go on a day it cannot happen — not a band.
+   */
+  habit?: boolean;
 }
 
 export interface RoutinePeriod {
@@ -102,7 +107,7 @@ export interface ResolvedRoutineDay {
   mode: { id: string; label: string };
   /** Every mode this day could be in, to switch between. */
   modes: Array<{ id: string; label: string }>;
-  blocks: Array<RoutineBlock & { categoryLabel?: string; color?: string }>;
+  blocks: Array<RoutineBlock & { categoryLabel?: string; color?: string; habit?: boolean }>;
 }
 
 export function routinesPath(config: AppConfig): string {
@@ -168,7 +173,7 @@ export function resolveRoutine(routines: RoutineFile, date: string): ResolvedRou
     modes: dayType.modes.map((candidate) => ({ id: candidate.id, label: candidate.label })),
     blocks: blocks.map((block) => {
       const category = block.category ? categories.get(block.category) : undefined;
-      return { ...block, ...(category ? { categoryLabel: category.label, color: category.color } : {}) };
+      return { ...block, ...(category ? { categoryLabel: category.label, color: category.color, ...(category.habit ? { habit: true } : {}) } : {}) };
     }),
   };
 }
@@ -200,7 +205,7 @@ export function normalizeRoutines(raw: unknown): { routines: RoutineFile; proble
       const label = text(category.label);
       if (!key || !label || categories.some((existing) => existing.key === key)) continue;
       const color = (PLAN_ROW_COLORS as readonly string[]).includes(text(category.color)) ? text(category.color) : 'gray';
-      categories.push({ key, label, color });
+      categories.push({ key, label, color, ...(category.habit === true ? { habit: true } : {}) });
     }
     const dayTypes: RoutineDayType[] = [];
     const dayTypeIds = new Set<string>();
