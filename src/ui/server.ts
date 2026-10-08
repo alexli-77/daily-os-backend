@@ -52,7 +52,8 @@ import {
   writeSchedule,
 } from '../cycles/schedule.js';
 import { fetchAgenda } from '../calendar/agenda.js';
-import { readRoutines, resolveRoutine, setDayMode, writeRoutines } from '../user/routine.js';
+import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
+import { addAdhocSession, deferScheduled, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
 import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
@@ -72,6 +73,7 @@ import {
   syncPlanRowFromTodoInbox,
   syncTodoInboxFromPlanRow,
   updateTodoInboxItemById,
+  captureTodoItems,
 } from '../todo/inbox.js';
 import {
   deleteCountdown,
@@ -520,6 +522,9 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/decision-policy') return sendJson(response, await saveDecisionPolicy(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/routines') return sendJson(response, await readRoutinesState(options, url.searchParams.get('date') || ''));
     if (request.method === 'POST' && url.pathname === '/api/routines') return sendJson(response, await saveRoutines(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/routines/day-override') return sendJson(response, await saveDayOverride(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/today/adhoc') return sendJson(response, await addAdhoc(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/today/adhoc/undo') return sendJson(response, await undoAdhoc(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/routines/day-mode') return sendJson(response, await saveDayMode(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/rhythm') return sendJson(response, await saveRhythm(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/strategy') return sendJson(response, await saveStrategy(options, await readJson(request)));
@@ -1076,10 +1081,14 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     // An inbox-sourced plan row is the inbox item; keep the inbox's own status
     // in step so the next plan does not re-propose it (#220).
     syncTodoInboxFromPlanRow(config, candidateId, event);
+    // A row from the cycle schedule: the schedule follows (顺延 moves it, 删除
+    // skips it, 恢复 undoes either), so the two never disagree.
+    const scheduleNote = scheduleWriteBack(config, todayInTimezone(config), candidateId, event);
     return {
       ok: true,
       candidateId,
       event,
+      ...(scheduleNote ? { schedule: scheduleNote } : {}),
       ...(minutes ? { minutes } : {}),
       text:
         event === 'complete'
@@ -1831,6 +1840,136 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
 
 // --- 作息 ---------------------------------------------------------------------------
 
+/** Today → schedule, for a weekly row. Never fails the feedback it rides on. */
+function scheduleWriteBack(config: AppConfig, date: string, candidateId: string, event: string): string | null {
+  const itemKey = weeklyItemKey(candidateId);
+  if (!itemKey) return null;
+  try {
+    if (event === 'defer') return deferScheduled(config, date, itemKey);
+    if (event === 'remove') return skipScheduled(config, date, itemKey);
+    if (event === 'reopen') return restoreScheduled(config, date, itemKey);
+  } catch (error) {
+    console.warn(`[schedule] write-back skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return null;
+}
+
+async function saveDayOverride(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const request = readRecord(body);
+  const date = String(request.date || todayInTimezone(config)).trim();
+  const change = readRecord(request.change) as unknown as DayOverrideChange;
+  if (!['edit', 'hide', 'reset', 'clear', 'unclear'].includes(String((change as { type?: unknown }).type))) {
+    return { ok: false, error: 'change.type must be edit, hide, reset, clear or unclear.' };
+  }
+  const day = changeDayOverride(config, date, change);
+  return { ok: true, day, text: '只改了今天，作息模板没动' };
+}
+
+const CLOCK_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * 临时安排: something that came up today (badminton tonight). It goes on
+ * today's sheet as a row pinned at its time; the 作息 makes room for it today
+ * only; a 要务 counts as one of the cycle's (the next one is taken) unless
+ * extra; the rows it displaces are pushed to tomorrow or dropped as asked.
+ * Everything is returned as `undo`, for the 撤销 on the toast.
+ */
+async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const request = readRecord(body);
+  const date = todayInTimezone(config);
+  const title = String(request.title || '').trim();
+  const start = String(request.start || '').trim();
+  const end = String(request.end || '').trim();
+  if (!title) return { ok: false, error: '写一下要做什么。' };
+  if (!CLOCK_RE.test(start) || !(CLOCK_RE.test(end) || end === '24:00') || end <= start) return { ok: false, error: '时间不对：结束要晚于开始。' };
+  const minutes = (Number(end.slice(0, 2)) * 60 + Number(end.slice(3, 5))) - (Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5)));
+
+  const captured = captureTodoItems(config, title, { source: 'console-adhoc' });
+  const item = captured.items?.[0];
+  if (!item) return { ok: false, error: '没能记下来。' };
+  const candidateId = `todo_inbox:${item.id}`;
+  const rank = Number(request.rank) || 0;
+  recordTodoFeedback(config, { date, event: 'update', candidateId, rank, source: 'console-today', minutes });
+  recordTodoFeedback(config, { date, event: 'place', candidateId, rank, source: 'console-today', start });
+
+  const notes: string[] = [`${start}–${end} ${title} 放进今天了`];
+  const clearId = `x-${item.id.slice(-6)}`;
+  let cleared = false;
+  try {
+    if (routineForDate(config, date)) {
+      changeDayOverride(config, date, { type: 'clear', id: clearId, start, end, label: title });
+      cleared = true;
+      notes.push('作息今天给它让了位');
+    }
+  } catch (error) {
+    console.warn(`[adhoc] routine not adjusted: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const itemKey = typeof request.itemKey === 'string' && /^[0-9a-f]{8}$/.test(request.itemKey) ? request.itemKey : '';
+  const session = itemKey ? addAdhocSession(config, date, itemKey, { start, minutes, step: title }, { extra: request.extra === true }) : null;
+  if (session) notes.push(session.text);
+
+  const displaced: Array<{ candidateId: string; rank: number; action: string }> = [];
+  for (const entry of Array.isArray(request.displaced) ? request.displaced : []) {
+    const row = readRecord(entry);
+    const id = String(row.candidateId || '').trim();
+    const action = row.action === 'remove' ? 'remove' : row.action === 'defer' ? 'defer' : '';
+    if (!id || !action) continue;
+    const rowRank = Number(row.rank) || 0;
+    recordTodoFeedback(config, { date, event: action as TodoFeedbackEvent, candidateId: id, rank: rowRank, source: 'console-today' });
+    syncTodoInboxFromPlanRow(config, id, action);
+    scheduleWriteBack(config, date, id, action);
+    displaced.push({ candidateId: id, rank: rowRank, action });
+  }
+  if (displaced.length > 0) notes.push(`挤掉的 ${displaced.length} 条已处理`);
+
+  return {
+    ok: true,
+    candidateId,
+    text: notes.join('；'),
+    undo: { captureId: item.id, ...(cleared ? { clearId } : {}), ...(session ? { sessionId: session.sessionId } : {}), displaced },
+  };
+}
+
+/** Take a 临时安排 back: row, room in the 作息, schedule entry, displaced rows. */
+async function undoAdhoc(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const request = readRecord(body);
+  const date = todayInTimezone(config);
+  const captureId = String(request.captureId || '').trim();
+  if (captureId) {
+    recordTodoFeedback(config, { date, event: 'remove', candidateId: `todo_inbox:${captureId}`, rank: 0, source: 'console-today' });
+    updateTodoInboxItemById(config, captureId, { status: 'deleted' });
+  }
+  const clearId = String(request.clearId || '').trim();
+  if (clearId) {
+    try {
+      changeDayOverride(config, date, { type: 'unclear', id: clearId });
+    } catch {
+      // The period may have been deleted since; nothing to give back.
+    }
+  }
+  const sessionId = String(request.sessionId || '').trim();
+  if (sessionId) removeAdhocSession(config, date, sessionId);
+  for (const entry of Array.isArray(request.displaced) ? request.displaced : []) {
+    const row = readRecord(entry);
+    const id = String(row.candidateId || '').trim();
+    if (!id) continue;
+    recordTodoFeedback(config, { date, event: 'reopen', candidateId: id, rank: Number(row.rank) || 0, source: 'console-today' });
+    syncTodoInboxFromPlanRow(config, id, 'reopen');
+    scheduleWriteBack(config, date, id, 'reopen');
+  }
+  return { ok: true, text: '已撤销临时安排' };
+}
+
 async function readRoutinesState(options: UiServerOptions, date: string): Promise<Record<string, unknown>> {
   const env = readEnvFile(options.envPath);
   applyEnv(env);
@@ -1847,7 +1986,8 @@ async function saveRoutines(options: UiServerOptions, body: unknown): Promise<Re
   const config = loadConfig(options.configPath);
   const request = readRecord(body);
   // The day-mode picks are not the editor's to overwrite: keep what is stored.
-  const { routines, problems } = writeRoutines(config, { periods: request.periods, dayModes: readRoutines(config).dayModes });
+  const stored = readRoutines(config);
+  const { routines, problems } = writeRoutines(config, { periods: request.periods, dayModes: stored.dayModes, dayOverrides: stored.dayOverrides });
   return { ok: true, ...routines, problems };
 }
 

@@ -131,7 +131,7 @@ test('picking a mode is stored per date and survives in the vault file', () => {
 });
 
 test('no file means no routine, not an error', () => {
-  assert.deepEqual(readRoutines(config()), { periods: [], dayModes: {} });
+  assert.deepEqual(readRoutines(config()), { periods: [], dayModes: {}, dayOverrides: {} });
 });
 
 test('under a 作息 the day shape is the routine: its fixed blocks, no separate meals, slots for the to-dos', () => {
