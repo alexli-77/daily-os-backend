@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { runAgent } from '../agent/index.js';
+import { fetchAgenda, type AgendaEvent } from '../calendar/agenda.js';
 import type { AppConfig } from '../config/schema.js';
 import { idFragment } from '../todo/scorer.js';
 import { resolveDayShape } from '../user/rhythm.js';
@@ -224,7 +225,14 @@ export function scheduledElsewhere(config: AppConfig, date: string): Set<string>
  * and roles, the days still to plan with their day type and fixed blocks, and
  * the sessions already behind us (kept as they were).
  */
-export function buildScheduleEvidence(config: AppConfig, doc: CycleDoc, today: string, existing: CycleSchedule | null, nowClock?: string) {
+export function buildScheduleEvidence(
+  config: AppConfig,
+  doc: CycleDoc,
+  today: string,
+  existing: CycleSchedule | null,
+  nowClock?: string,
+  events: AgendaEvent[] = [],
+) {
   const days = cycleDays(doc).filter((day) => day >= today);
   return {
     cycle: { id: doc.id, label: doc.cycle, first: cycleDays(doc)[0] ?? doc.startDate, last: cycleDays(doc).at(-1) ?? '' },
@@ -241,6 +249,10 @@ export function buildScheduleEvidence(config: AppConfig, doc: CycleDoc, today: s
         workingHours: shape.workingHours,
         meals: shape.mealBlocks.map((block) => `${block.start}-${block.end} ${block.label}`),
         fixed: shape.fixedBlocks.map((block) => `${block.start}-${block.end} ${block.label}`),
+        // The user's calendar: meetings already accepted are not free time.
+        events: events
+          .filter((event) => event.date === day)
+          .map((event) => (event.start ? `${event.start}-${event.end ?? ''} ${event.title}` : `全天 ${event.title}`)),
       };
     }),
     pastSessions: (existing?.sessions ?? []).filter((session) => session.date < today),
@@ -274,7 +286,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export async function generateCycleSchedule(
   config: AppConfig,
   cycleId: string,
-  options: { today: string; nowClock?: string; now?: string; run?: (input: Parameters<typeof runAgent>[0]) => Promise<string> },
+  options: {
+    today: string;
+    nowClock?: string;
+    now?: string;
+    run?: (input: Parameters<typeof runAgent>[0]) => Promise<string>;
+    /** The calendar over the cycle; fetched from Feishu when not given. */
+    events?: AgendaEvent[];
+  },
 ): Promise<{ schedule: CycleSchedule; dropped: number }> {
   const doc = readCycleOrThrow(config, cycleId);
   const items = cycleScheduleItems(doc);
@@ -282,7 +301,8 @@ export async function generateCycleSchedule(
   const allDays = cycleDays(doc);
   if (allDays.length === 0) throw new Error(`周期 ${doc.cycle || cycleId} 的标签读不出起止日期。`);
   const existing = readSchedule(config, cycleId);
-  const input = buildScheduleEvidence(config, doc, options.today, existing, options.nowClock);
+  const events = options.events ?? (await fetchAgenda(config, options.today, allDays.at(-1)!));
+  const input = buildScheduleEvidence(config, doc, options.today, existing, options.nowClock, events);
   if (input.days.length === 0) throw new Error(`周期 ${doc.cycle || cycleId} 已经过完了。`);
 
   const text = await (options.run ?? runAgent)({

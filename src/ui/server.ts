@@ -51,6 +51,7 @@ import {
   readSchedule,
   writeSchedule,
 } from '../cycles/schedule.js';
+import { fetchAgenda } from '../calendar/agenda.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
 import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
@@ -1844,16 +1845,26 @@ async function readCycleSchedule(options: UiServerOptions, id: string): Promise<
   const config = loadConfig(options.configPath);
   const doc = readCycleOrThrow(config, id.trim());
   const run = scheduleRuns.get(doc.id);
+  const days = cycleDays(doc);
+  const events = days.length > 0 ? await fetchAgenda(config, days[0]!, days.at(-1)!) : [];
   return {
     ok: true,
     id: doc.id,
     today: todayInTimezone(config),
+    now: clockInTimezone(config),
     schedule: readSchedule(config, doc.id),
     items: cycleScheduleItems(doc),
-    days: cycleDays(doc).map((date) => {
+    days: days.map((date) => {
       const shape = resolveDayShape(config, date);
-      return { date, weekday: shape.weekdayLabel, restDay: shape.isRestDay };
+      return {
+        date,
+        weekday: shape.weekdayLabel,
+        restDay: shape.isRestDay,
+        workingHours: shape.workingHours,
+        blocks: [...shape.mealBlocks.map((block) => ({ ...block, kind: 'meal' })), ...shape.fixedBlocks.map((block) => ({ label: block.label, start: block.start, end: block.end, kind: block.kind }))],
+      };
     }),
+    events,
     running: Boolean(run && !run.error),
     ...(run?.error ? { error: run.error } : {}),
   };

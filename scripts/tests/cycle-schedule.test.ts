@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
+import { parseAgenda } from '../../src/calendar/agenda.js';
 import { buildCycleId, readCycle, writeCycle } from '../../src/cycles/file.js';
 import {
   cycleScheduleItems,
@@ -129,6 +130,7 @@ await test('generation plans from today on, keeps what was behind it, and saves 
     today,
     nowClock: '14:20',
     now: 'now',
+    events: [{ date: today, start: '11:30', end: '12:00', title: '日会' }, { date: addDays(today, 1), title: '团建' }],
     run: async (input) => {
       seen = input.evidence.sources.cycle_schedule_input?.data;
       return JSON.stringify({
@@ -143,6 +145,8 @@ await test('generation plans from today on, keeps what was behind it, and saves 
   });
   assert.equal(seen.days[0].date, today, 'the model only gets the days still ahead');
   assert.equal(seen.nowClock, '14:20', 'and knows how much of today is left');
+  assert.deepEqual(seen.days[0].events, ['11:30-12:00 日会'], 'and what the calendar already holds');
+  assert.deepEqual(seen.days[1].events, ['全天 团建']);
   assert.deepEqual(seen.pastSessions.map((session: any) => session.id), ['s-old']);
   assert.deepEqual(schedule.sessions.map((session) => session.id === 's-old' || session.date === today), [true, true], 'the past is kept; the model cannot rewrite it');
   assert.equal(readSchedule(config, id)?.note, '先保住方案');
@@ -152,7 +156,7 @@ await test('generation plans from today on, keeps what was behind it, and saves 
 await test('a reply that is not a schedule fails loudly and leaves the old one alone', async () => {
   const { config, id, today } = setup();
   writeSchedule(config, { cycleId: id, generatedAt: 'before', sessions: [], deadlines: [] });
-  await assert.rejects(generateCycleSchedule(config, id, { today, run: async () => '好的，我来排一下……' }), /JSON/);
+  await assert.rejects(generateCycleSchedule(config, id, { today, events: [], run: async () => '好的，我来排一下……' }), /JSON/);
   assert.equal(readSchedule(config, id)?.generatedAt, 'before');
 });
 
@@ -237,11 +241,31 @@ await test('a big rock sits at its reserved time on today\'s sheet until the use
   assert.equal(row()?.start, '15:00', 'the user\'s move wins');
 });
 
+await test('a Feishu agenda is read in the user\'s timezone, declined events left out, midnight-crossers cut at 24:00', () => {
+  const events = parseAgenda(
+    {
+      data: [
+        { summary: '日会', start_time: { datetime: '2026-10-08T10:30:00+08:00' }, end_time: { datetime: '2026-10-08T11:00:00+08:00' }, self_rsvp_status: 'accept' },
+        { summary: '不去', start_time: { datetime: '2026-10-08T15:00:00+09:00' }, end_time: { datetime: '2026-10-08T16:00:00+09:00' }, self_rsvp_status: 'decline' },
+        { summary: '夜里', start_time: { datetime: '2026-10-14T23:30:00+09:00' }, end_time: { datetime: '2026-10-15T00:00:00+09:00' } },
+        { summary: '假期', start_time: { date: '2026-10-12' }, end_time: { date: '2026-10-13' } },
+      ],
+    },
+    'Asia/Tokyo',
+  );
+  assert.deepEqual(events, [
+    { date: '2026-10-08', start: '11:30', end: '12:00', title: '日会' },
+    { date: '2026-10-14', start: '23:30', end: '24:00', title: '夜里' },
+    { date: '2026-10-12', title: '假期' },
+  ]);
+});
+
 await test('the prompts carry the contract', () => {
   const schedule = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'cycle_schedule.md'), 'utf8');
   assert.match(schedule, /itemKey.*原样回填/);
   assert.match(schedule, /给优先级排日程/);
   assert.match(schedule, /`nowClock`/);
+  assert.match(schedule, /`events` 占用的时段不能排任何东西/);
   const plan = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
   assert.match(plan, /关于 `scheduled`（双周排期）/);
 });
