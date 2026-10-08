@@ -227,6 +227,22 @@ await test('each session can say what it does; the plan gets today\'s step, two 
   assert.equal(scheduled[0]?.scheduled?.step, '整理表格；发第一批邮件');
 });
 
+await test('a 要务 ticked on an earlier day is still planned on a day the schedule gives it', () => {
+  const { config, today } = setup();
+  const yesterday = addDays(today, -1);
+  const id = `weekly:0:${DRAFT}`;
+  recordTodoFeedback(config, { date: yesterday, event: 'complete', candidateId: id, rank: 1 });
+  const evidence = {
+    generated_at: '', date: today,
+    sources: { weekly_priorities: { state: 'available', data: { items: [{ item: '写完方案初稿 **MIT**', okr: '' }, { item: '整理作品集首页', okr: '' }] } } },
+  } as unknown as Evidence;
+  const ids = (schedule: any) => buildScoredTodos(config, evidence, today, { carryOverDaysById: new Map(), schedule }).top.map((candidate) => candidate.id);
+  assert.ok(ids({ today: [{ itemKey: DRAFT, minutes: 60 }], elsewhere: new Set() }).includes(id), 'today\'s session is new work');
+  assert.ok(!ids(undefined).includes(id), 'with no schedule a ticked 要务 stays done, as before');
+  recordTodoFeedback(config, { date: today, event: 'complete', candidateId: id, rank: 1 });
+  assert.ok(!ids({ today: [{ itemKey: DRAFT, minutes: 60 }], elsewhere: new Set() }).includes(id), 'ticked today: today\'s session is done');
+});
+
 await test('the schedule\'s slice for a date, and what waits for another day', () => {
   const { config, id, today, days } = setup();
   writeSchedule(config, {

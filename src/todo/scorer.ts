@@ -161,7 +161,21 @@ export function buildScoredTodos(
   // straight back. Today only — see `getRemovedCandidateIds` (LEO-329).
   const removed = options.removedCandidateIds ?? getRemovedCandidateIds(config, date);
   const excluded = new Set([...completed, ...removed]);
-  const candidates = excluded.size ? all.filter((candidate) => !excluded.has(candidate.id)) : all;
+  // A 要务 the 双周排期 puts on this date is one session of it, not the whole
+  // thing: ticking yesterday's session (or last week's) must not drop today's.
+  // Only a tick made on this date, or a removal, takes it off.
+  const scheduledKeys = new Set((options.schedule?.today ?? []).map((session) => session.itemKey));
+  const completedThatDay = scheduledKeys.size === 0
+    ? completed
+    : (options.completedCandidateIds ?? getCompletedCandidateIds(config, { date, onlyThatDay: true }));
+  const isScheduledToday = (candidate: TodoCandidate): boolean =>
+    candidate.source === 'weekly_priorities' && scheduledKeys.has(candidate.id.split(':')[2] ?? '');
+  const candidates = excluded.size
+    ? all.filter((candidate) =>
+        isScheduledToday(candidate)
+          ? !completedThatDay.has(candidate.id) && !removed.has(candidate.id)
+          : !excluded.has(candidate.id))
+    : all;
   // LEO-232: overlay the carry-over streak (from the daily-review reconciliation
   // ledger) so a task the user keeps deferring gains carryOverDays even when its
   // source (e.g. Linear/vault) carries no creation timestamp.

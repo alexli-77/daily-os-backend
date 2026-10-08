@@ -187,7 +187,7 @@ export function isSelfTrackingCandidate(candidateId: string): boolean {
  * restoring a todo from the console's History clears its completed state and
  * makes it eligible for planning again.
  */
-export function getCompletedCandidateIds(config: AppConfig, options: { date?: string } = {}): Set<string> {
+export function getCompletedCandidateIds(config: AppConfig, options: { date?: string; onlyThatDay?: boolean } = {}): Set<string> {
   const completedOn = new Map<string, string>();
   for (const entry of listTodoFeedback(config)) {
     if (!entry.candidateId) continue;
@@ -201,7 +201,9 @@ export function getCompletedCandidateIds(config: AppConfig, options: { date?: st
   }
   const out = new Set<string>();
   for (const [candidateId, date] of completedOn) {
-    if (options.date && isSelfTrackingCandidate(candidateId) && date !== options.date) continue;
+    // `onlyThatDay`: ticked on `date` itself, whatever the row is — the
+    // question a 双周排期 session asks (this session done, not the 要务).
+    if (options.date && (options.onlyThatDay || isSelfTrackingCandidate(candidateId)) && date !== options.date) continue;
     out.add(candidateId);
   }
   return out;
