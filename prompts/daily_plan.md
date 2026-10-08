@@ -95,7 +95,7 @@ Evidence 里有一个 `todo_scored` 源（`sources.todo_scored.data`）：
 ```
 {
   "todos": [
-    { "rank": 1, "text": "把 todo 评分器的四源归一化写完，跑通去重和排序", "candidateId": "linear:LEO-142", "minutes": 90 },
+    { "rank": 1, "text": "把 todo 评分器的四源归一化写完，跑通去重和排序", "candidateId": "linear:LEO-142", "minutes": 90, "mit": true },
     { "rank": 2, "text": "给客户 A 发确认邮件，敲定合同签署时间", "candidateId": "todo_inbox:todo-2026...", "minutes": 15 }
   ],
   "note": "今天逾期项偏多，建议先清逾期再做新任务"
@@ -109,5 +109,6 @@ Evidence 里有一个 `todo_scored` 源（`sources.todo_scored.data`）：
 - `candidateId` 必须来自输入的 `top[].candidateId`，原样回填，不要编造。
 - `text` 用中文，5-8 条，动词开头。
 - `minutes` 是整数，15 的倍数；判断不出来就整个字段省略，不要写 0 或 null。
+- `mit` 可选：今天最该保住的那条标 `true`，最多 2 条——优先选本期要务里标了 **MIT** 的那条对应的行；开会、吃饭这类日程不是 MIT。其余行不写这个字段。用户可以在界面上改。
 - `note` 可选：一句话点出今天排序的关键取舍（逾期、客户、OKR 冲突等），只谈 `todos` 里的条目；没有可省略或留空字符串。
 - 如果 `todo_scored.top` 为空，返回 `{ "todos": [], "note": "今天没有可排的候选，请检查数据源。" }`。

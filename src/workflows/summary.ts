@@ -34,6 +34,14 @@ export interface DailyPlanTodo {
    * feedback ledger like `start`; absent = coloured by source.
    */
   color?: string;
+  /**
+   * Whether this row is today's MIT. The model may suggest it (`"mit": true`);
+   * `buildPlanSnapshotForDate` resolves it, with the user's own choice for the
+   * day overriding the suggestion. Absent = not the MIT.
+   */
+  mit?: boolean;
+  /** Set by the snapshot when `mit` is the user's choice rather than a suggestion. */
+  mitByUser?: boolean;
 }
 
 /** Bounds on a plan estimate, in minutes. */
@@ -81,7 +89,7 @@ export function parseDailyPlanTodoPlan(content: string): DailyPlanTodoPlan | nul
       const rank = typeof record.rank === 'number' && Number.isFinite(record.rank) ? record.rank : index + 1;
       const candidateId = typeof record.candidateId === 'string' ? record.candidateId : '';
       const minutes = normalizePlanMinutes(record.minutes);
-      return { rank, text, candidateId, ...(minutes ? { minutes } : {}) };
+      return { rank, text, candidateId, ...(minutes ? { minutes } : {}), ...(record.mit === true ? { mit: true } : {}) };
     })
     .filter((todo): todo is DailyPlanTodo => Boolean(todo))
     .sort((left, right) => left.rank - right.rank)

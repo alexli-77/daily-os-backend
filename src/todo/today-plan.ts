@@ -133,6 +133,8 @@ export function buildPlanSnapshotForDate(
   const editedText = new Map<string, string>();
   // The colour the user gave a row today (LEO-334); `auto` clears it.
   const editedColor = new Map<string, string>();
+  // The user's own MIT choice for a row today; latest wins.
+  const editedMit = new Map<string, boolean>();
   for (const entry of listTodoFeedback(config)) {
     if (entry.date !== date) continue;
     if (entry.event === 'remove') removed.add(entry.candidateId);
@@ -143,9 +145,13 @@ export function buildPlanSnapshotForDate(
       if (entry.color === 'auto') editedColor.delete(entry.candidateId);
       else editedColor.set(entry.candidateId, entry.color);
     }
-    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer' || entry.event === 'update') {
+    if (entry.event === 'update' && typeof entry.mit === 'boolean') editedMit.set(entry.candidateId, entry.mit);
+    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer') {
       feedback[entry.candidateId] = entry.event;
     }
+    // An edit says the row was touched, not that it was reopened: renaming or
+    // recolouring a ticked row must leave it ticked.
+    if (entry.event === 'update' && !(entry.candidateId in feedback)) feedback[entry.candidateId] = 'update';
     // Any event can carry one, not just `update` — ticking a row and saying why
     // is the same note. Latest wins, like every other field here.
     if (entry.note?.trim()) notes[entry.candidateId] = entry.note.trim();
@@ -162,6 +168,12 @@ export function buildPlanSnapshotForDate(
     if (entry.minutes !== undefined) editedMinutes.set(entry.candidateId, entry.minutes);
   }
 
+  // The MIT the plan suggests: the rows the model marked, or — for a plan that
+  // marked none, including every plan written before the field existed — its
+  // first row, which the prompt asks to be the most important.
+  const suggested = new Set(todos.filter((todo) => todo.mit).map((todo) => todo.candidateId));
+  if (suggested.size === 0 && todos[0]) suggested.add(todos[0].candidateId);
+
   return {
     date: latest.date || date,
     generated_at: latest.generated_at ?? '',
@@ -176,7 +188,18 @@ export function buildPlanSnapshotForDate(
         const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : defaultStart;
         const text = editedText.get(plain.candidateId);
         const color = editedColor.get(plain.candidateId);
-        const todo = { ...plain, ...(start ? { start } : {}), ...(text ? { text } : {}), ...(color ? { color } : {}) };
+        const userMit = editedMit.get(plain.candidateId);
+        const mit = userMit ?? suggested.has(plain.candidateId);
+        const todo = {
+          ...plain,
+          ...(start ? { start } : {}),
+          ...(text ? { text } : {}),
+          ...(color ? { color } : {}),
+          // Only said when it is yes, or when the user said no: a row nobody
+          // marked carries no field, which keeps the snapshot what it was.
+          ...(mit || userMit !== undefined ? { mit } : {}),
+          ...(userMit !== undefined ? { mitByUser: true } : {}),
+        };
         const edited = editedMinutes.get(todo.candidateId);
         if (edited === undefined) return todo;
         if (edited > 0) return { ...todo, minutes: edited };
