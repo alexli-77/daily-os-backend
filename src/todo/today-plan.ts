@@ -236,7 +236,9 @@ export function buildPlanSnapshotForDate(
       [
         ...planRows,
         ...(options.mealRows && todos.length > 0 ? mealRows(config, date, todos.length) : []),
-        ...(options.mealRows && todos.length > 0 ? fixedRows(fixed, todos.length) : []),
+        // Not gated on the plan having rows: on a day whose 要务 all sit in
+        // 固定日程 the plan is empty, and the 固定日程 are the day.
+        ...fixedRows(fixed, todos.length),
       ].filter((todo) => !removed.has(todo.candidateId)).map((row) => {
         const { start: defaultStart, ...plain } = row as DailyPlanTodo;
         const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : (defaultStart ?? rockStart.get(plain.candidateId.split(':')[2] ?? ''));
