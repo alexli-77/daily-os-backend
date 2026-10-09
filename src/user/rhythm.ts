@@ -393,8 +393,8 @@ export function renderRoutineLines(routine: DayRoutine): string[] {
   const slots = routine.slots
     .map((slot) => `- ${slot.start}–${slot.end} ${slot.title}${slot.category ? `〔${slot.category}${slot.floor ? '·保底' : ''}〕` : slot.floor ? '〔保底〕' : ''}${slot.note ? `：${slot.note}` : ''}`);
   return [
-    `今天按作息「${routine.period} · ${routine.dayType} · ${routine.mode.label}」过。上面的「固定日程」就是作息里的固定块，不排任何 to-do。`,
-    '时段格子（每条 to-do 放进类别对应的格子里）：',
+    `今天按作息「${routine.period} · ${routine.dayType} · ${routine.mode.label}」过。上面的固定块不排任何 to-do。`,
+    '时段格子（出现在 Evidence 的 fixed_schedule 里的是固定日程，系统已经写好；其余的格子可以放 to-do）：',
     ...slots,
     ...(routine.rules.length > 0 ? ['这个时期的规则：', ...routine.rules.map((rule) => `- ${rule}`)] : []),
   ];

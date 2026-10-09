@@ -1,4 +1,5 @@
 import type { AppConfig } from '../config/schema.js';
+import { fixedCoverage, fixedScheduleFor, type FixedScheduleRow } from '../cycles/fixed-schedule.js';
 import { scheduledSessionsFor } from '../cycles/schedule.js';
 import { resolveDayShape } from '../user/rhythm.js';
 import { readDailyPlanOutput } from '../storage/memory.js';
@@ -41,34 +42,30 @@ function mealRows(config: AppConfig, date: string, after: number): Array<DailyPl
     .map((row, index) => ({ ...row, rank: after + index + 1 }));
 }
 
-function todayHabitSlots(config: AppConfig, date: string): Array<{ id: string; start: string; end: string; title: string; note?: string }> {
-  return (resolveDayShape(config, date).routine?.slots ?? []).filter((slot) => slot.habit);
-}
-
-/** A row is a habit when it is a habit-slot row, or the plan put it inside one. */
-function isHabitRow(candidateId: string, start: string | undefined, slots: Array<{ start: string; end: string }>): boolean {
-  if (candidateId.startsWith(`${RHYTHM_ROW_PREFIX}habit:`)) return true;
-  return Boolean(start && slots.some((slot) => slot.start <= start && start < slot.end));
-}
-
 /**
- * One row per habit slot of today's 作息 that the plan left empty, at the
- * slot's time and length. Habits are to-dos: ticked when done, dragged when
- * the day moves, deleted on a day they cannot happen (a flight, a sick day) —
- * a band behind the rows could be none of those.
+ * One row per 固定日程 of today's 作息 (see `fixedScheduleFor`), at the slot's
+ * time and length, saying what it holds today. Ticked when done, dragged when
+ * the day moves, deleted on a day it cannot happen — a band behind the rows
+ * could be none of those.
  */
-function habitRows(config: AppConfig, date: string, todos: DailyPlanTodo[]): Array<DailyPlanTodo & { start: string }> {
-  const slots = todayHabitSlots(config, date);
-  return slots
-    .filter((slot) => !todos.some((todo) => todo.start && slot.start <= todo.start && todo.start < slot.end))
-    .map((slot, index) => ({
-      candidateId: `${RHYTHM_ROW_PREFIX}habit:${slot.id}`,
-      text: slot.note ? `${slot.title}：${slot.note}` : slot.title,
-      minutes: minutesBetween(slot.start, slot.end),
-      start: slot.start,
-      habit: true,
-      rank: todos.length + 100 + index,
-    }));
+function fixedRows(rows: FixedScheduleRow[], after: number): Array<DailyPlanTodo & { start: string }> {
+  return rows.map((row, index) => ({
+    candidateId: row.candidateId,
+    text: row.text,
+    minutes: row.minutes,
+    start: row.start,
+    fixed: true,
+    ...(row.habit ? { habit: true } : {}),
+    ...(row.floor ? { floor: true } : {}),
+    ...(row.category ? { category: row.category } : {}),
+    ...(row.color ? { color: row.color } : {}),
+    rank: after + 100 + index,
+  }));
+}
+
+/** The weekly candidate's item key: `weekly:<i>:<key>`. */
+function weeklyKey(candidateId: string): string | undefined {
+  return candidateId.startsWith('weekly:') ? candidateId.split(':')[2] : undefined;
 }
 
 /**
@@ -207,8 +204,17 @@ export function buildPlanSnapshotForDate(
   // marked none, including every plan written before the field existed — its
   // first row, which the prompt asks to be the most important.
   const suggested = new Set(todos.filter((todo) => todo.mit).map((todo) => todo.candidateId));
-  // Today's habit slots, for tagging the rows that sit in them as habits.
-  const habitSlots = options.mealRows ? todayHabitSlots(config, date) : [];
+  // Today's 固定日程. The 要务 they cover are inside them, so a plan row for
+  // one of those (a plan written before 固定日程 existed) would say it twice.
+  const fixed = options.mealRows ? fixedScheduleFor(config, date) : [];
+  const covered = fixedCoverage(fixed);
+  const planRows = todos.filter((todo) => !covered.has(weeklyKey(todo.candidateId) ?? ''));
+  // A 固定日程 nobody ticked is done when every 要务 it covers was ticked today.
+  for (const row of fixed) {
+    if (row.candidateId in feedback || row.itemKeys.length === 0) continue;
+    const done = row.itemKeys.every((key) => Object.entries(feedback).some(([id, state]) => weeklyKey(id) === key && state === 'complete'));
+    if (done) feedback[row.candidateId] = 'complete';
+  }
   // Today's sheet only: a big rock from the cycle schedule sits at its reserved
   // time unless the user moved it (双周排期). 往日 replays the day as it was.
   const rockStart = new Map(
@@ -228,15 +234,14 @@ export function buildPlanSnapshotForDate(
       // A plan with no rows (a prose plan, a rest day's empty list) gets no meal
       // rows either: lunch alone is not a plan.
       [
-        ...todos,
+        ...planRows,
         ...(options.mealRows && todos.length > 0 ? mealRows(config, date, todos.length) : []),
-        ...(options.mealRows && todos.length > 0 ? habitRows(config, date, todos) : []),
+        ...(options.mealRows && todos.length > 0 ? fixedRows(fixed, todos.length) : []),
       ].filter((todo) => !removed.has(todo.candidateId)).map((row) => {
         const { start: defaultStart, ...plain } = row as DailyPlanTodo;
         const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : (defaultStart ?? rockStart.get(plain.candidateId.split(':')[2] ?? ''));
         const text = editedText.get(plain.candidateId);
-        const color = editedColor.get(plain.candidateId);
-        const habit = isHabitRow(plain.candidateId, start ?? undefined, habitSlots);
+        const color = editedColor.get(plain.candidateId) ?? plain.color;
         const userMit = editedMit.get(plain.candidateId);
         const mit = userMit ?? suggested.has(plain.candidateId);
         const todo = {
@@ -248,7 +253,6 @@ export function buildPlanSnapshotForDate(
           // marked carries no field, which keeps the snapshot what it was.
           ...(mit || userMit !== undefined ? { mit } : {}),
           ...(userMit !== undefined ? { mitByUser: true } : {}),
-          ...(habit ? { habit: true } : {}),
         };
         const edited = editedMinutes.get(todo.candidateId);
         if (edited === undefined) return todo;

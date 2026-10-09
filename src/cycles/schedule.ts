@@ -71,6 +71,19 @@ export interface CycleSchedule {
   sessions: ScheduleSession[];
   deadlines: ScheduleDeadline[];
   note?: string;
+  /**
+   * Which 要务 belong to which 固定日程 — a 作息 slot by its title ("作品集
+   * redesign"). On a day that has that slot, Today shows the slot itself as the
+   * to-do, with the day's steps of these 要务 as its content, instead of a
+   * separate row per 要务. Two 要务 that are one daily action share a slot.
+   */
+  fixed?: FixedAssignment[];
+}
+
+export interface FixedAssignment {
+  /** The 作息 slot's title, as the user named it. */
+  title: string;
+  itemKeys: string[];
 }
 
 /** One schedulable 要务: its key, text, role (the OKR heading) and MIT mark. */
@@ -192,6 +205,20 @@ export function normalizeSchedule(
   }
 
   const note = typeof record.note === 'string' ? record.note.trim().slice(0, 400) : '';
+  // One 固定日程 per title, one 固定日程 per 要务: the first claim wins.
+  const fixed: FixedAssignment[] = [];
+  const claimed = new Set<string>();
+  for (const entry of Array.isArray(record.fixed) ? record.fixed : []) {
+    if (!isRecord(entry)) { dropped += 1; continue; }
+    const title = typeof entry.title === 'string' ? entry.title.trim().slice(0, 40) : '';
+    if (!title || fixed.some((assignment) => fixedTitleKey(assignment.title) === fixedTitleKey(title))) { dropped += 1; continue; }
+    const itemKeys = (Array.isArray(entry.itemKeys) ? entry.itemKeys : [])
+      .map((key) => String(key).trim())
+      .filter((key) => byKey.has(key) && !claimed.has(key));
+    if (itemKeys.length === 0) { dropped += 1; continue; }
+    for (const key of itemKeys) claimed.add(key);
+    fixed.push({ title, itemKeys });
+  }
   return {
     schedule: {
       cycleId: context.cycleId,
@@ -200,9 +227,15 @@ export function normalizeSchedule(
       sessions,
       deadlines,
       ...(note ? { note } : {}),
+      ...(fixed.length > 0 ? { fixed } : {}),
     },
     dropped,
   };
+}
+
+/** A 固定日程 title as compared: case and spacing do not make a new one. */
+export function fixedTitleKey(title: string): string {
+  return title.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 /** The model's reply, parsed; null when it holds no JSON object. */
@@ -285,6 +318,8 @@ export function buildScheduleEvidence(
       };
     }),
     pastSessions: (existing?.sessions ?? []).filter((session) => session.date < today),
+    // Which 要务 already belong to which 固定日程, as last settled.
+    ...(existing?.fixed ? { settledFixed: existing.fixed } : {}),
   };
 }
 
@@ -357,6 +392,8 @@ export async function generateCycleSchedule(
   const schedule: CycleSchedule = {
     ...fresh.schedule,
     sessions: [...past, ...fresh.schedule.sessions],
+    // The 固定日程 the user already settled stay unless the model gave new ones.
+    ...(!fresh.schedule.fixed && existing?.fixed ? { fixed: existing.fixed } : {}),
   };
   return { schedule: writeSchedule(config, schedule), dropped: fresh.dropped };
 }

@@ -46,6 +46,8 @@ export interface ScheduleSlice {
   today: Array<{ itemKey: string; minutes: number; start?: string; bigRock?: boolean; step?: string }>;
   /** Item keys scheduled on other days and not on this one. */
   elsewhere: Set<string>;
+  /** Item keys inside one of the day's 固定日程: that row stands for them. */
+  covered?: Set<string>;
 }
 
 export interface ScoreBreakdown {
@@ -290,6 +292,7 @@ export function applyCycleSchedule(
   const rest: TodoCandidate[] = [];
   for (const candidate of candidates) {
     const key = candidate.source === 'weekly_priorities' ? candidate.id.split(':')[2] ?? '' : '';
+    if (key && schedule.covered?.has(key)) continue;
     const slot = key ? slots.get(key) : undefined;
     if (slot) scheduled.push({ ...candidate, scheduled: slot });
     else if (key && schedule.elsewhere.has(key)) continue;
