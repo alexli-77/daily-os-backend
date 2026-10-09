@@ -15,7 +15,7 @@ import yaml from 'js-yaml';
 
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
 import { buildCycleId, readCycle, writeCycle } from '../../src/cycles/file.js';
-import { fixedCoverage, fixedScheduleFor } from '../../src/cycles/fixed-schedule.js';
+import { fixedCoverage, fixedScheduleFor, scheduleDayView } from '../../src/cycles/fixed-schedule.js';
 import { cycleScheduleItems, fixedTitleKey, normalizeSchedule, writeSchedule } from '../../src/cycles/schedule.js';
 import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/memory.js';
 import { recordTodoFeedback } from '../../src/todo/feedback.js';
@@ -152,6 +152,20 @@ test('a day whose 要务 all sit in 固定日程 still has its sheet', () => {
   writeLatestWorkflowOutput(config, 'daily_plan', today, content);
   const ids = buildTodayPlanSnapshot(config)!.todos.map((todo) => todo.candidateId);
   assert.deepEqual(ids.sort(), ['rhythm:block:site-floor', 'rhythm:block:standup', 'rhythm:habit:bip']);
+});
+
+test('the calendar gets each day\'s 固定日程 and how every session was left', () => {
+  const { config, id, today } = setup();
+  const schedule = JSON.parse(fs.readFileSync(path.join(config.memory.repository_path, '20_CYCLES', `${id}.schedule.json`), 'utf8'));
+  recordTodoFeedback(config, { date: today, event: 'missed', candidateId: 'rhythm:habit:bip', rank: 9 });
+  recordTodoFeedback(config, { date: today, event: 'complete', candidateId: `weekly:1:${MAIL}`, rank: 2 });
+  const view = scheduleDayView(config, today, today, schedule.sessions);
+  assert.equal(view.fixed.find((row) => row.candidateId === 'rhythm:habit:bip')?.state, 'missed');
+  const byKey = (key: string) => schedule.sessions.find((session: { itemKey: string; date: string }) => session.itemKey === key && session.date === today).id;
+  assert.equal(view.states[byKey(READ)], 'missed', 'a session inside a 固定日程 is left as that row was');
+  assert.equal(view.states[byKey(MAIL)], 'complete');
+  assert.equal(view.states[byKey(SITE)], undefined, 'untouched');
+  assert.deepEqual(scheduleDayView(config, addDays(today, 1), today, schedule.sessions).states, {}, 'the future has no states');
 });
 
 test('the prompts say 固定日程 are written by the system and how 要务 are assigned', () => {

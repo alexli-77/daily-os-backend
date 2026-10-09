@@ -16,7 +16,8 @@
 import type { AppConfig } from '../config/schema.js';
 import { resolveDayShape } from '../user/rhythm.js';
 import { currentCycle } from '../workflows/weekly-priorities.js';
-import { fixedTitleKey, readSchedule } from './schedule.js';
+import { listTodoFeedback } from '../todo/feedback.js';
+import { fixedTitleKey, readSchedule, type ScheduleSession } from './schedule.js';
 
 export interface FixedScheduleRow {
   /** `rhythm:habit:<blockId>` for a habit slot, `rhythm:block:<blockId>` otherwise. */
@@ -93,4 +94,58 @@ export function fixedCoverage(rows: FixedScheduleRow[]): Set<string> {
 export function fixedRowFor(config: AppConfig, date: string, candidateId: string): FixedScheduleRow | undefined {
   if (!candidateId.startsWith('rhythm:habit:') && !candidateId.startsWith('rhythm:block:')) return undefined;
   return fixedScheduleFor(config, date).find((row) => row.candidateId === candidateId);
+}
+
+/**
+ * How each row was left on `date`: complete / partial / missed / defer, by
+ * candidate id. A `reopen` takes a row back to untouched.
+ */
+export function rowStatesOn(config: AppConfig, date: string): Map<string, string> {
+  const states = new Map<string, string>();
+  for (const entry of listTodoFeedback(config)) {
+    if (entry.date !== date) continue;
+    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'missed' || entry.event === 'defer') states.set(entry.candidateId, entry.event);
+    if (entry.event === 'reopen') states.delete(entry.candidateId);
+  }
+  return states;
+}
+
+/**
+ * One day of the 双周排期 as the calendar draws it: its 固定日程 with what
+ * they hold and how they were left, and the state of each session that is not
+ * inside one. Days after today have no states.
+ */
+export function scheduleDayView(config: AppConfig, date: string, today: string, sessions: ScheduleSession[]): {
+  fixed: Array<{ candidateId: string; start: string; end: string; title: string; text: string; habit?: boolean; floor?: boolean; category?: string; color?: string; itemKeys: string[]; state?: string }>;
+  states: Record<string, string>;
+} {
+  const rows = fixedScheduleFor(config, date);
+  const recorded = date <= today ? rowStatesOn(config, date) : new Map<string, string>();
+  const weeklyState = (itemKey: string): string | undefined =>
+    [...recorded.entries()].find(([id]) => id.startsWith('weekly:') && id.split(':')[2] === itemKey)?.[1];
+  const fixed = rows.map((row) => {
+    const derived = row.itemKeys.length > 0 && row.itemKeys.every((key) => weeklyState(key) === 'complete') ? 'complete' : undefined;
+    const state = recorded.get(row.candidateId) ?? derived;
+    return {
+      candidateId: row.candidateId,
+      start: row.start,
+      end: row.end,
+      title: row.title,
+      text: row.text,
+      ...(row.habit ? { habit: true } : {}),
+      ...(row.floor ? { floor: true } : {}),
+      ...(row.category ? { category: row.category } : {}),
+      ...(row.color ? { color: row.color } : {}),
+      itemKeys: row.itemKeys,
+      ...(state ? { state } : {}),
+    };
+  });
+  const states: Record<string, string> = {};
+  for (const session of sessions) {
+    if (session.date !== date) continue;
+    const inside = fixed.find((row) => row.itemKeys.includes(session.itemKey));
+    const state = inside ? inside.state : weeklyState(session.itemKey);
+    if (state) states[session.id] = state;
+  }
+  return { fixed, states };
 }
