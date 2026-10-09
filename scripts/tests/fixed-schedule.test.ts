@@ -145,6 +145,15 @@ test('the 要务 inside a 固定日程 leave the plan: no row of their own, not 
   assert.equal(buildTodayPlanSnapshot(config)!.feedback['rhythm:habit:bip'], 'missed');
 });
 
+test('a day whose 要务 all sit in 固定日程 still has its sheet', () => {
+  const { config, today } = setup();
+  const content = JSON.stringify({ todos: [], note: '今天的事都在固定日程里。' });
+  appendDailyMemory(config, 'daily_plan', today, content);
+  writeLatestWorkflowOutput(config, 'daily_plan', today, content);
+  const ids = buildTodayPlanSnapshot(config)!.todos.map((todo) => todo.candidateId);
+  assert.deepEqual(ids.sort(), ['rhythm:block:site-floor', 'rhythm:block:standup', 'rhythm:habit:bip']);
+});
+
 test('the prompts say 固定日程 are written by the system and how 要务 are assigned', () => {
   const plan = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
   assert.match(plan, /不要为固定日程写条目/);
