@@ -303,7 +303,13 @@ export function changeDayOverride(config: AppConfig, date: string, change: DayOv
   const current = routines.dayOverrides[date] ?? { hidden: [], edits: [], clears: [] };
   const next: DayOverride = { hidden: [...current.hidden], edits: [...current.edits], clears: [...current.clears] };
   if (change.type === 'edit') {
-    next.edits = [...next.edits.filter((block) => block.id !== change.block.id), change.block];
+    // An edit moves or stretches the block for the day; what the block *is*
+    // (a slot and its category, a fixed block's note) stays the template's.
+    const original = templateBlocks(routines, date).find((block) => block.id === change.block.id);
+    const block: RoutineBlock = original
+      ? { ...original, start: change.block.start, end: change.block.end, title: change.block.title?.trim() || original.title }
+      : change.block;
+    next.edits = [...next.edits.filter((edit) => edit.id !== block.id), block];
     next.hidden = next.hidden.filter((id) => id !== change.block.id);
   } else if (change.type === 'hide') {
     next.hidden = [...new Set([...next.hidden, change.blockId])];
@@ -318,6 +324,20 @@ export function changeDayOverride(config: AppConfig, date: string, change: DayOv
   const dayOverrides = { ...routines.dayOverrides, [date]: next };
   const saved = writeRoutines(config, { ...routines, dayOverrides }).routines;
   return resolveRoutine(saved, date)!;
+}
+
+/** The mode's own blocks for `date`, before that day's override. */
+function templateBlocks(routines: RoutineFile, date: string): RoutineBlock[] {
+  const period = routines.periods
+    .filter((candidate) => candidate.from <= date && date <= candidate.to)
+    .sort((left, right) => right.from.localeCompare(left.from))[0];
+  const dayType = period?.dayTypes.find((type) => type.weekdays.includes(weekdayCode(date)));
+  if (!dayType || dayType.modes.length === 0) return [];
+  const picked = routines.dayModes[date];
+  const mode = dayType.modes.find((candidate) => candidate.id === picked)
+    ?? dayType.modes.find((candidate) => candidate.id === dayType.defaultMode)
+    ?? dayType.modes[0]!;
+  return mode.blocks;
 }
 
 /**

@@ -18,7 +18,7 @@ import { recordTodoFeedback } from '../../src/todo/feedback.js';
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
 import { renderRhythmPromptSection, resolveDayShape } from '../../src/user/rhythm.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
-import { normalizeRoutines, readRoutines, resolveRoutine, routineForDate, routinesPath, setDayMode, writeRoutines } from '../../src/user/routine.js';
+import { changeDayOverride, normalizeRoutines, readRoutines, resolveRoutine, routineForDate, routinesPath, setDayMode, writeRoutines } from '../../src/user/routine.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -211,11 +211,23 @@ test('habit slots are to-dos on today\'s sheet: a row each, unless the plan alre
     assert.equal(todos.find((todo) => todo.candidateId === 'weekly:0:aaaaaaaa')?.habit, undefined, 'a work slot is not');
     recordTodoFeedback(cfg, { date: today, event: 'complete', candidateId: 'rhythm:habit:english', rank: 3 });
     assert.equal(buildTodayPlanSnapshot(cfg)?.feedback['rhythm:habit:english'], 'complete', 'ticked like any row');
+    recordTodoFeedback(cfg, { date: today, event: 'missed', candidateId: 'rhythm:habit:english', rank: 3 });
+    assert.equal(buildTodayPlanSnapshot(cfg)?.feedback['rhythm:habit:english'], 'missed', 'or marked 未做 on a day it did not happen');
     recordTodoFeedback(cfg, { date: today, event: 'remove', candidateId: 'rhythm:habit:english', rank: 3 });
     assert.ok(!buildTodayPlanSnapshot(cfg)?.todos.some((todo) => todo.candidateId === 'rhythm:habit:english'), 'and let go on a day it cannot happen');
   } finally {
     process.chdir(process_);
   }
+});
+
+test('moving a 时段格子 for one day keeps it a slot of the same category', () => {
+  const cfg = config();
+  writeRoutines(cfg, { periods: [PERIOD] });
+  const slot = routineForDate(cfg, '2026-10-08')!.blocks.find((block) => block.title === '专注')!;
+  const day = changeDayOverride(cfg, '2026-10-08', { type: 'edit', block: { id: slot.id, start: '14:00', end: '17:00', title: '', kind: 'fixed' } });
+  const moved = day.blocks.find((block) => block.id === slot.id)!;
+  assert.deepEqual([moved.start, moved.end, moved.title, moved.kind, moved.category], ['14:00', '17:00', '专注', 'slot', 'work']);
+  assert.equal(routineForDate(cfg, '2026-10-09')!.blocks.find((block) => block.id === slot.id)!.start, '13:00', 'other days keep the template');
 });
 
 test('a plan run for today is told what time it is; another day\'s is not', () => {

@@ -1026,7 +1026,8 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     // the product with no way back. A mis-click is not a decision.
     // `remove` takes the row off today's sheet (LEO-329); `reopen` puts it back.
     // `place` pins it to a time on the timeline, `unplace` releases it (LEO-331).
-    const events = ['complete', 'partial', 'defer', 'update', 'reopen', 'remove', 'place', 'unplace'];
+    // `missed` settles the row as not done today (未做), on purpose.
+    const events = ['complete', 'partial', 'missed', 'defer', 'update', 'reopen', 'remove', 'place', 'unplace'];
     if (!events.includes(event)) {
       return { ok: false, error: `event must be one of ${events.join(', ')}.` };
     }
@@ -1099,6 +1100,8 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
           ? '已标记完成'
           : event === 'partial'
             ? '已标记部分完成'
+            : event === 'missed'
+            ? '已标记未做'
             : event === 'defer'
             ? '已延期'
             : event === 'reopen'

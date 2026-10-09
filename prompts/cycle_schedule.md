@@ -57,7 +57,7 @@ Evidence 里的 `cycle_schedule_input`（`sources.cycle_schedule_input.data`）�
   "deadlines": [
     { "itemKey": "a1b2c3d4", "date": "2026-10-09" }
   ],
-  "note": "一句话说明这一期排期的关键取舍"
+  "note": "先守住「上线落地页」这块大石头：上午的工作格子留给它，临时的事排到下午"
 }
 ```
 
@@ -67,4 +67,6 @@ Evidence 里的 `cycle_schedule_input`（`sources.cycle_schedule_input.data`）�
 - `date` 用 `YYYY-MM-DD`，必须是 `days` 里的某一天。
 - `minutes` 是 15 的倍数，15–240。
 - `start` 用 `HH:mm`，只给大石头写。
-- `note` 用中文，不超过 60 个字。
+- `note` 是给用户的一句话指导，用柯维「要事第一、以终为始」的角度：点名这两周最该守住的那块大石头（具体到哪条要务），再说一个守住它的具体做法。
+  - 对用户说话，用「你」或直接用祈使句；不复述排期里每天排了什么，不讲道理，不喊口号，不用破折号。
+  - 中文，不超过 50 个字。
