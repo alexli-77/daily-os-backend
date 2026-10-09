@@ -13,6 +13,12 @@ import { emitLocalChange } from '../utils/change-events.js';
  * write never corrupts the ledger.
  */
 /**
+ * `missed` — "I did not do this today", said on purpose (sick, slept in, a
+ * flight). Different from leaving the row untouched: the day is settled, and
+ * the row shows it. Not terminal either — the work itself is still open, so it
+ * clears completion like `reopen` does.
+ */
+/**
  * `partial` — "I worked on this, it is not finished".
  *
  * The third thing that actually happens to a plan row, and until now the only
@@ -28,6 +34,7 @@ export type TodoFeedbackEvent =
   | 'present'
   | 'complete'
   | 'partial'
+  | 'missed'
   | 'defer'
   | 'reorder'
   | 'carry_over'
@@ -197,7 +204,7 @@ export function getCompletedCandidateIds(config: AppConfig, options: { date?: st
     // got halfway" is a correction, and without this line the row would stay
     // excluded from planning while the user believes they have marked it
     // unfinished. Being *told* it is not complete has to be able to undo that.
-    else if (entry.event === 'reopen' || entry.event === 'partial') completedOn.delete(entry.candidateId);
+    else if (entry.event === 'reopen' || entry.event === 'partial' || entry.event === 'missed') completedOn.delete(entry.candidateId);
   }
   const out = new Set<string>();
   for (const [candidateId, date] of completedOn) {

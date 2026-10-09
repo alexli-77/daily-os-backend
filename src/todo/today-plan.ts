@@ -86,7 +86,7 @@ export interface TodayPlanSnapshot {
   date: string;
   generated_at: string;
   todos: DailyPlanTodo[];
-  /** Latest state per candidateId: complete | partial | defer | update. Absent = untouched. */
+  /** Latest state per candidateId: complete | partial | missed | defer | update. Absent = untouched. */
   feedback: Record<string, string>;
   /**
    * The last note left on each row, whatever event carried it.
@@ -181,7 +181,7 @@ export function buildPlanSnapshotForDate(
       else editedColor.set(entry.candidateId, entry.color);
     }
     if (entry.event === 'update' && typeof entry.mit === 'boolean') editedMit.set(entry.candidateId, entry.mit);
-    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer') {
+    if (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'missed' || entry.event === 'defer') {
       feedback[entry.candidateId] = entry.event;
     }
     // An edit says the row was touched, not that it was reopened: renaming or

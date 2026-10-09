@@ -94,7 +94,7 @@ export async function runWorkflowDetailed(
       const feedbackToday = listTodoFeedback(config).filter(
         (entry) =>
           entry.date === date &&
-          (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'defer'),
+          (entry.event === 'complete' || entry.event === 'partial' || entry.event === 'missed' || entry.event === 'defer'),
       );
       evidence.sources.daily_plan_todos = planTodos
         ? { state: 'available', data: { date, todos: planTodos } }

@@ -245,7 +245,7 @@ export function syncTodoInboxFromPlanRow(config: AppConfig, candidateId: string,
       ? 'done'
       : event === 'remove'
         ? 'deleted'
-        : event === 'reopen' || event === 'partial'
+        : event === 'reopen' || event === 'partial' || event === 'missed'
           ? 'open'
           : undefined;
   if (!status) return false;
