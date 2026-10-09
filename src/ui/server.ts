@@ -54,7 +54,7 @@ import {
 import { fetchAgenda } from '../calendar/agenda.js';
 import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
-import { fixedRowFor } from '../cycles/fixed-schedule.js';
+import { fixedRowFor, scheduleDayView } from '../cycles/fixed-schedule.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
 import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
@@ -2087,12 +2087,17 @@ async function readCycleSchedule(options: UiServerOptions, id: string): Promise<
   const run = scheduleRuns.get(doc.id);
   const days = cycleDays(doc);
   const events = days.length > 0 ? await fetchAgenda(config, days[0]!, days.at(-1)!) : [];
+  const today = todayInTimezone(config);
+  const schedule = readSchedule(config, doc.id);
+  // Each day's 固定日程 and how every session was left, for the calendar.
+  const views = new Map(days.map((date) => [date, scheduleDayView(config, date, today, schedule?.sessions ?? [])]));
   return {
     ok: true,
     id: doc.id,
-    today: todayInTimezone(config),
+    today,
     now: clockInTimezone(config),
-    schedule: readSchedule(config, doc.id),
+    schedule,
+    states: Object.assign({}, ...[...views.values()].map((view) => view.states)),
     items: cycleScheduleItems(doc),
     days: days.map((date) => {
       const shape = resolveDayShape(config, date);
@@ -2102,6 +2107,7 @@ async function readCycleSchedule(options: UiServerOptions, id: string): Promise<
         restDay: shape.isRestDay,
         workingHours: shape.workingHours,
         blocks: [...shape.mealBlocks.map((block) => ({ ...block, kind: 'meal' })), ...shape.fixedBlocks.map((block) => ({ label: block.label, start: block.start, end: block.end, kind: block.kind }))],
+        fixed: views.get(date)?.fixed ?? [],
       };
     }),
     events,
