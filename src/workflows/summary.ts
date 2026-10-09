@@ -45,6 +45,12 @@ export interface DailyPlanTodo {
   mitByUser?: boolean;
   /** A habit (a slot of a habit category in today's 作息), not a one-off item. */
   habit?: boolean;
+  /** A 固定日程: one of today's 作息 slots, holding the 要务 assigned to it. */
+  fixed?: boolean;
+  /** A 固定日程 kept even on a busy day (保底). */
+  floor?: boolean;
+  /** The 固定日程's 作息 category, as the user labelled it. */
+  category?: string;
 }
 
 /** Bounds on a plan estimate, in minutes. */

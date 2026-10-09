@@ -54,6 +54,7 @@ import {
 import { fetchAgenda } from '../calendar/agenda.js';
 import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
+import { fixedRowFor } from '../cycles/fixed-schedule.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
 import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
@@ -1896,16 +1897,25 @@ function adhocFollowsRow(config: AppConfig, date: string, candidateId: string, e
 
 /** Today → schedule, for a weekly row. Never fails the feedback it rides on. */
 function scheduleWriteBack(config: AppConfig, date: string, candidateId: string, event: string): string | null {
-  const itemKey = weeklyItemKey(candidateId);
-  if (!itemKey) return null;
-  try {
-    if (event === 'defer') return deferScheduled(config, date, itemKey);
-    if (event === 'remove') return skipScheduled(config, date, itemKey);
-    if (event === 'reopen') return restoreScheduled(config, date, itemKey);
-  } catch (error) {
-    console.warn(`[schedule] write-back skipped: ${error instanceof Error ? error.message : String(error)}`);
+  // A 固定日程 row stands for the 要务 inside it: they follow it.
+  const single = weeklyItemKey(candidateId);
+  const itemKeys = single ? [single] : (fixedRowFor(config, date, candidateId)?.itemKeys ?? []);
+  const notes: string[] = [];
+  for (const itemKey of itemKeys) {
+    try {
+      const note = event === 'defer'
+        ? deferScheduled(config, date, itemKey)
+        : event === 'remove'
+          ? skipScheduled(config, date, itemKey)
+          : event === 'reopen'
+            ? restoreScheduled(config, date, itemKey)
+            : null;
+      if (note) notes.push(note);
+    } catch (error) {
+      console.warn(`[schedule] write-back skipped: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
-  return null;
+  return notes.length > 0 ? [...new Set(notes)].join('；') : null;
 }
 
 async function saveDayOverride(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
@@ -2135,6 +2145,8 @@ async function saveCycleSchedule(options: UiServerOptions, body: unknown): Promi
     editedAt: now,
   });
   if (previous?.note && !schedule.note) schedule.note = previous.note;
+  // A client that does not know about 固定日程 must not erase them by saving.
+  if (previous?.fixed && !('fixed' in request)) schedule.fixed = previous.fixed;
   writeSchedule(config, schedule);
   return { ok: true, id: doc.id, schedule, dropped };
 }

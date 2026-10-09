@@ -184,7 +184,7 @@ test('a plan row keeps the slot start the model gave it, and a meal row is not a
   }
 });
 
-test('habit slots are to-dos on today\'s sheet: a row each, unless the plan already put one there', () => {
+test('every slot of today\'s 作息 is a to-do on the sheet: a 固定日程, habits tagged as habits', () => {
   const cfg = config();
   const today = todayInTimezone(cfg);
   writeRoutines(cfg, { periods: [{ ...PERIOD, from: addDays(today, -1), to: addDays(today, 1),
@@ -206,9 +206,10 @@ test('habit slots are to-dos on today\'s sheet: a row each, unless the plan alre
     const todos = buildTodayPlanSnapshot(cfg)?.todos ?? [];
     const english = todos.find((todo) => todo.candidateId === 'rhythm:habit:english');
     assert.deepEqual([english?.text, english?.start, english?.minutes, english?.habit], ['英语口语：出声说', '07:00', 60, true]);
-    assert.ok(!todos.some((todo) => todo.candidateId === 'rhythm:habit:read'), 'the plan already put a row in 看书');
-    assert.equal(todos.find((todo) => todo.candidateId === 'weekly:1:bbbbbbbb')?.habit, true, 'and that row is a habit');
-    assert.equal(todos.find((todo) => todo.candidateId === 'weekly:0:aaaaaaaa')?.habit, undefined, 'a work slot is not');
+    assert.ok(todos.some((todo) => todo.candidateId === 'rhythm:habit:read'), '看书 is its own 固定日程 row');
+    const deep = todos.find((todo) => todo.candidateId === 'rhythm:block:deep');
+    assert.deepEqual([deep?.start, deep?.fixed, deep?.habit], ['13:00', true, undefined], 'a work slot is a 固定日程, not a habit');
+    assert.equal(todos.find((todo) => todo.candidateId === 'weekly:0:aaaaaaaa')?.habit, undefined, 'a plan row is never a habit');
     recordTodoFeedback(cfg, { date: today, event: 'complete', candidateId: 'rhythm:habit:english', rank: 3 });
     assert.equal(buildTodayPlanSnapshot(cfg)?.feedback['rhythm:habit:english'], 'complete', 'ticked like any row');
     recordTodoFeedback(cfg, { date: today, event: 'missed', candidateId: 'rhythm:habit:english', rank: 3 });

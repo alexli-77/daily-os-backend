@@ -1,6 +1,7 @@
 import type { AppConfig, WorkflowName } from '../config/schema.js';
 import { runAgent } from '../agent/index.js';
 import { collectEvidence } from './evidence.js';
+import { fixedCoverage, fixedScheduleFor } from '../cycles/fixed-schedule.js';
 import { hasCycleSchedule, scheduledElsewhere, scheduledSessionsFor } from '../cycles/schedule.js';
 import { todayInTimezone } from '../utils/date.js';
 import { appendDailyMemory, loadMemory, readDailyPlanOutput, writeLatestWorkflowOutput, writeWorkflowDetailCache } from '../storage/memory.js';
@@ -74,10 +75,19 @@ export async function runWorkflowDetailed(
       // LEO-209: programmatically score the four todo sources and hand the LLM a
       // ranked top-N (with breakdown) instead of an unscored blob.
       // The cycle schedule's slice for today, when the cycle has one (双周排期).
+      // 固定日程 are written onto the sheet by the system, with the 要务 they
+      // cover inside them; the plan is told what they are and plans the rest.
+      const fixed = fixedScheduleFor(config, date);
       const schedule = hasCycleSchedule(config, date)
-        ? { today: scheduledSessionsFor(config, date), elsewhere: scheduledElsewhere(config, date) }
+        ? { today: scheduledSessionsFor(config, date), elsewhere: scheduledElsewhere(config, date), covered: fixedCoverage(fixed) }
         : undefined;
       evidence.sources.todo_scored = { state: 'available', data: buildScoredTodos(config, evidence, date, { schedule }) };
+      if (fixed.length > 0) {
+        evidence.sources.fixed_schedule = {
+          state: 'available',
+          data: { rows: fixed.map((row) => ({ start: row.start, end: row.end, title: row.title, ...(row.steps.length > 0 ? { today: row.steps.join('；') } : {}), ...(row.floor ? { floor: true } : {}) })) },
+        };
+      }
     }
     if (workflow === 'daily_review') {
       // LEO-232: reconcile the review against the morning todo. Inject (1) today's
