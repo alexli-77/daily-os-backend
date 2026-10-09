@@ -16,7 +16,7 @@ import yaml from 'js-yaml';
 import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
 import { buildCycleId, readCycle, writeCycle } from '../../src/cycles/file.js';
 import { fixedCoverage, fixedScheduleFor } from '../../src/cycles/fixed-schedule.js';
-import { cycleScheduleItems, normalizeSchedule, writeSchedule } from '../../src/cycles/schedule.js';
+import { cycleScheduleItems, fixedTitleKey, normalizeSchedule, writeSchedule } from '../../src/cycles/schedule.js';
 import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/memory.js';
 import { recordTodoFeedback } from '../../src/todo/feedback.js';
 import { applyCycleSchedule, idFragment, type TodoCandidate } from '../../src/todo/scorer.js';
@@ -112,6 +112,8 @@ test('a 要务 belongs to one 固定日程 at most, and titles match however the
   assert.deepEqual(bip.itemKeys.sort(), [READ, POST].sort(), 'the 落地页 key was already claimed');
   assert.equal(rows.find((row) => row.blockId === 'standup')!.text, '日会');
   assert.deepEqual([...fixedCoverage(rows)].sort(), [SITE, READ, POST].sort());
+  assert.equal(fixedTitleKey('画画（补今天的，多画半小时）'), fixedTitleKey('画画'), 'a note for the day in brackets is still the same 固定日程');
+  assert.notEqual(fixedTitleKey('Cutto 会议 + 会议纪要'), fixedTitleKey('Cutto'));
 });
 
 test('the 要务 inside a 固定日程 leave the plan: no row of their own, not a candidate', () => {
