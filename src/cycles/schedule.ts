@@ -235,7 +235,8 @@ export function normalizeSchedule(
 
 /** A 固定日程 title as compared: case and spacing do not make a new one. */
 export function fixedTitleKey(title: string): string {
-  return title.trim().toLowerCase().replace(/\s+/g, ' ');
+  // A note added for one day — 「画画（补今天的，多画半小时）」 — is still 画画.
+  return title.replace(/\s*[（(][^（）()]*[）)]\s*$/, '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 /** The model's reply, parsed; null when it holds no JSON object. */
