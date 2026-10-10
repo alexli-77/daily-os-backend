@@ -635,12 +635,15 @@ Alpha 版本刻意保持 local-first：数据源连接器、个人记忆、token
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。
+AGPL-3.0-only，见 [LICENSE](LICENSE)。
 
-此前 `package.json` 里写了 `"license": "MIT"` 但仓库里没有许可证文本，这两件事不
-等价：**公开但没有 LICENSE 文件 = 保留所有权利**，别人既不能合法使用也不能合法贡献。
-补上这个文件就是为了把它坐实。
+`v0.2.0` 及之前的版本以 MIT 发布，那些版本仍是 MIT。`v0.2.0` 之后的代码采用
+AGPL-3.0：可以自由使用、修改和自托管；但如果分发修改版，或把修改版作为网络服务
+提供，必须以同一许可证公开你的修改。
 
-原生客户端是独立仓库，同样 MIT：
+如需不受 AGPL 约束的商业授权，请开 issue 或联系 [@alexli-77](https://github.com/alexli-77)。贡献代码前请阅读
+[CONTRIBUTING.md](CONTRIBUTING.md) 中的条款。
+
+原生客户端是独立仓库，仍为 MIT：
 [daily-os-macos](https://github.com/alexli-77/daily-os-macos) 与
 [daily-os-ios](https://github.com/alexli-77/daily-os-ios)。

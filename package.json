@@ -35,7 +35,7 @@
     "restore": "bash scripts/restore.sh",
     "regression:test": "tsx scripts/regression-tests.ts",
     "verify:supabase": "node scripts/verify-supabase-schema.mjs",
-    "license:check": "license-checker --production --excludePrivatePackages --onlyAllow \"MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;BSD;Unlicense;CC0-1.0;Python-2.0\"",
+    "license:check": "license-checker --production --excludePrivatePackages --excludePackages \"daily-os-feishu@$npm_package_version\" --onlyAllow \"MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;BSD;Unlicense;CC0-1.0;Python-2.0\"",
     "alpha:smoke": "bash scripts/alpha-smoke.sh",
     "alpha:smoke:ci": "DAILY_OS_SKIP_AGENT_SMOKE=1 bash scripts/alpha-smoke.sh",
     "verify": "npm run typecheck && npm run build && npm run privacy:scan && npm run license:check && npm run regression:test"
@@ -49,7 +49,7 @@
     "vault",
     "personal-agent"
   ],
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=22"
   },

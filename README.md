@@ -787,13 +787,17 @@ folders that are not committed to the repository.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+AGPL-3.0-only. See [LICENSE](LICENSE).
 
-This repository had declared `"license": "MIT"` in `package.json` without
-carrying the licence text, which is not the same thing: a public repository
-with no LICENSE file is all rights reserved, so nobody could legally use it or
-contribute to it. The file settles that.
+Releases up to and including `v0.2.0` were published under MIT, and those
+copies stay MIT. Everything after `v0.2.0` is AGPL-3.0: you can use, modify
+and self-host it, but if you distribute a modified version or run one as a
+network service, you must publish your changes under the same licence.
 
-The native clients are separate, also MIT:
+For a commercial licence without the AGPL obligations, open an issue or
+contact [@alexli-77](https://github.com/alexli-77). Contributions require agreeing to the terms in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+The native clients are separate repositories and remain MIT:
 [daily-os-macos](https://github.com/alexli-77/daily-os-macos) and
 [daily-os-ios](https://github.com/alexli-77/daily-os-ios).
