@@ -9,6 +9,7 @@ import { readDailyPlanOutput } from '../storage/memory.js';
 import { collectProgressCandidates, hasConfirmedProgress, type ProgressCandidate } from '../progress/capture.js';
 import { renderProgressConfirmationCard } from '../progress/card.js';
 import { sendFeishuCard } from '../connectors/lark-cli.js';
+import { notificationAllowed } from '../notifications/policy.js';
 import { runBackgroundSuggestions } from './background-suggestions.js';
 import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
 
@@ -186,7 +187,7 @@ async function tick(configProvider: ConfigProvider, state: SchedulerRuntimeState
     }
   }
 
-  if (config.progress.enabled && isProgressReminderDue(config, time)) {
+  if (config.progress.enabled && notificationAllowed(config, 'progress_reminder', 'feishu') && isProgressReminderDue(config, time)) {
     const key = `${date}:progress_reminder:${config.progress.no_progress_reminder_time}`;
     if (!state.fired.has(key) && !isRetryBlocked(state, key, now)) {
       if (claimFired(state, key)) {

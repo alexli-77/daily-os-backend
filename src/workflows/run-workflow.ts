@@ -20,6 +20,7 @@ import {
   type WorkflowRunTrigger,
 } from './run-ledger.js';
 import { runManager } from '../service/run-manager.js';
+import { notificationAllowed } from '../notifications/policy.js';
 
 export interface WorkflowRunResult {
   text: string;
@@ -47,7 +48,7 @@ export async function runWorkflowDetailed(
 ): Promise<WorkflowRunResult> {
   const date = options.date ?? todayInTimezone(config);
   const sendRequested = options.send ?? true;
-  const sendEnabled = sendRequested && config.output.feishu.enabled;
+  const sendEnabled = sendRequested && config.output.feishu.enabled && !scheduledSendMuted(config, workflow, options.trigger);
   let run = startWorkflowRun(config, {
     workflow,
     date,
@@ -168,6 +169,17 @@ export async function runWorkflowDetailed(
   } finally {
     runManager.unregister(run.id);
   }
+}
+
+/**
+ * LEO-339 — a scheduled run's message is a notification, so the notification
+ * settings decide whether it goes out. A run the user started by hand sends
+ * because they asked for it: muting the 21:30 review must not also make a 复盘
+ * command typed into Feishu go unanswered.
+ */
+function scheduledSendMuted(config: AppConfig, workflow: WorkflowName, trigger: WorkflowRunTrigger | undefined): boolean {
+  if (trigger !== 'scheduler' || workflow === 'cycle_schedule') return false;
+  return !notificationAllowed(config, workflow, 'feishu');
 }
 
 /**

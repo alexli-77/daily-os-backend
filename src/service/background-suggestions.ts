@@ -9,6 +9,7 @@ import {
   type ChatContextSuggestion,
 } from '../chat/context-analysis.js';
 import { sendFeishuMessage } from '../connectors/lark-cli.js';
+import { notificationAllowed } from '../notifications/policy.js';
 import { appendDailyMemory, appendFeedbackLog } from '../storage/memory.js';
 import { todayInTimezone } from '../utils/date.js';
 
@@ -75,6 +76,7 @@ export async function runBackgroundSuggestions(config: AppConfig, now = new Date
 
     const shouldSend =
       config.background_suggestions.send_to_feishu &&
+      notificationAllowed(config, 'background_suggestions', 'feishu') &&
       suggestions.length > 0 &&
       (!config.background_suggestions.send_on_change_only || signature !== state.last_signature);
     if (shouldSend) {

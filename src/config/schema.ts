@@ -2,6 +2,12 @@ import { z } from 'zod';
 
 const enabled = z.object({ enabled: z.boolean().default(false) });
 
+// One row of the notification settings. `feishu` is the only channel so far;
+// the in-app inbox joins it as a sibling boolean.
+const notificationSource = z
+  .object({ enabled: z.boolean().default(true), feishu: z.boolean().default(true) })
+  .default({});
+
 const skillProvider = z.enum(['auto', 'codex', 'claude']);
 const skillEffect = z.enum(['read', 'draft', 'feishu_write', 'workspace_write']);
 
@@ -320,6 +326,27 @@ export const AppConfigSchema = z.object({
       summary_style: z.enum(['style1', 'style2']).default('style1'),
     }),
   }),
+  // LEO-339: what the service may push on its own, laid out like the macOS
+  // notification settings — a master switch, then per source, then per
+  // channel. It governs unrequested pushes only: a scheduled run, a reminder.
+  // Anything the user triggered by hand (a 复盘 command in Feishu, a console
+  // run with "send" ticked) is an answer, not a notification, and still sends.
+  // `output.feishu` stays the transport; turning it off still silences Feishu
+  // for everything, as it did before this existed.
+  notifications: z
+    .object({
+      enabled: z.boolean().default(true),
+      sources: z
+        .object({
+          daily_plan: notificationSource,
+          daily_review: notificationSource,
+          weekly_review: notificationSource,
+          progress_reminder: notificationSource,
+          background_suggestions: notificationSource,
+        })
+        .default({}),
+    })
+    .default({}),
   feedback: z
     .object({
       feishu: enabled.extend({
