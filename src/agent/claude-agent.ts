@@ -40,9 +40,43 @@ export async function runClaudeAgent(input: AgentInput): Promise<string> {
         describeAgentTimeout('claude', model, prompt.length, Date.now() - startedAt, idle ? idleTimeoutMs : timeoutMs, idle ? 'idle' : 'total'),
       );
     }
-    throw new Error(`Claude Code failed: ${(result.stderr || result.stdout).slice(0, 3000)}`);
+    throw new Error(`Claude Code failed: ${describeClaudeFailure(result.stdout, result.stderr)}`);
   }
   return normalizeAgentOutput(extractStreamJsonText(result.stdout));
+}
+
+/**
+ * The reason a `claude -p` run failed, in a form that fits the run ledger.
+ *
+ * The stream opens with SessionStart hook events, so the first 500 characters
+ * of stdout — all the ledger keeps — were hook noise, and an expired login
+ * failed two days of plans without anyone seeing why. The terminal
+ * `type:"result"` event carries the actual message; prefer it. An expired or
+ * missing login gets a plain fix, since the user has to do that one by hand.
+ */
+export function describeClaudeFailure(stdout: string, stderr: string): string {
+  let reason = '';
+  let authFailed = false;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    let event: { type?: string; is_error?: boolean; result?: unknown; error?: unknown; api_error_status?: unknown };
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (event.type === 'assistant' && event.error === 'authentication_failed') authFailed = true;
+    if (event.type === 'result' && event.is_error && typeof event.result === 'string') {
+      reason = event.result.trim();
+      if (event.api_error_status === 401) authFailed = true;
+    }
+  }
+  if (authFailed) {
+    return `Claude Code 登录过期了，在终端运行 claude 再输入 /login 重新登录。（${reason || 'authentication_failed'}）`;
+  }
+  if (reason) return reason.slice(0, 3000);
+  return (stderr.trim() || stdout).slice(0, 3000);
 }
 
 /**

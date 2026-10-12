@@ -1608,10 +1608,12 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   const config = loadConfig(options.configPath);
   const today = todayInTimezone(config);
   const snapshot = buildTodayPlanSnapshot(config);
-  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, carriedFrom: {}, today };
+  const lastRun = latestDailyPlanRun(config, today);
+  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, carriedFrom: {}, today, ...(lastRun ? { lastRun } : {}) };
   return {
     ok: true,
     plan: { date: snapshot.date, workflow: 'daily_plan', stale: false, generated_at: snapshot.generated_at },
+    ...(lastRun ? { lastRun } : {}),
     todos: snapshot.todos,
     feedback: snapshot.feedback,
     notes: snapshot.notes,
@@ -1622,6 +1624,18 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
     staleCaptures: staleCaptures(config, today),
     today,
   };
+}
+
+/**
+ * Today's most recent `daily_plan` run, so the Today page can say a run failed
+ * instead of showing "正在生成" until its ten-minute watch gives up. Without it
+ * an expired CLI login failed every scheduled run for two days and the page
+ * only ever said there was no plan yet.
+ */
+function latestDailyPlanRun(config: AppConfig, today: string): { status: string; startedAt: string; error?: string } | null {
+  const run = listRecentWorkflowRuns(config, 60).find((record) => record.workflow === 'daily_plan' && record.date === today);
+  if (!run) return null;
+  return { status: run.status, startedAt: run.started_at, ...(run.error ? { error: run.error } : {}) };
 }
 
 /**
