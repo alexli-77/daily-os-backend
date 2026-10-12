@@ -173,6 +173,9 @@ try {
     'scripts/tests/plan-row-place.test.ts',
     // LEO-332 a row's text edited for the day; meals as rows on today's sheet.
     'scripts/tests/plan-row-edit.test.ts',
+    // LEO-339 notification settings: master → source → channel; scheduled
+    // sends obey them, a reply to a command does not.
+    'scripts/tests/notifications.test.ts',
     // Shipped templates and prompts found from a working directory that is not
     // the checkout — the split the bundled Mac app introduced.
     'scripts/tests/install-root.test.ts',

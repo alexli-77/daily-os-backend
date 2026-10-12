@@ -154,6 +154,18 @@ output:
     chat_id_env: "FEISHU_CHAT_ID"
     send_mode: "markdown" # markdown | text
 
+# What the service may push on its own. Scheduled runs and reminders obey this;
+# replies to something you asked for (a 复盘 command, a console run) always send.
+# Omit the block to keep everything on.
+notifications:
+  enabled: true # master switch
+  sources:
+    daily_plan: { enabled: true, feishu: true }
+    daily_review: { enabled: true, feishu: true }
+    weekly_review: { enabled: true, feishu: true }
+    progress_reminder: { enabled: true, feishu: true }
+    background_suggestions: { enabled: true, feishu: true }
+
 feedback:
   feishu:
     enabled: false
