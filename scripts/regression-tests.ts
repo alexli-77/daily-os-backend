@@ -200,6 +200,7 @@ try {
     'scripts/tests/routines.test.ts',
     'scripts/tests/fixed-schedule.test.ts',
     'scripts/tests/claude-failure.test.ts',
+    'scripts/tests/chat-claude-agent.test.ts',
     'scripts/tests/today-writeback.test.ts',
     // cycle_context: local 20_CYCLES + 10_OKR replace life-review-os reading the
     // Feishu weekly table — 要务 markdown parses back to per-OKR rows, and the
