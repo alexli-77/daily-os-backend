@@ -79,7 +79,13 @@ export interface DailyPlanTodoPlan {
  * candidateId }], note? }`. Returns null when the content is not the expected
  * JSON so callers can fall back to the legacy long-form extraction path.
  */
-export function parseDailyPlanTodoPlan(content: string): DailyPlanTodoPlan | null {
+/**
+ * `allowEmpty`: a well-formed plan with no rows is still a plan. A day whose
+ * 要务 all sit in 固定日程 is written as `{"todos":[]}`, and that is something a
+ * capture can be appended to. Off by default: for the card and the renderers,
+ * no rows means nothing to show.
+ */
+export function parseDailyPlanTodoPlan(content: string, options: { allowEmpty?: boolean } = {}): DailyPlanTodoPlan | null {
   const json = extractJsonObject(content);
   if (!json) return null;
   let parsed: unknown;
@@ -106,7 +112,7 @@ export function parseDailyPlanTodoPlan(content: string): DailyPlanTodoPlan | nul
     .filter((todo): todo is DailyPlanTodo => Boolean(todo))
     .sort((left, right) => left.rank - right.rank)
     .map((todo, index) => ({ ...todo, rank: index + 1 }));
-  if (todos.length === 0) return null;
+  if (todos.length === 0 && !options.allowEmpty) return null;
   const note = typeof (parsed as { note?: unknown }).note === 'string' ? (parsed as { note: string }).note.trim() : '';
   return { todos, ...(note ? { note } : {}) };
 }

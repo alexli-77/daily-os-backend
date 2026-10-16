@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import type { AppConfig } from '../config/schema.js';
 import { parseWorkflowRevisionItems, type WorkflowRevisionItemType } from '../interaction/workflow-revision.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
-import { readDailyPlanOutput, writeLatestWorkflowOutput } from '../storage/memory.js';
+import { readDailyPlanOutput, rewriteDailyPlanOutput } from '../storage/memory.js';
 import { dayInTimezone, todayInTimezone } from '../utils/date.js';
 import { parseDailyPlanTodoPlan } from '../workflows/summary.js';
 import { recordTodoFeedback } from './feedback.js';
@@ -411,7 +411,7 @@ export function addTodoInboxItemToTodayPlan(
   if (!match || match.status !== 'open') return null;
   const output = readDailyPlanOutput(config, date);
   if (!output) return null;
-  const plan = parseDailyPlanTodoPlan(output.content);
+  const plan = parseDailyPlanTodoPlan(output.content, { allowEmpty: true });
   if (!plan) return null;
   const candidateId = `todo_inbox:${id}`;
   if (plan.todos.some((todo) => todo.candidateId === candidateId)) return null;
@@ -420,12 +420,7 @@ export function addTodoInboxItemToTodayPlan(
     ...plan.todos,
     { rank, text: match.text, candidateId, ...(minutes ? { minutes } : {}) },
   ];
-  writeLatestWorkflowOutput(
-    config,
-    'daily_plan',
-    date,
-    JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) }),
-  );
+  rewriteDailyPlanOutput(config, date, JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) }));
   return { text: match.text, rank };
 }
 
