@@ -97,6 +97,28 @@ export function writeWorkflowDetailCache(config: AppConfig, workflow: WorkflowNa
   return payload;
 }
 
+/**
+ * Replace the content of `date`'s plan where it is read from: the newest cached
+ * `daily_plan` for that date, and the latest-output pointer while that still
+ * holds it.
+ *
+ * Writing only the pointer lost every row added during the day as soon as
+ * another workflow finished: the evening review takes the pointer, the reader
+ * falls back to the cache, and the cache still held the morning's plan.
+ * `generated_at` is kept, so the plan still says when it was generated.
+ */
+export function rewriteDailyPlanOutput(config: AppConfig, date: string, content: string): void {
+  const latest = readLatestWorkflowOutput(config);
+  if (latest && latest.workflow === 'daily_plan' && latest.date === date) {
+    writeFileAtomic(latestWorkflowOutputPath(config), JSON.stringify({ ...latest, content: content.trim() }, null, 2));
+  }
+  const cached = listCachedDailyPlanOutputs(config, date)[0];
+  if (cached) {
+    fs.writeFileSync(path.join(workflowDetailCacheDir(config), `${cached.id}.json`), JSON.stringify({ ...cached, content: content.trim() }, null, 2), 'utf8');
+  }
+  emitLocalChange('today_plan');
+}
+
 export function readLatestWorkflowOutput(config: AppConfig): LatestWorkflowOutput | null {
   const filePath = latestWorkflowOutputPath(config);
   if (!fs.existsSync(filePath)) return null;
