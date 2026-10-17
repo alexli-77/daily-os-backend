@@ -36,6 +36,11 @@ function test(name: string, fn: () => void): void {
   }
 }
 
+function addMinutes(clock: string, minutes: number): string {
+  const total = Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5)) + minutes;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 function config(): AppConfig {
   const parsed = yaml.load(fs.readFileSync(path.join(REPO_ROOT, 'config', 'config.example.yaml'), 'utf8')) as Record<string, any>;
   parsed.memory.repository_path = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-os-routine-'));
@@ -229,6 +234,35 @@ test('moving a 时段格子 for one day keeps it a slot of the same category', (
   const moved = day.blocks.find((block) => block.id === slot.id)!;
   assert.deepEqual([moved.start, moved.end, moved.title, moved.kind, moved.category], ['14:00', '17:00', '专注', 'slot', 'work']);
   assert.equal(routineForDate(cfg, '2026-10-09')!.blocks.find((block) => block.id === slot.id)!.start, '13:00', 'other days keep the template');
+});
+
+test('a block a 临时安排 cut into pieces can still be removed or moved for the day', () => {
+  const cfg = config();
+  writeRoutines(cfg, { periods: [PERIOD] });
+  const date = '2026-10-08';
+  const block = routineForDate(cfg, date)!.blocks.find((candidate) => candidate.title === '专注')!;
+  // Two 临时安排 inside it: the piece left in between is `<id>-a-b`.
+  changeDayOverride(cfg, date, { type: 'clear', id: 'x-1', start: block.start, end: addMinutes(block.start, 30), label: '一' });
+  let day = changeDayOverride(cfg, date, { type: 'clear', id: 'x-2', start: addMinutes(block.end, -30), end: block.end, label: '二' });
+  const piece = day.blocks.find((candidate) => candidate.title === '专注')!;
+  assert.notEqual(piece.id, block.id, 'what is on screen is a piece');
+
+  day = changeDayOverride(cfg, date, { type: 'hide', blockId: piece.id });
+  assert.ok(!day.blocks.some((candidate) => candidate.title === '专注'), '去掉 a piece takes the block off the day');
+  assert.deepEqual(readRoutines(cfg).dayOverrides[date]!.hidden, [block.id], 'stored as the block, not the piece');
+
+  day = changeDayOverride(cfg, date, { type: 'reset', blockId: piece.id });
+  assert.ok(day.blocks.some((candidate) => candidate.title === '专注'), 'and 恢复 on the piece brings it back');
+});
+
+test('an override saved with a piece id still applies to its block', () => {
+  const cfg = config();
+  writeRoutines(cfg, { periods: [PERIOD] });
+  const date = '2026-10-08';
+  const block = routineForDate(cfg, date)!.blocks.find((candidate) => candidate.title === '专注')!;
+  const routines = readRoutines(cfg);
+  writeRoutines(cfg, { ...routines, dayOverrides: { [date]: { hidden: [`${block.id}-a-b`], edits: [], clears: [] } } });
+  assert.ok(!routineForDate(cfg, date)!.blocks.some((candidate) => candidate.title === '专注'));
 });
 
 test('a plan run for today is told what time it is; another day\'s is not', () => {

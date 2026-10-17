@@ -302,6 +302,11 @@ export function changeDayOverride(config: AppConfig, date: string, change: DayOv
   if (!resolveRoutine(routines, date)) throw new Error(`${date} 不在任何作息时期里。`);
   const current = routines.dayOverrides[date] ?? { hidden: [], edits: [], clears: [] };
   const next: DayOverride = { hidden: [...current.hidden], edits: [...current.edits], clears: [...current.clears] };
+  // A block a 临时安排 split shows as `out-a` / `out-b`; a change to a piece is
+  // a change to the block it was cut from.
+  const blockIds = templateBlocks(routines, date).map((block) => block.id);
+  if (change.type === 'edit') change = { ...change, block: { ...change.block, id: pieceRoot(change.block.id, blockIds) } };
+  if (change.type === 'hide' || change.type === 'reset') change = { ...change, blockId: pieceRoot(change.blockId, blockIds) };
   if (change.type === 'edit') {
     // An edit moves or stretches the block for the day; what the block *is*
     // (a slot and its category, a fixed block's note) stays the template's.
@@ -347,8 +352,12 @@ function templateBlocks(routines: RoutineFile, date: string): RoutineBlock[] {
  */
 export function applyOverride(blocks: RoutineBlock[], override: DayOverride | undefined): RoutineBlock[] {
   if (!override) return blocks;
-  const edits = new Map(override.edits.map((block) => [block.id, block]));
-  let result = blocks.filter((block) => !override.hidden.includes(block.id)).map((block) => edits.get(block.id) ?? block);
+  const ids = blocks.map((block) => block.id);
+  // Keyed by the template block. Overrides saved before `changeDayOverride`
+  // resolved pieces carry a piece id (`out-a-b`); read those as their block.
+  const hidden = new Set(override.hidden.map((id) => pieceRoot(id, ids)));
+  const edits = new Map(override.edits.map((block) => [pieceRoot(block.id, ids), { ...block, id: pieceRoot(block.id, ids) }]));
+  let result = blocks.filter((block) => !hidden.has(block.id)).map((block) => edits.get(block.id) ?? block);
   for (const clear of override.clears) {
     result = result.flatMap((block): RoutineBlock[] => {
       if (block.end <= clear.start || block.start >= clear.end) return [block];
@@ -359,6 +368,21 @@ export function applyOverride(blocks: RoutineBlock[], override: DayOverride | un
     });
   }
   return result.sort((left, right) => left.start.localeCompare(right.start));
+}
+
+/**
+ * The template block a piece id was cut from: `out-a-b` → `out` when `out` is a
+ * block of the day. An id that is a block of its own is left alone, so a block
+ * really called `walk-a` is never mistaken for a piece of `walk`.
+ */
+export function pieceRoot(id: string, blockIds: string[]): string {
+  if (blockIds.includes(id)) return id;
+  let root = id;
+  while (/-[ab]$/.test(root)) {
+    root = root.slice(0, -2);
+    if (blockIds.includes(root)) return root;
+  }
+  return id;
 }
 
 function normalizeOverride(raw: Record<string, unknown>): DayOverride {

@@ -48,11 +48,13 @@ try {
 
   const item = captureTodoItems(config, '给设计师回邮件', { source: 'console-adhoc' }).items![0]!;
   assert.ok(onSheet(item.id), 'added to an empty plan, without regenerating');
-  const generatedAt = buildTodayPlanSnapshot(config)!.generated_at;
 
   // The evening review takes the pointer; the row is still there.
   writeLatestWorkflowOutput(config, 'daily_review', today, '{"reconciliation":[]}');
   assert.ok(onSheet(item.id), 'still on the sheet after another workflow wrote the pointer');
+  // Read here, from the cache: a run stamps the pointer and the cache a
+  // millisecond or so apart, so comparing across the switch is noise.
+  const generatedAt = buildTodayPlanSnapshot(config)!.generated_at;
 
   // And one added after that lands in the cache the sheet now reads.
   const late = captureTodoItems(config, '晚上补一条', { source: 'console-adhoc' }).items![0]!;
