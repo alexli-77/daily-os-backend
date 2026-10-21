@@ -54,6 +54,9 @@ import {
 import { fetchAgenda } from '../calendar/agenda.js';
 import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
+import { idFragment } from '../todo/scorer.js';
+import { currentCycle } from '../workflows/weekly-priorities.js';
+import { adhocSessionId, formatUnplanned, markSuggested, promoteToPriorities, shouldSuggestPromote, unplannedForCycle } from '../cycles/unplanned.js';
 import { fixedRowFor, scheduleDayView } from '../cycles/fixed-schedule.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
@@ -539,6 +542,8 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // network-free like /api/cycles/state; the 60s sync loop is what fills it.
     if (request.method === 'GET' && url.pathname === '/api/team/today') return sendJson(response, await readTeamTodayPage(options));
     if (request.method === 'POST' && url.pathname === '/api/cycles/section') return sendJson(response, await saveCycleSection(options, await readJson(request)));
+    if (request.method === 'GET' && url.pathname === '/api/cycles/unplanned') return sendJson(response, readCycleUnplanned(options, url.searchParams.get('id') || ''));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/promote') return sendJson(response, promoteCycleItem(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/cycles/schedule') return sendJson(response, await readCycleSchedule(options, url.searchParams.get('id') || ''));
     if (request.method === 'POST' && url.pathname === '/api/cycles/schedule') return sendJson(response, await saveCycleSchedule(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/schedule/generate') return sendJson(response, await startCycleSchedule(options, await readJson(request)));
@@ -1874,9 +1879,6 @@ function adhocClearId(captureId: string): string {
   return `x-${captureId.slice(-6)}`;
 }
 
-function adhocSessionId(captureId: string): string {
-  return `a-${captureId.slice(-8).replace(/[^a-z0-9]/g, '')}`;
-}
 
 function clockPlus(clock: string, minutes: number): string {
   const total = Math.min(24 * 60, Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5)) + minutes);
@@ -1989,7 +1991,14 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
     console.warn(`[adhoc] routine not adjusted: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const itemKey = typeof request.itemKey === 'string' && /^[0-9a-f]{8}$/.test(request.itemKey) ? request.itemKey : '';
+  let itemKey = typeof request.itemKey === 'string' && /^[0-9a-f]{8}$/.test(request.itemKey) ? request.itemKey : '';
+  // 算进本期要务: filed under the cycle's 要务 first, so the row is that 要务's.
+  const cycle = currentCycle(config, date);
+  if (!itemKey && request.promote === true && cycle) {
+    const promoted = promoteToPriorities(config, cycle.id, title);
+    itemKey = idFragment(title.replace(/\s+/g, ' ').trim());
+    notes.push(promoted.added ? '加进了本期要务' : '本期要务里已经有这一条');
+  }
   const session = itemKey ? addAdhocSession(config, date, itemKey, { start, minutes, step: title }, { extra: request.extra === true, id: adhocSessionId(item.id) }) : null;
   if (session) notes.push(session.text);
 
@@ -2007,9 +2016,24 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
   }
   if (displaced.length > 0) notes.push(`挤掉的 ${displaced.length} 条已处理`);
 
+  // A 计划外 thing on its second day, or two hours in: ask once whether it is
+  // really one of this cycle's 要务.
+  let suggestPromote: Record<string, unknown> | undefined;
+  if (!itemKey && cycle) {
+    try {
+      const group = unplannedForCycle(config, cycle, date).find((entry) => entry.captureIds.includes(item.id));
+      if (group && shouldSuggestPromote(group) && markSuggested(cycle.id, group.key)) {
+        suggestPromote = { cycleId: cycle.id, text: group.text, days: group.days.length, minutes: group.minutes };
+      }
+    } catch (error) {
+      console.warn(`[adhoc] 计划外 check skipped: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   return {
     ok: true,
     candidateId,
+    ...(suggestPromote ? { suggestPromote } : {}),
     text: notes.join('；'),
     undo: { captureId: item.id, ...(cleared ? { clearId } : {}), ...(session ? { sessionId: session.sessionId } : {}), displaced },
   };
@@ -2092,6 +2116,28 @@ function clockInTimezone(config: AppConfig): string {
  * kept so the page can say why nothing changed.
  */
 const scheduleRuns = new Map<string, { startedAt: string; error?: string }>();
+
+/** The cycle's 计划外 so far, and the one-line summary the retro and 总结 use. */
+function readCycleUnplanned(options: UiServerOptions, id: string): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const doc = readCycleOrThrow(config, id.trim());
+  const items = unplannedForCycle(config, doc, todayInTimezone(config));
+  return { ok: true, id: doc.id, items, summary: formatUnplanned(items) };
+}
+
+/** 加进要务: file a line under a cycle's 要务 (this one or the next). */
+function promoteCycleItem(options: UiServerOptions, body: unknown): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const request = readRecord(body);
+  const doc = readCycleOrThrow(config, String(request.id || '').trim());
+  const result = promoteToPriorities(config, doc.id, String(request.text || ''));
+  const label = doc.cycle || doc.id;
+  return { ok: true, added: result.added, text: result.added ? `加进了 ${label} 的要务` : `${label} 的要务里已经有这一条` };
+}
 
 async function readCycleSchedule(options: UiServerOptions, id: string): Promise<Record<string, unknown>> {
   const env = readEnvFile(options.envPath);
