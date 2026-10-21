@@ -25,6 +25,7 @@ import {
 } from '../../src/cycles/unplanned.js';
 import { recordTodoFeedback } from '../../src/todo/feedback.js';
 import { captureTodoItems, updateTodoInboxItemById } from '../../src/todo/inbox.js';
+import { writeRoutines } from '../../src/user/routine.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -149,6 +150,27 @@ test('加进要务 files it under 计划外新增 and it leaves the 计划外 li
   assert.ok(content.startsWith(PRIORITIES), 'the 要务 above are untouched');
   assert.ok(cycleScheduleItems(readCycle(config, id)!).some((item) => unplannedKey(item.text) === unplannedKey('迭代 Daily OS')), 'a 要务 the schedule can use');
   assert.deepEqual(unplannedForCycle(config, readCycle(config, id)!, today), []);
+});
+
+test('written down twice on one day is one stretch of time', () => {
+  const { config, id, today } = setup();
+  touch(config, capture(config, 'skill透出'), today, 'update', 180);
+  touch(config, capture(config, 'skill透出'), today, 'update', 120);
+  const [item] = unplannedForCycle(config, readCycle(config, id)!, today);
+  assert.deepEqual([item!.days.length, item!.minutes, item!.captureIds.length], [1, 180, 2]);
+});
+
+test('a block of the 作息 written down as a to-do is not 计划外', () => {
+  const { config, id, today } = setup();
+  writeRoutines(config, { periods: [{
+    name: '这段时间', from: addDays(today, -30), to: addDays(today, 30),
+    dayTypes: [{ label: '每天', weekdays: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'], modes: [{ label: '一种', blocks: [
+      { id: 'english', start: '07:00', end: '08:00', title: '英语口语', kind: 'slot' },
+    ] }] }],
+  }] } as never);
+  touch(config, capture(config, '英语口语'), today, 'update', 60);
+  touch(config, capture(config, '见朋友'), today, 'update', 60);
+  assert.deepEqual(unplannedForCycle(config, readCycle(config, id)!, today).map((item) => item.text), ['见朋友']);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

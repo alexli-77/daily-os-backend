@@ -14,12 +14,15 @@
  * A capture tied to a 要务 is not 计划外: added from Today with a 要务 picked
  * (an ad-hoc session carries its id), or worded as one of the cycle's 要务 —
  * which is also what 加进要务 does, so a promoted item leaves this list.
+ * Nor is one worded as a block of the 作息 (英语口语 written down as a to-do):
+ * that time was planned, by the routine.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { listTodoFeedback } from '../todo/feedback.js';
 import { listTodoInboxItems } from '../todo/inbox.js';
+import { readRoutines } from '../user/routine.js';
 import { readCycle, writeSection, type CycleDoc } from './file.js';
 import { cycleDays, cycleScheduleItems, readSchedule } from './schedule.js';
 
@@ -62,6 +65,7 @@ export function unplannedForCycle(config: AppConfig, doc: CycleDoc, until: strin
   );
   const isPriority = (key: string): boolean =>
     priorityKeys.some((priority) => priority === key || (key.length >= 4 && priority.includes(key)));
+  const routineKeys = new Set(routineTitles(config, [...days]).map(unplannedKey).filter(Boolean));
 
   // Per capture, per day: the last event wins, and the last estimate given.
   const byCapture = new Map<string, Map<string, { event: string; minutes?: number; done: boolean }>>();
@@ -79,11 +83,12 @@ export function unplannedForCycle(config: AppConfig, doc: CycleDoc, until: strin
   }
 
   const groups = new Map<string, UnplannedItem>();
+  const dayMinutes = new Map<string, Map<string, number>>();
   for (const item of listTodoInboxItems(config)) {
     if (item.status === 'deleted') continue;
     if (linkedSessions.has(adhocSessionId(item.id))) continue;
     const key = unplannedKey(item.text);
-    if (!key || isPriority(key)) continue;
+    if (!key || isPriority(key) || routineKeys.has(key)) continue;
 
     const perDay = byCapture.get(item.id) ?? new Map();
     const created = dateIn(config.user.timezone, item.created_at);
@@ -92,11 +97,16 @@ export function unplannedForCycle(config: AppConfig, doc: CycleDoc, until: strin
     if (onDays.length === 0) continue;
 
     const group = groups.get(key) ?? { key, text: item.text, days: [], minutes: null, done: false, captureIds: [] };
+    // The same thing written down twice on one day is one stretch of time, not
+    // two: per day the longest estimate counts.
+    const perDayMinutes = dayMinutes.get(key) ?? new Map<string, number>();
     for (const [day, state] of onDays) {
       if (!group.days.includes(day)) group.days.push(day);
-      if (state.minutes && state.minutes > 0) group.minutes = (group.minutes ?? 0) + state.minutes;
+      if (state.minutes && state.minutes > 0) perDayMinutes.set(day, Math.max(perDayMinutes.get(day) ?? 0, state.minutes));
       if (state.done) group.done = true;
     }
+    dayMinutes.set(key, perDayMinutes);
+    group.minutes = perDayMinutes.size ? [...perDayMinutes.values()].reduce((sum, value) => sum + value, 0) : null;
     if (item.status === 'done') group.done = true;
     group.captureIds.push(item.id);
     group.text = item.text;
@@ -152,6 +162,19 @@ export function promoteToPriorities(config: AppConfig, cycleId: string, text: st
     lines.splice(end, 0, `- ${line}`);
   }
   return { added: true, doc: writeSection(config, cycleId, '要务', `${lines.join('\n')}\n`, 'user') };
+}
+
+/** Every block title of the 作息 periods covering these days, in any day type or mode. */
+function routineTitles(config: AppConfig, days: string[]): string[] {
+  try {
+    const first = days.reduce((min, day) => (day < min ? day : min), days[0] ?? '');
+    const last = days.reduce((max, day) => (day > max ? day : max), days[0] ?? '');
+    return readRoutines(config)
+      .periods.filter((period) => period.from <= last && first <= period.to)
+      .flatMap((period) => period.dayTypes.flatMap((type) => type.modes.flatMap((mode) => mode.blocks.map((block) => block.title))));
+  } catch {
+    return [];
+  }
 }
 
 const SUGGESTED_PATH = 'data/runtime/unplanned-suggested.json';
