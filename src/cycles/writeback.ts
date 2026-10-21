@@ -101,7 +101,7 @@ export function writeLocalCyclesFromRun(
       // so the log/UI can say "staged a draft" rather than "updated".
       status: wasDrafted ? 'drafted' : applied.status,
       chars: content.length,
-      reason: wasDrafted ? 'user-edited' : applied.skipped.find((entry) => entry.section === section)?.reason,
+      reason: wasDrafted ? (section === 'review' ? 'has-review' : 'user-edited') : applied.skipped.find((entry) => entry.section === section)?.reason,
       error: applied.error,
     });
   }
@@ -211,7 +211,7 @@ export function formatLocalCycleWriteback(result: LocalCycleWritebackResult): st
     if (write.status === 'failed') return `${write.section} → ${where}：写入失败（${write.error || '未知错误'}）`;
     if (write.status === 'skipped') return `${write.section} → ${where}：跳过（${write.reason || '无内容'}）`;
     if (write.status === 'unchanged') return `${write.section} → ${where}：无变化${write.reason === 'user-edited' ? '（你手动改过，未覆盖）' : ''}`;
-    if (write.status === 'drafted') return `${write.section} → ${where}：已生成新草稿待合入（你手动改过，没有覆盖）`;
+    if (write.status === 'drafted') return `${write.section} → ${where}：已生成新草稿待合入（${write.reason === 'has-review' ? '已经有总结了' : '你手动改过'}，没有覆盖）`;
     return `${write.section} → ${where}：已写入 ${write.chars} 字`;
   });
   return lines.join('\n');

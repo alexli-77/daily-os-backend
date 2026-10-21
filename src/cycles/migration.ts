@@ -521,7 +521,10 @@ export function applyCyclePlan(
   const patch: CyclePatch = { cycle: plan.label, mode: plan.mode, runId: plan.runId, sections: {} };
   for (const [section, content] of Object.entries(plan.sections) as Array<[CycleSection, string]>) {
     const stored = existing?.sections[section];
-    if (stored && stored.source === 'user' && stored.content !== normalizeContent(content)) {
+    // A 总结 that is already there is never replaced by a later run, whoever
+    // wrote it: a second 双周复盘 silently swapped one 总结 for another.
+    const kept = stored?.source === 'user' || (section === 'review' && Boolean(stored?.content.trim()));
+    if (stored && kept && stored.content !== normalizeContent(content)) {
       // Hand-edited and the plan wants something different: don't overwrite —
       // stage the new content as a pending draft to compare and merge. Skip if
       // the same draft is already staged, so a re-run does not restamp it.

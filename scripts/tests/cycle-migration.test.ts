@@ -235,14 +235,13 @@ test('a section the user has edited is staged as a draft, not overwritten', () =
 
   const plan = find(plans, 'self', '8.10-8.23');
   writeSection(config, plan.id, 'retro', '我后来手写重排过的 retro', 'user');
-  // The review is AI-owned, so it stays migratable; only the retro is frozen.
+  // An AI 总结 is not overwritten either: a 总结 already there is never replaced.
   writeSection(config, plan.id, 'review', '旧的 review', 'ai');
 
   const result = applyCyclePlan(config, plan, readCycle(config, plan.id), { dryRun: false });
-  // The hand-edited retro is now staged as a pending draft rather than skipped;
-  // the AI review is still overwritten.
-  assert.deepEqual(result.drafted, ['retro']);
-  assert.deepEqual(result.written, ['review']);
+  // Both are staged as pending drafts beside what is there.
+  assert.deepEqual(result.drafted, ['retro', 'review']);
+  assert.deepEqual(result.written, []);
   assert.deepEqual(result.skipped, []);
   const doc = readCycle(config, plan.id)!;
   // Body preserved, draft staged with the plan's new content.
@@ -250,7 +249,8 @@ test('a section the user has edited is staged as a draft, not overwritten', () =
   assert.ok(doc.sections.retro?.pendingDraft, 'retro carries a pending draft');
   assert.notEqual(doc.sections.retro?.pendingDraft?.content, '我后来手写重排过的 retro');
   assert.equal(doc.sections.retro?.pendingDraft?.source, 'user');
-  assert.match(doc.sections.review?.content || '', /最终版/);
+  assert.equal(doc.sections.review?.content, '旧的 review');
+  assert.match(doc.sections.review?.pendingDraft?.content || '', /最终版/);
 
   // Re-running does not restage the identical draft.
   const rerun = applyCyclePlan(config, plan, readCycle(config, plan.id), { dryRun: false });

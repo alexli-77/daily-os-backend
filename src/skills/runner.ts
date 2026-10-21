@@ -22,8 +22,9 @@ import { resolveOkrDir } from '../okr/biweekly-progress.js';
 import { isLifeReviewOsEntry, runLifeReviewOsSkill } from './life-review-os.js';
 import { formatLocalCycleWriteback, writeLocalCyclesFromRun, type LocalCycleWritebackResult } from '../cycles/writeback.js';
 import { recentLocalPriorities, recentLocalRetros, renderLocalPrioritiesBlock, renderLocalRetroBlock } from '../cycles/context.js';
-import { buildCycleContext, renderCycleContextBlock } from '../cycles/cycle-context.js';
+import { buildCycleContext, pickReviewAndTarget, renderCycleContextBlock } from '../cycles/cycle-context.js';
 import { bundledAsset } from '../utils/install-root.js';
+import { unplannedForCycle } from '../cycles/unplanned.js';
 
 type SkillEntry = AppConfig['skills']['registry'][number];
 type SkillProvider = SkillEntry['provider'];
@@ -46,6 +47,8 @@ export interface SkillRunInput {
   userText?: string;
   source: string;
   messageId: string;
+  /** 结束本期: the cycle being closed. Absent: the cycle before today's. */
+  reviewCycleId?: string;
 }
 
 export interface SkillRunResult {
@@ -114,7 +117,7 @@ export async function runConfiguredSkill(input: SkillRunInput): Promise<SkillRun
   // like plan/review. The run executes in-process, so cancel only writes the
   // ledger back to failed via onCancel.
   const label = `skill:${entry.id}:${mode}`;
-  const trigger: WorkflowRunTrigger = input.source.startsWith('web-chat')
+  const trigger: WorkflowRunTrigger = input.source.startsWith('web-chat') || input.source === 'cycle-close'
     ? 'ui'
     : input.source.startsWith('feishu')
       ? 'feishu_command'
@@ -160,6 +163,7 @@ async function runConfiguredSkillInner(
     userText: input.userText || '',
     source: input.source,
     messageId: input.messageId,
+    ...(input.reviewCycleId ? { reviewCycleId: input.reviewCycleId } : {}),
   });
   const inputPackPath = writeSkillInputPack(input.config, entry.id, mode, inputPack);
   const provider = resolveProvider(input.config, entry);
@@ -238,7 +242,7 @@ export function readLatestSkillRun(config: AppConfig, skillId: string, mode?: st
  */
 export async function buildSkillInputPack(
   config: AppConfig,
-  input: { skillId: string; mode: string; userText: string; source: string; messageId: string },
+  input: { skillId: string; mode: string; userText: string; source: string; messageId: string; reviewCycleId?: string },
 ): Promise<string> {
   const date = todayInTimezone(config);
   const memory = loadMemory(config);
@@ -258,7 +262,8 @@ export async function buildSkillInputPack(
   const localPrioritiesBlock = renderLocalPrioritiesBlock(recentLocalPriorities(config, date));
   // Structured OKR rows + previous/target cycle 要务/retro, from local md — the
   // local-first replacement for life-review-os reading the Feishu weekly table.
-  const cycleContextBlock = renderCycleContextBlock(buildCycleContext(config));
+  const cycleContextBlock = renderCycleContextBlock(buildCycleContext(config, { reviewId: input.reviewCycleId }));
+  const unplannedBlock = renderUnplannedBlock(config, input.reviewCycleId, date);
 
   return redactSensitive(
     [
@@ -301,6 +306,12 @@ export async function buildSkillInputPack(
       '## Cycle Context',
       '本地 20_CYCLES + 10_OKR 推导的结构化周期上下文（schema 1）：okrRows / 上期 reviewRows（按 O 分组的要务）+ reviewRetro / 本期 targetRows / reviewWeek / targetWeek。life-review-os 有它就用它、不再读飞书 weekly 表；没有则回退飞书。row 号与 okrRows 对齐（0=表头）。',
       cycleContextBlock || '(no local cycle context)',
+      '',
+      // Right under the cycle context, inside the ~20k chars the skill reads:
+      // what the reviewed cycle's days went to besides its 要务.
+      '## 计划外（系统统计）',
+      '被复盘那一期里，不属于要务的事（每天加的临时安排和随手记），按花的时间排。写 review 时把它们算进去：这些事吃掉了多少时间、挤掉了哪些要务。值得长期做的，在下期要务里写成一条；一次性的事不要写进要务。',
+      unplannedBlock || '(none)',
       '',
       // Same reason as the OKR chain above: life-review-os only reads the first
       // ~20k chars of this pack, and the full Linear dump under "Structured
@@ -794,6 +805,20 @@ function normalizeSkillOutput(text: string): string {
  * that wrote nothing is exactly the case worth surfacing, so a skipped or
  * failed write is reported as loudly as a successful one.
  */
+/** The reviewed cycle's 计划外, one line each. */
+function renderUnplannedBlock(config: AppConfig, reviewCycleId: string | undefined, today: string): string {
+  try {
+    const review = pickReviewAndTarget(config, reviewCycleId)?.review;
+    if (!review) return '';
+    return unplannedForCycle(config, review, today)
+      .map((item) => `- ${item.text}｜${item.days.length} 天${item.minutes ? `｜${item.minutes} 分钟` : ''}｜${item.done ? '做了' : '没标完成'}`)
+      .join('\n');
+  } catch (error) {
+    console.warn(`[skills] 计划外 not added to the pack: ${error instanceof Error ? error.message : String(error)}`);
+    return '';
+  }
+}
+
 function appendLocalCycleNote(output: string, result: LocalCycleWritebackResult): string {
   const note = formatLocalCycleWriteback(result).trim();
   if (!note) return output;

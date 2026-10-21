@@ -41,7 +41,7 @@ import { readOkrEditorState, writeOkrFile } from '../okr/editor.js';
 import { normalizeOkrMarkdown } from '../okr/normalize.js';
 import type { OkrLevel } from '../okr/editor.js';
 import { CYCLE_SECTIONS, cycleFilePath, cyclesDir, listCycles, parseCycleId, readCycle, writeCycle, writeSection } from '../cycles/file.js';
-import type { CycleSection } from '../cycles/file.js';
+import type { CycleDoc, CycleSection } from '../cycles/file.js';
 import {
   cycleDays,
   cycleScheduleItems,
@@ -542,6 +542,8 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // network-free like /api/cycles/state; the 60s sync loop is what fills it.
     if (request.method === 'GET' && url.pathname === '/api/team/today') return sendJson(response, await readTeamTodayPage(options));
     if (request.method === 'POST' && url.pathname === '/api/cycles/section') return sendJson(response, await saveCycleSection(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/close') return sendJson(response, await startCloseCycle(options, await readJson(request)));
+    if (request.method === 'GET' && url.pathname === '/api/cycles/close') return sendJson(response, readCloseCycle(url.searchParams.get('id') || ''));
     if (request.method === 'GET' && url.pathname === '/api/cycles/unplanned') return sendJson(response, readCycleUnplanned(options, url.searchParams.get('id') || ''));
     if (request.method === 'POST' && url.pathname === '/api/cycles/promote') return sendJson(response, promoteCycleItem(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/cycles/schedule') return sendJson(response, await readCycleSchedule(options, url.searchParams.get('id') || ''));
@@ -1855,11 +1857,14 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
     throw new Error(`周期 ${id} 的 frontmatter 无法解析（${cycle.frontmatterError}），写不进去。请先在文件里修好 YAML。`);
   }
 
+  const unplanned = formatUnplanned(unplannedForCycle(config, cycle, todayInTimezone(config)));
   const review = await generateCycleReview(config, 'weekly-review', {
     cycle: cycle.cycle || id,
     mode: cycle.mode || 'biweekly',
     priorities,
-    retro,
+    // The 计划外 ride with the retro: the skill reads the retro as what
+    // actually happened, and that is what these are.
+    retro: unplanned ? `${retro}\n\n【计划外（系统统计，不是用户写的）】${unplanned}` : retro,
   });
   const saved = save ? writeSection(config, id, 'review', review.text, 'ai') : null;
   return {
@@ -2116,6 +2121,63 @@ function clockInTimezone(config: AppConfig): string {
  * kept so the page can say why nothing changed.
  */
 const scheduleRuns = new Map<string, { startedAt: string; error?: string }>();
+
+/**
+ * 结束本期 — the end-of-cycle ritual, in one place.
+ *
+ * Runs the same 双周复盘 the chat used to, aimed at this cycle: it writes the
+ * 总结 (a draft beside the old one when there is one), drafts the next cycle's
+ * 要务 and moves the KR progress. The next cycle is created first when it does
+ * not exist yet, since that is where the 要务 go. Takes minutes, so it runs in
+ * the background and the page polls `GET /api/cycles/close`.
+ */
+const closeRuns = new Map<string, { startedAt: string; finishedAt?: string; error?: string; text?: string; nextId: string }>();
+
+async function startCloseCycle(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  await assertLocalCycleWriteTarget(config, request.owner ?? request.ownerId);
+  const doc = readCycleOrThrow(config, String(request.id || '').trim());
+  const running = closeRuns.get(doc.id);
+  if (running && !running.finishedAt) return { ok: true, running: true, startedAt: running.startedAt, nextId: running.nextId, text: '还在收尾，好了会自己出现。' };
+
+  let next: CycleDoc | null | undefined = listCycles(config)
+    .filter((candidate) => candidate.startDate > doc.startDate)
+    .sort((left, right) => left.startDate.localeCompare(right.startDate))[0];
+  if (!next) {
+    const plan = planNextCycle(doc, { today: todayInTimezone(config) });
+    writeCycle(config, plan.id, { cycle: plan.label, mode: plan.mode });
+    next = readCycle(config, plan.id);
+  }
+  if (!next) throw new Error('下一期没建成，没法起草下期要务。');
+
+  const run = { startedAt: new Date().toISOString(), nextId: next.id };
+  closeRuns.set(doc.id, run);
+  void runConfiguredSkill({
+    config,
+    skillId: 'weekly-review',
+    mode: doc.mode === 'weekly' ? 'weekly' : 'biweekly',
+    userText: '',
+    source: 'cycle-close',
+    messageId: doc.id,
+    reviewCycleId: doc.id,
+  })
+    .then((result) => {
+      closeRuns.set(doc.id, { ...run, finishedAt: new Date().toISOString(), text: result.localCycles ? formatLocalCycleWriteback(result.localCycles) : '做完了。' });
+    })
+    .catch((error: unknown) => {
+      closeRuns.set(doc.id, { ...run, finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
+    });
+  return { ok: true, running: true, startedAt: run.startedAt, nextId: next.id, text: `开始收尾 ${doc.cycle || doc.id}：写总结、起草 ${next.cycle || next.id} 的要务，几分钟后好。` };
+}
+
+function readCloseCycle(id: string): Record<string, unknown> {
+  const run = closeRuns.get(id.trim());
+  if (!run) return { ok: true, running: false };
+  return { ok: true, running: !run.finishedAt, ...run };
+}
 
 /** The cycle's 计划外 so far, and the one-line summary the retro and 总结 use. */
 function readCycleUnplanned(options: UiServerOptions, id: string): Record<string, unknown> {

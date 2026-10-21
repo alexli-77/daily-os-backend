@@ -89,19 +89,16 @@ export function parsePrioritiesByOkr(content: string, labels: string[]): CycleCo
  * life-review-os falls back to reading the Feishu table, so a missing/edge setup
  * degrades to the old behavior rather than failing.
  */
-export function buildCycleContext(config: AppConfig): CycleContext | null {
+export function buildCycleContext(config: AppConfig, options: { reviewId?: string } = {}): CycleContext | null {
   const labels = okrRowLabels(config);
   const okrRows = labels
     .map((okr, index) => ({ row_index: index, okr }))
     .filter((entry) => entry.row_index > 0 && entry.okr.trim().length > 0);
   if (okrRows.length === 0) return null;
 
-  const today = todayInTimezone(config);
-  const cycles = listCycles(config); // id-descending: newest first
-  const target = cycles.find((doc) => contains(doc, today));
-  if (!target) return null;
-  // The most recent cycle that starts before the target one — its predecessor.
-  const review = cycles.find((doc) => doc.startDate < target.startDate);
+  const picked = pickReviewAndTarget(config, options.reviewId);
+  if (!picked) return null;
+  const { review, target } = picked;
 
   return {
     schema: 1,
@@ -113,6 +110,35 @@ export function buildCycleContext(config: AppConfig): CycleContext | null {
     reviewRetro: (review?.sections.retro?.content ?? '').trim(),
     targetRows: parsePrioritiesByOkr(target.sections['要务']?.content ?? '', labels),
   };
+}
+
+/**
+ * Which cycle a biweekly run looks back on, and which one it plans.
+ *
+ * By default the run is a new cycle's: the target is the cycle today is in and
+ * the review is the one before it. 结束本期 names the cycle being closed
+ * instead — on its last day, "the cycle today is in" is the one being closed,
+ * and the default would review the cycle before that. Then the target is the
+ * first cycle that starts after it.
+ */
+export function pickReviewAndTarget(
+  config: AppConfig,
+  reviewId?: string,
+): { review: CycleDoc | undefined; target: CycleDoc } | null {
+  const cycles = listCycles(config); // id-descending: newest first
+  if (reviewId) {
+    const review = cycles.find((doc) => doc.id === reviewId);
+    if (!review) return null;
+    const target = cycles
+      .filter((doc) => doc.startDate > review.startDate)
+      .sort((left, right) => left.startDate.localeCompare(right.startDate))[0];
+    return target ? { review, target } : null;
+  }
+  const today = todayInTimezone(config);
+  const target = cycles.find((doc) => contains(doc, today));
+  if (!target) return null;
+  // The most recent cycle that starts before the target one — its predecessor.
+  return { review: cycles.find((doc) => doc.startDate < target.startDate), target };
 }
 
 /** The `## Cycle Context` pack body: a fenced JSON block life-review-os parses. */
