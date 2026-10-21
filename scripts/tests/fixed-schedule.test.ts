@@ -23,6 +23,7 @@ import { applyCycleSchedule, idFragment, type TodoCandidate } from '../../src/to
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
 import { writeRoutines } from '../../src/user/routine.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
+import { readWorkflowPrompt } from '../../src/agent/openai-agent.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ORIGINAL_CWD = process.cwd();
@@ -169,7 +170,7 @@ test('the calendar gets each day\'s 固定日程 and how every session was left'
 });
 
 test('the prompts say 固定日程 are written by the system and how 要务 are assigned', () => {
-  const plan = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  const plan = readWorkflowPrompt('daily_plan');
   assert.match(plan, /不要为固定日程写条目/);
   const schedule = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'cycle_schedule.md'), 'utf8');
   assert.match(schedule, /一条要务最多归一个固定日程/);

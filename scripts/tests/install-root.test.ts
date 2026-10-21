@@ -35,7 +35,7 @@ const SHIPPED = [
   ['.env.example'],
   ['config', 'config.example.yaml'],
   ['prompts', 'biweekly_strategy.md'],
-  ['prompts', 'daily_plan.md'],
+  ['prompts', 'skills', 'daily-plan', 'SKILL.md'],
 ];
 
 test('every shipped template resolves from a foreign working directory', () => {

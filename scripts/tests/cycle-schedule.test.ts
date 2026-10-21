@@ -32,6 +32,7 @@ import { applyCycleSchedule, buildScoredTodos, idFragment, type TodoCandidate } 
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
 import type { Evidence } from '../../src/workflows/types.js';
+import { readWorkflowPrompt } from '../../src/agent/openai-agent.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ORIGINAL_CWD = process.cwd();
@@ -304,7 +305,7 @@ await test('the prompts carry the contract', () => {
   assert.match(schedule, /`nowClock`/);
   assert.match(schedule, /`events` 占用的时段不能排任何东西/);
   assert.match(schedule, /每个格子写 `step`/);
-  const plan = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  const plan = readWorkflowPrompt('daily_plan');
   assert.match(plan, /关于 `scheduled`（双周排期）/);
   assert.match(plan, /有 `scheduled.step` 的，`text` 就按这一步写/);
 });

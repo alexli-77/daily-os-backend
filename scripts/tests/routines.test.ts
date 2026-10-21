@@ -19,6 +19,7 @@ import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
 import { renderRhythmPromptSection, resolveDayShape } from '../../src/user/rhythm.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
 import { changeDayOverride, normalizeRoutines, readRoutines, resolveRoutine, routineForDate, routinesPath, setDayMode, writeRoutines } from '../../src/user/routine.js';
+import { readWorkflowPrompt } from '../../src/agent/openai-agent.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -272,7 +273,7 @@ test('a plan run for today is told what time it is; another day\'s is not', () =
   const line = nowLine({ config: cfg, date: today }, new Date('2026-10-08T08:22:00Z'));
   assert.match(line, /现在 17:22/);
   assert.equal(nowLine({ config: cfg, date: addDays(today, 1) }), '');
-  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  const prompt = readWorkflowPrompt('daily_plan');
   assert.match(prompt, /不能早于 Date 里写的「现在」/);
 });
 
