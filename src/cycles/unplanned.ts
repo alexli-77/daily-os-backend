@@ -1,0 +1,190 @@
+/**
+ * 计划外 — what a cycle's days were spent on outside its 要务.
+ *
+ * The 要务 reach each day through the plan; nothing came back the other way.
+ * A friend's visit, an afternoon of shopping, a week of tool-building were
+ * captured on Today and then forgotten by the cycle: the retro asked "计划外吃掉
+ * 时间的事" and the answer had to come from memory.
+ *
+ * Built from the capture inbox and the feedback ledger, not from the stored
+ * plans: plans are pruned to about a week and a cycle is two, while both of
+ * these are kept. A capture counts on a day it was written or touched, unless
+ * that day's last word on it was 删除.
+ *
+ * A capture tied to a 要务 is not 计划外: added from Today with a 要务 picked
+ * (an ad-hoc session carries its id), or worded as one of the cycle's 要务 —
+ * which is also what 加进要务 does, so a promoted item leaves this list.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import type { AppConfig } from '../config/schema.js';
+import { listTodoFeedback } from '../todo/feedback.js';
+import { listTodoInboxItems } from '../todo/inbox.js';
+import { readCycle, writeSection, type CycleDoc } from './file.js';
+import { cycleDays, cycleScheduleItems, readSchedule } from './schedule.js';
+
+export interface UnplannedItem {
+  /** The text with case, spaces and punctuation taken out; what groups repeats. */
+  key: string;
+  /** The latest wording. */
+  text: string;
+  /** Days it was on, first to last. */
+  days: string[];
+  /** Sum of the estimates the user gave; null when none were. */
+  minutes: number | null;
+  /** Ticked 完成 or 部分 on at least one day. */
+  done: boolean;
+  captureIds: string[];
+}
+
+/** The heading 加进要务 files under, so promoted items are easy to find and move. */
+export const PROMOTED_HEADING = '### 计划外新增';
+
+/** The ad-hoc session a capture added from Today is filed under. */
+export function adhocSessionId(captureId: string): string {
+  return `a-${captureId.slice(-8).replace(/[^a-z0-9]/g, '')}`;
+}
+
+export function unplannedKey(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\*\*mit\*\*|✅|🚧|❌/g, '')
+    .replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+
+/** The cycle's 计划外, the most time first. Only days up to `until` count. */
+export function unplannedForCycle(config: AppConfig, doc: CycleDoc, until: string): UnplannedItem[] {
+  const days = new Set(cycleDays(doc).filter((day) => day <= until));
+  if (days.size === 0) return [];
+  const priorityKeys = cycleScheduleItems(doc).map((item) => unplannedKey(item.text));
+  const linkedSessions = new Set(
+    (readSchedule(config, doc.id)?.sessions ?? []).filter((session) => session.adhoc).map((session) => session.id),
+  );
+  const isPriority = (key: string): boolean =>
+    priorityKeys.some((priority) => priority === key || (key.length >= 4 && priority.includes(key)));
+
+  // Per capture, per day: the last event wins, and the last estimate given.
+  const byCapture = new Map<string, Map<string, { event: string; minutes?: number; done: boolean }>>();
+  for (const entry of listTodoFeedback(config)) {
+    if (!entry.candidateId.startsWith('todo_inbox:') || !days.has(entry.date)) continue;
+    const id = entry.candidateId.slice('todo_inbox:'.length);
+    const perDay = byCapture.get(id) ?? new Map();
+    const previous = perDay.get(entry.date);
+    perDay.set(entry.date, {
+      event: entry.event === 'update' && previous ? previous.event : entry.event,
+      minutes: entry.minutes !== undefined ? entry.minutes : previous?.minutes,
+      done: (previous?.done ?? false) || entry.event === 'complete' || entry.event === 'partial',
+    });
+    byCapture.set(id, perDay);
+  }
+
+  const groups = new Map<string, UnplannedItem>();
+  for (const item of listTodoInboxItems(config)) {
+    if (item.status === 'deleted') continue;
+    if (linkedSessions.has(adhocSessionId(item.id))) continue;
+    const key = unplannedKey(item.text);
+    if (!key || isPriority(key)) continue;
+
+    const perDay = byCapture.get(item.id) ?? new Map();
+    const created = dateIn(config.user.timezone, item.created_at);
+    if (created && days.has(created) && !perDay.has(created)) perDay.set(created, { event: 'capture', done: false });
+    const onDays = [...perDay.entries()].filter(([, day]) => day.event !== 'remove');
+    if (onDays.length === 0) continue;
+
+    const group = groups.get(key) ?? { key, text: item.text, days: [], minutes: null, done: false, captureIds: [] };
+    for (const [day, state] of onDays) {
+      if (!group.days.includes(day)) group.days.push(day);
+      if (state.minutes && state.minutes > 0) group.minutes = (group.minutes ?? 0) + state.minutes;
+      if (state.done) group.done = true;
+    }
+    if (item.status === 'done') group.done = true;
+    group.captureIds.push(item.id);
+    group.text = item.text;
+    groups.set(key, group);
+  }
+
+  return [...groups.values()]
+    .map((group) => ({ ...group, days: group.days.sort() }))
+    .sort((left, right) => (right.minutes ?? 0) - (left.minutes ?? 0) || right.days.length - left.days.length || left.text.localeCompare(right.text));
+}
+
+/** One line for the retro and the 总结: 「逛街（2 天，3h）、见朋友（1 天）」. */
+export function formatUnplanned(items: UnplannedItem[]): string {
+  return items
+    .map((item) => {
+      const parts = [`${item.days.length} 天`];
+      if (item.minutes) parts.push(formatMinutes(item.minutes));
+      return `${item.text}（${parts.join('，')}）`;
+    })
+    .join('、');
+}
+
+/**
+ * Worth asking whether it belongs in the 要务: it came back on a second day,
+ * or took two hours or more. One-offs are left alone.
+ */
+export function shouldSuggestPromote(item: UnplannedItem): boolean {
+  return item.days.length >= 2 || (item.minutes ?? 0) >= 120;
+}
+
+/**
+ * File `text` under the cycle's 要务, at the end, under 「计划外新增」 — made
+ * if the 要务 has no such heading yet. Nothing changes when the cycle already
+ * has it as a 要务.
+ */
+export function promoteToPriorities(config: AppConfig, cycleId: string, text: string): { added: boolean; doc: CycleDoc } {
+  const doc = readCycle(config, cycleId);
+  if (!doc) throw new Error(`没有这个周期：${cycleId}`);
+  const line = text.replace(/\s+/g, ' ').trim();
+  if (!line) throw new Error('要加的内容是空的。');
+  const key = unplannedKey(line);
+  if (cycleScheduleItems(doc).some((item) => unplannedKey(item.text) === key)) return { added: false, doc };
+
+  const current = (doc.sections['要务']?.content || '').replace(/\s+$/, '');
+  const lines = current ? current.split('\n') : [];
+  const heading = lines.findIndex((value) => value.trim() === PROMOTED_HEADING);
+  if (heading === -1) {
+    lines.push(...(lines.length ? [''] : []), PROMOTED_HEADING, `- ${line}`);
+  } else {
+    let end = heading + 1;
+    while (end < lines.length && !/^#{1,6}\s/.test(lines[end]!.trim())) end += 1;
+    while (end > heading + 1 && !lines[end - 1]!.trim()) end -= 1;
+    lines.splice(end, 0, `- ${line}`);
+  }
+  return { added: true, doc: writeSection(config, cycleId, '要务', `${lines.join('\n')}\n`, 'user') };
+}
+
+const SUGGESTED_PATH = 'data/runtime/unplanned-suggested.json';
+
+/**
+ * Record that 加进要务 was offered for `key` in this cycle. False when it
+ * already was: the question is asked once, not on every add.
+ */
+export function markSuggested(cycleId: string, key: string, file: string = SUGGESTED_PATH): boolean {
+  const target = path.resolve(file);
+  let seen: Record<string, string[]> = {};
+  try {
+    seen = JSON.parse(fs.readFileSync(target, 'utf8')) as Record<string, string[]>;
+  } catch {
+    seen = {};
+  }
+  const keys = Array.isArray(seen[cycleId]) ? seen[cycleId]! : [];
+  if (keys.includes(key)) return false;
+  // Only this cycle's list is kept; an older cycle's questions are settled.
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, JSON.stringify({ [cycleId]: [...keys, key] }, null, 2), 'utf8');
+  return true;
+}
+
+function dateIn(timeZone: string, iso: string): string | null {
+  const time = Date.parse(iso);
+  if (Number.isNaN(time)) return null;
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time));
+}
+
+function formatMinutes(minutes: number): string {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (!hours) return `${rest}m`;
+  return rest ? `${hours}h${rest}m` : `${hours}h`;
+}
