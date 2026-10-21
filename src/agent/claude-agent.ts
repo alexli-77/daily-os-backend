@@ -118,3 +118,16 @@ export function extractStreamJsonText(stdout: string): string {
   // than silently returning empty (keeps behavior sane if the format changes).
   return stdout;
 }
+
+/**
+ * One short question to `claude -p`, answered from the prompt alone: no tools,
+ * no MCP, none of the user's own Claude Code settings. For small judgements
+ * (which OKR a line belongs to) that do not deserve a workflow run.
+ */
+export async function askClaudeOnce(prompt: string, timeoutMs = 60_000): Promise<string> {
+  const claudeBin = process.env.CLAUDE_BIN || 'claude';
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--strict-mcp-config', '--setting-sources', 'project', '--tools', ''];
+  const result = await runCommand(claudeBin, args, { input: prompt, timeoutMs, cwd: os.tmpdir() });
+  if (!result.ok) throw new Error(`Claude Code failed: ${describeClaudeFailure(result.stdout, result.stderr)}`);
+  return extractStreamJsonText(result.stdout).trim();
+}

@@ -16,6 +16,7 @@ import { cycleScheduleItems, writeSchedule } from '../../src/cycles/schedule.js'
 import {
   PROMOTED_HEADING,
   adhocSessionId,
+  refilePromoted,
   formatUnplanned,
   markSuggested,
   promoteToPriorities,
@@ -33,9 +34,13 @@ const ORIGINAL_CWD = process.cwd();
 
 let passed = 0;
 let failed = 0;
-function test(name: string, fn: () => void): void {
+const tests: Array<[string, () => void | Promise<void>]> = [];
+function test(name: string, fn: () => void | Promise<void>): void {
+  tests.push([name, fn]);
+}
+async function run(name: string, fn: () => void | Promise<void>): Promise<void> {
   try {
-    fn();
+    await fn();
     passed += 1;
     console.log(`  ✓ ${name}`);
   } catch (error) {
@@ -137,12 +142,12 @@ test('asked about on the second day or past two hours, once', () => {
   assert.equal(markSuggested('c2', 'k'), true, 'a new cycle asks again');
 });
 
-test('加进要务 files it under 计划外新增 and it leaves the 计划外 list', () => {
+test('加进要务 with no OKR picked files it under 计划外新增 and it leaves the 计划外 list', async () => {
   const { config, id, today } = setup();
   touch(config, capture(config, '迭代 Daily OS'), today, 'update', 120);
-  assert.equal(promoteToPriorities(config, id, '迭代 Daily OS').added, true);
-  assert.equal(promoteToPriorities(config, id, '整理照片').added, true);
-  assert.equal(promoteToPriorities(config, id, '迭代  daily os').added, false, 'already there');
+  assert.equal((await promoteToPriorities(config, id, '迭代 Daily OS')).added, true);
+  assert.equal((await promoteToPriorities(config, id, '整理照片')).heading, PROMOTED_HEADING);
+  assert.equal((await promoteToPriorities(config, id, '迭代  daily os')).added, false, 'already there');
 
   const content = readCycle(config, id)!.sections['要务']!.content;
   assert.equal(content.split('\n').filter((line) => line.trim() === PROMOTED_HEADING).length, 1);
@@ -150,6 +155,35 @@ test('加进要务 files it under 计划外新增 and it leaves the 计划外 li
   assert.ok(content.startsWith(PRIORITIES), 'the 要务 above are untouched');
   assert.ok(cycleScheduleItems(readCycle(config, id)!).some((item) => unplannedKey(item.text) === unplannedKey('迭代 Daily OS')), 'a 要务 the schedule can use');
   assert.deepEqual(unplannedForCycle(config, readCycle(config, id)!, today), []);
+});
+
+test('加进要务 goes under the OKR the model picks, and keeps a pending draft', async () => {
+  const { config, id } = setup();
+  writeCycle(config, id, { sections: { '要务': { pendingDraft: { content: '结束本期的草稿', source: 'planner' } } } });
+  let asked = '';
+  const ask = async (prompt: string) => { asked = prompt; return '1:2'; };
+  const result = await promoteToPriorities(config, id, '整理写作素材库', ask);
+  assert.equal(result.heading, '### 名利 · 写作');
+  assert.ok(asked.includes('1. 工作 · 设计师') && asked.includes('2. 名利 · 写作') && asked.includes('1. 整理写作素材库'));
+  const section = readCycle(config, id)!.sections['要务']!;
+  assert.ok(section.content.includes('- X 日更 1 篇\n- 整理写作素材库'), 'at the end of its group');
+  assert.ok(!section.content.includes(PROMOTED_HEADING));
+  assert.equal(section.pendingDraft?.content.trim(), '结束本期的草稿', 'the draft survives');
+  // A model that answers nonsense or fails leaves it in the pen.
+  assert.equal((await promoteToPriorities(config, id, '别的事', async () => '不知道')).heading, PROMOTED_HEADING);
+  assert.equal((await promoteToPriorities(config, id, '再一件', async () => { throw new Error('down'); })).heading, PROMOTED_HEADING);
+});
+
+test('what sits in 计划外新增 is refiled to its OKR groups, and the pen goes when empty', async () => {
+  const { config, id } = setup();
+  await promoteToPriorities(config, id, '用户访谈');
+  await promoteToPriorities(config, id, '调优 daily OS 工具');
+  const moved = await refilePromoted(config, id, async () => '1:1\n2:2');
+  assert.deepEqual(moved.map((entry) => entry.text), ['用户访谈', '调优 daily OS 工具']);
+  const content = readCycle(config, id)!.sections['要务']!.content;
+  assert.ok(!content.includes(PROMOTED_HEADING));
+  assert.ok(content.includes('2. 给老客户发回访邮件\n- 用户访谈'));
+  assert.ok(content.includes('- X 日更 1 篇\n- 调优 daily OS 工具'));
 });
 
 test('written down twice on one day is one stretch of time', () => {
@@ -173,5 +207,6 @@ test('a block of the 作息 written down as a to-do is not 计划外', () => {
   assert.deepEqual(unplannedForCycle(config, readCycle(config, id)!, today).map((item) => item.text), ['见朋友']);
 });
 
+for (const [name, fn] of tests) await run(name, fn);
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -4,6 +4,7 @@ import { collectEvidence } from './evidence.js';
 import { fixedCoverage, fixedScheduleFor } from '../cycles/fixed-schedule.js';
 import { hasCycleSchedule, scheduledElsewhere, scheduledSessionsFor } from '../cycles/schedule.js';
 import { todayInTimezone } from '../utils/date.js';
+import { syncLinearIntoPriorities } from '../cycles/linear-sync.js';
 import { appendDailyMemory, loadMemory, readDailyPlanOutput, writeLatestWorkflowOutput, writeWorkflowDetailCache } from '../storage/memory.js';
 import { sendFeishuCard, sendFeishuMessage } from '../connectors/lark-cli.js';
 import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftCard } from '../progress/sync-drift.js';
@@ -73,6 +74,14 @@ export async function runWorkflowDetailed(
   try {
     const evidence = await collectEvidence(config, date);
     if (workflow === 'daily_plan') {
+      // The work 要务 follow Linear: done issues ticked, started ones added —
+      // before scoring, so today's plan reads the updated 要务.
+      try {
+        const synced = syncLinearIntoPriorities(config, date, evidence.sources.linear);
+        if (synced) console.log(`[linear-sync] ${synced.cycleId}: ✅ ${synced.done.join(', ') || '-'}; + ${synced.added.join(', ') || '-'}`);
+      } catch (error) {
+        console.warn(`[linear-sync] skipped: ${error instanceof Error ? error.message : String(error)}`);
+      }
       // LEO-209: programmatically score the four todo sources and hand the LLM a
       // ranked top-N (with breakdown) instead of an unscored blob.
       // The cycle schedule's slice for today, when the cycle has one (双周排期).

@@ -40,7 +40,11 @@ export interface UnplannedItem {
   captureIds: string[];
 }
 
-/** The heading 加进要务 files under, so promoted items are easy to find and move. */
+/**
+ * Where 加进要务 files a line when it cannot tell which OKR it serves (no
+ * model to ask, or the model found none that fits). Normally a line goes under
+ * the OKR heading it belongs to; this is the holding pen, not the default.
+ */
 export const PROMOTED_HEADING = '### 计划外新增';
 
 /** The ad-hoc session a capture added from Today is filed under. */
@@ -137,31 +141,141 @@ export function shouldSuggestPromote(item: UnplannedItem): boolean {
   return item.days.length >= 2 || (item.minutes ?? 0) >= 120;
 }
 
+/** One OKR group of a cycle's 要务: its `###` heading and the lines under it. */
+export interface PriorityGroup {
+  heading: string;
+  items: string[];
+}
+
+/** The 要务's OKR groups, in file order, without the holding pen. */
+export function priorityGroups(content: string): PriorityGroup[] {
+  const groups: PriorityGroup[] = [];
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    const heading = /^###\s+(.+)$/.exec(line);
+    if (heading) {
+      groups.push({ heading: line, items: [] });
+      continue;
+    }
+    const bullet = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(line);
+    if (bullet && groups.length > 0) groups[groups.length - 1]!.items.push(bullet[1]!.trim());
+  }
+  return groups.filter((group) => group.heading !== PROMOTED_HEADING);
+}
+
+/** `content` with `- line` added at the end of the `heading` group; the group is made when missing. */
+export function insertUnderHeading(content: string, heading: string, line: string): string {
+  const lines = content.replace(/\s+$/, '').split('\n').filter((value, index, all) => all.length > 1 || value !== '');
+  const at = lines.findIndex((value) => value.trim() === heading);
+  if (at === -1) {
+    lines.push(...(lines.length ? [''] : []), heading, `- ${line}`);
+  } else {
+    let end = at + 1;
+    while (end < lines.length && !/^#{1,6}\s/.test(lines[end]!.trim())) end += 1;
+    while (end > at + 1 && !lines[end - 1]!.trim()) end -= 1;
+    lines.splice(end, 0, `- ${line}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/** `content` without the holding pen's lines that were refiled, and without the pen once it is empty. */
+function removeFromPen(content: string, moved: Set<string>): string {
+  const lines = content.split('\n');
+  const at = lines.findIndex((value) => value.trim() === PROMOTED_HEADING);
+  if (at === -1) return content;
+  let end = at + 1;
+  while (end < lines.length && !/^#{1,6}\s/.test(lines[end]!.trim())) end += 1;
+  const kept = lines.slice(at + 1, end).filter((value) => {
+    const bullet = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(value.trim());
+    return !(bullet && moved.has(bullet[1]!.trim()));
+  });
+  const block = kept.some((value) => value.trim()) ? [lines[at]!, ...kept] : [];
+  const next = [...lines.slice(0, at), ...block, ...lines.slice(end)];
+  return `${next.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '')}\n`;
+}
+
+type Ask = (prompt: string) => Promise<string>;
+
 /**
- * File `text` under the cycle's 要务, at the end, under 「计划外新增」 — made
- * if the 要务 has no such heading yet. Nothing changes when the cycle already
- * has it as a 要务.
+ * Which OKR group each line serves, asked of the model in one go. A line with
+ * no group that fits, or any failure, maps to null — the holding pen.
  */
-export function promoteToPriorities(config: AppConfig, cycleId: string, text: string): { added: boolean; doc: CycleDoc } {
+export async function pickHeadings(texts: string[], groups: PriorityGroup[], ask: Ask): Promise<Array<string | null>> {
+  if (texts.length === 0) return [];
+  if (groups.length === 0) return texts.map(() => null);
+  const prompt = [
+    '把下面每条新要务归到最合适的 OKR 分组。按「条目编号:分组编号」每行回复一条，例如「1:3」，不要别的字。哪组都不合适就写 0。',
+    '',
+    '分组：',
+    ...groups.map((group, index) => `${index + 1}. ${group.heading.replace(/^###\s+/, '')}${group.items.length ? `\n   已有：${group.items.slice(0, 4).join('；')}` : ''}`),
+    '',
+    '新要务：',
+    ...texts.map((text, index) => `${index + 1}. ${text}`),
+  ].join('\n');
+  try {
+    const reply = await ask(prompt);
+    const picked: Array<string | null> = texts.map(() => null);
+    for (const match of reply.matchAll(/(\d+)\s*[:：]\s*(\d+)/g)) {
+      const item = Number(match[1]) - 1;
+      const group = Number(match[2]) - 1;
+      if (item >= 0 && item < texts.length && group >= 0 && group < groups.length) picked[item] = groups[group]!.heading;
+    }
+    return picked;
+  } catch (error) {
+    console.warn(`[unplanned] OKR not picked: ${error instanceof Error ? error.message : String(error)}`);
+    return texts.map(() => null);
+  }
+}
+
+/**
+ * 加进要务: file `text` under the OKR group it serves (the holding pen when no
+ * group fits). Nothing changes when the cycle already has it as a 要务. A
+ * pending draft of the 要务 is kept.
+ */
+export async function promoteToPriorities(
+  config: AppConfig,
+  cycleId: string,
+  text: string,
+  ask?: Ask,
+): Promise<{ added: boolean; heading: string; doc: CycleDoc }> {
   const doc = readCycle(config, cycleId);
   if (!doc) throw new Error(`没有这个周期：${cycleId}`);
   const line = text.replace(/\s+/g, ' ').trim();
   if (!line) throw new Error('要加的内容是空的。');
   const key = unplannedKey(line);
-  if (cycleScheduleItems(doc).some((item) => unplannedKey(item.text) === key)) return { added: false, doc };
+  if (cycleScheduleItems(doc).some((item) => unplannedKey(item.text) === key)) return { added: false, heading: '', doc };
 
-  const current = (doc.sections['要务']?.content || '').replace(/\s+$/, '');
-  const lines = current ? current.split('\n') : [];
-  const heading = lines.findIndex((value) => value.trim() === PROMOTED_HEADING);
-  if (heading === -1) {
-    lines.push(...(lines.length ? [''] : []), PROMOTED_HEADING, `- ${line}`);
-  } else {
-    let end = heading + 1;
-    while (end < lines.length && !/^#{1,6}\s/.test(lines[end]!.trim())) end += 1;
-    while (end > heading + 1 && !lines[end - 1]!.trim()) end -= 1;
-    lines.splice(end, 0, `- ${line}`);
+  const content = doc.sections['要务']?.content || '';
+  const [picked] = ask ? await pickHeadings([line], priorityGroups(content), ask) : [null];
+  const heading = picked ?? PROMOTED_HEADING;
+  const written = writeSection(config, cycleId, '要务', insertUnderHeading(content, heading, line), 'user', { keepDraft: true });
+  return { added: true, heading, doc: written };
+}
+
+/** Move what sits in the holding pen to the OKR groups it serves. */
+export async function refilePromoted(config: AppConfig, cycleId: string, ask: Ask): Promise<Array<{ text: string; heading: string }>> {
+  const doc = readCycle(config, cycleId);
+  if (!doc) throw new Error(`没有这个周期：${cycleId}`);
+  let content = doc.sections['要务']?.content || '';
+  const lines = content.split('\n');
+  const at = lines.findIndex((value) => value.trim() === PROMOTED_HEADING);
+  if (at === -1) return [];
+  const pen: string[] = [];
+  for (let index = at + 1; index < lines.length && !/^#{1,6}\s/.test(lines[index]!.trim()); index += 1) {
+    const bullet = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(lines[index]!.trim());
+    if (bullet) pen.push(bullet[1]!.trim());
   }
-  return { added: true, doc: writeSection(config, cycleId, '要务', `${lines.join('\n')}\n`, 'user') };
+  const picked = await pickHeadings(pen, priorityGroups(content), ask);
+  const moved: Array<{ text: string; heading: string }> = [];
+  pen.forEach((text, index) => {
+    const heading = picked[index];
+    if (heading) moved.push({ text, heading });
+  });
+  if (moved.length === 0) return [];
+  content = removeFromPen(content, new Set(moved.map((entry) => entry.text)));
+  for (const entry of moved) content = insertUnderHeading(content, entry.heading, entry.text);
+  writeSection(config, cycleId, '要务', content, 'user', { keepDraft: true });
+  return moved;
 }
 
 /** Every block title of the 作息 periods covering these days, in any day type or mode. */

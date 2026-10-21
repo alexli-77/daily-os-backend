@@ -56,7 +56,8 @@ import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDay
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
 import { idFragment } from '../todo/scorer.js';
 import { currentCycle } from '../workflows/weekly-priorities.js';
-import { adhocSessionId, formatUnplanned, markSuggested, promoteToPriorities, shouldSuggestPromote, unplannedForCycle } from '../cycles/unplanned.js';
+import { adhocSessionId, formatUnplanned, markSuggested, promoteToPriorities, refilePromoted, shouldSuggestPromote, unplannedForCycle } from '../cycles/unplanned.js';
+import { askClaudeOnce } from '../agent/claude-agent.js';
 import { fixedRowFor, scheduleDayView } from '../cycles/fixed-schedule.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
@@ -545,7 +546,8 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/cycles/close') return sendJson(response, await startCloseCycle(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/cycles/close') return sendJson(response, readCloseCycle(url.searchParams.get('id') || ''));
     if (request.method === 'GET' && url.pathname === '/api/cycles/unplanned') return sendJson(response, readCycleUnplanned(options, url.searchParams.get('id') || ''));
-    if (request.method === 'POST' && url.pathname === '/api/cycles/promote') return sendJson(response, promoteCycleItem(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/promote') return sendJson(response, await promoteCycleItem(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/refile') return sendJson(response, await refileCyclePromoted(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/cycles/schedule') return sendJson(response, await readCycleSchedule(options, url.searchParams.get('id') || ''));
     if (request.method === 'POST' && url.pathname === '/api/cycles/schedule') return sendJson(response, await saveCycleSchedule(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/schedule/generate') return sendJson(response, await startCycleSchedule(options, await readJson(request)));
@@ -2000,9 +2002,9 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
   // 算进本期要务: filed under the cycle's 要务 first, so the row is that 要务's.
   const cycle = currentCycle(config, date);
   if (!itemKey && request.promote === true && cycle) {
-    const promoted = promoteToPriorities(config, cycle.id, title);
+    const promoted = await promoteToPriorities(config, cycle.id, title, okrPicker(config));
     itemKey = idFragment(title.replace(/\s+/g, ' ').trim());
-    notes.push(promoted.added ? '加进了本期要务' : '本期要务里已经有这一条');
+    notes.push(promoted.added ? `加进了本期要务「${okrLabel(promoted.heading)}」` : '本期要务里已经有这一条');
   }
   const session = itemKey ? addAdhocSession(config, date, itemKey, { start, minutes, step: title }, { extra: request.extra === true, id: adhocSessionId(item.id) }) : null;
   if (session) notes.push(session.text);
@@ -2189,16 +2191,43 @@ function readCycleUnplanned(options: UiServerOptions, id: string): Record<string
   return { ok: true, id: doc.id, items, summary: formatUnplanned(items) };
 }
 
-/** 加进要务: file a line under a cycle's 要务 (this one or the next). */
-function promoteCycleItem(options: UiServerOptions, body: unknown): Record<string, unknown> {
+/** Ask the model which OKR a line serves — only on the subscription CLI. */
+function okrPicker(config: AppConfig): ((prompt: string) => Promise<string>) | undefined {
+  return config.llm.provider === 'claude' ? (prompt) => askClaudeOnce(prompt) : undefined;
+}
+
+/** 「工作-UX designer」 from 「### 工作-UX designer。探索并开创…」. */
+function okrLabel(heading: string): string {
+  return heading.replace(/^###\s+/, '').split(/[。.：:]/)[0]!.trim() || heading;
+}
+
+/** 加进要务: file a line under the OKR it serves in a cycle's 要务 (this one or the next). */
+async function promoteCycleItem(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
   const env = readEnvFile(options.envPath);
   applyEnv(env);
   const config = loadConfig(options.configPath);
   const request = readRecord(body);
   const doc = readCycleOrThrow(config, String(request.id || '').trim());
-  const result = promoteToPriorities(config, doc.id, String(request.text || ''));
+  const result = await promoteToPriorities(config, doc.id, String(request.text || ''), okrPicker(config));
   const label = doc.cycle || doc.id;
-  return { ok: true, added: result.added, text: result.added ? `加进了 ${label} 的要务` : `${label} 的要务里已经有这一条` };
+  return {
+    ok: true,
+    added: result.added,
+    heading: result.heading,
+    text: result.added ? `加进了 ${label} 的要务「${okrLabel(result.heading)}」` : `${label} 的要务里已经有这一条`,
+  };
+}
+
+/** Move what sits under 「计划外新增」 to the OKR groups it serves. */
+async function refileCyclePromoted(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const doc = readCycleOrThrow(config, String(readRecord(body).id || '').trim());
+  const ask = okrPicker(config);
+  if (!ask) return { ok: false, error: '归到 OKR 要用 Claude 判断，现在的模型设置不是 claude。' };
+  const moved = await refilePromoted(config, doc.id, ask);
+  return { ok: true, moved, text: moved.length ? `归好了 ${moved.length} 条：${moved.map((entry) => `${entry.text} → ${okrLabel(entry.heading)}`).join('；')}` : '没有能归进 OKR 的条目。' };
 }
 
 async function readCycleSchedule(options: UiServerOptions, id: string): Promise<Record<string, unknown>> {
