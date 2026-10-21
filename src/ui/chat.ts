@@ -155,6 +155,8 @@ const BARE_COMMAND_KEYWORDS = new Set([
 const COMMAND_ALIASES = new Map<string, string>([
   ['biweekly', 'skills run weekly-review biweekly'],
   ['双周复盘', 'skills run weekly-review biweekly'],
+  // The evening review of today, named so it is not read as the cycle's 复盘.
+  ['今日复盘', 'review'],
   ['quarterly', 'skills run weekly-review quarterly'],
 ]);
 
@@ -284,6 +286,9 @@ interface TurnContext {
 
 async function runCommandTurn(ctx: TurnContext): Promise<void> {
   const replies: string[] = [];
+  const prefix = ctx.config.interaction.feishu.command_prefix;
+  const parsed = parseDailyOsCommand(ctx.text, prefix);
+  const isCycleReview = parsed.type === 'skill_run' && parsed.skillId === 'weekly-review';
   await handleDailyOsCommand({
     config: ctx.config,
     messageId: ctx.runId,
@@ -298,8 +303,9 @@ async function runCommandTurn(ctx: TurnContext): Promise<void> {
     sessionScopeId: ctx.sessionId,
     stopAgentRun: async () => stopWebChatSession(ctx.sessionId),
     reply: async (reply) => {
-      replies.push(reply);
-      ctx.onEvent({ type: 'reply', content: reply });
+      const shown = isCycleReview ? condenseCycleReviewReply(reply) : reply;
+      replies.push(shown);
+      ctx.onEvent({ type: 'reply', content: shown });
     },
   });
   const completion = '执行完成。';
@@ -307,6 +313,26 @@ async function runCommandTurn(ctx: TurnContext): Promise<void> {
   ctx.onEvent({ type: 'reply', content: completion });
   const combined = replies.join('\n\n').trim() || '已处理。';
   persistMessage(ctx.sessionId, 'assistant', combined, ctx.runId);
+}
+
+/**
+ * A 双周复盘 in the chat: what it wrote and where, not the draft itself.
+ *
+ * The full run output — every 要务 under its ### heading, the KR JSON — is the
+ * cycle page's to show. Repeated in the chat it was noise, and the one line
+ * that mattered (下期要务 已写入) sat at the bottom of it. Progress messages
+ * and errors, which carry no cycle note, pass through unchanged.
+ */
+export function condenseCycleReviewReply(reply: string): string {
+  const marker = reply.indexOf('📁 本地周期');
+  if (marker === -1) return reply;
+  const writes = reply
+    .slice(marker)
+    .split('\n')
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return ['双周复盘做完了：', ...writes.map((line) => `- ${line}`), '', '总结和下期要务在周期页，去那里看和改。'].join('\n');
 }
 
 async function runAgentTurn(ctx: TurnContext): Promise<void> {
