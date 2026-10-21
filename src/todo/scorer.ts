@@ -80,7 +80,7 @@ export interface ScoredTodoCandidate extends TodoCandidate {
   breakdown: ScoreBreakdown;
   /**
    * Same value as `id`, under the name the daily-plan prompt asks the model to
-   * echo back. `prompts/daily_plan.md` documents `top[].candidateId` and says to
+   * echo back. `prompts/skills/daily-plan/SKILL.md` documents `top[].candidateId` and says to
    * return it verbatim, but this payload only ever carried `id` — the two ends
    * of the contract disagreed. Models used to paper over it by inferring the
    * mapping; a stricter one instead refused to invent the missing field and

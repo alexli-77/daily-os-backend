@@ -68,7 +68,7 @@ export function buildCliPrompt(input: AgentInput): string {
 }
 
 export function buildUserPrompt(input: AgentInput): string {
-  const workflowPrompt = readPrompt(`${input.workflow}.md`);
+  const workflowPrompt = readWorkflowPrompt(input.workflow);
   // Every provider funnels through here, so the budget cannot be bypassed by
   // picking a different `llm.provider` — which matters, because the prompt that
   // was too big for Codex was exactly as too big for Claude.
@@ -137,4 +137,23 @@ function outputContract(): string {
 
 function readPrompt(name: string): string {
   return fs.readFileSync(bundledAsset('prompts', name), 'utf8');
+}
+
+/**
+ * Workflows whose instructions are an Agent Skill (agentskills.io): one
+ * `SKILL.md` that the scheduled run reads as its prompt and the chat loads as a
+ * skill, so the two cannot drift apart.
+ */
+const WORKFLOW_SKILLS: Readonly<Record<string, string>> = { daily_plan: 'daily-plan' };
+
+/** A workflow's instructions: its skill's body, or `prompts/<workflow>.md`. */
+export function readWorkflowPrompt(workflow: string): string {
+  const skill = WORKFLOW_SKILLS[workflow];
+  if (!skill) return readPrompt(`${workflow}.md`);
+  return skillBody(fs.readFileSync(bundledAsset('prompts', 'skills', skill, 'SKILL.md'), 'utf8'));
+}
+
+/** A SKILL.md without its YAML frontmatter. The frontmatter is for the agent loading it, not the prompt. */
+export function skillBody(text: string): string {
+  return text.replace(/^---\n[\s\S]*?\n---\n/, '');
 }

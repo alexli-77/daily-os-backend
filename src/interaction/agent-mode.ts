@@ -8,6 +8,7 @@ import { todayInTimezone } from '../utils/date.js';
 import { loadMemory } from '../storage/memory.js';
 import { buildFeishuAgentContextPack } from './context-pack.js';
 import { describeClaudeFailure } from '../agent/claude-agent.js';
+import { bundledAsset } from '../utils/install-root.js';
 import type { FeishuAccessDecision } from './access-policy.js';
 import type { FeishuControlEffect } from './access-policy.js';
 import type { FeishuSessionRecord } from './session-catalog.js';
@@ -158,7 +159,7 @@ export function claudeAgentArgs(config: AppConfig, session: FeishuSessionRecord)
     '--setting-sources',
     'project',
     '--tools',
-    writable ? 'Read,Glob,Grep,Edit,Write' : 'Read,Glob,Grep',
+    writable ? 'Read,Glob,Grep,Edit,Write,Skill' : 'Read,Glob,Grep,Skill',
     '--permission-mode',
     writable ? 'acceptEdits' : 'default',
   ];
@@ -172,6 +173,7 @@ async function startClaudeAgentModeRun(input: FeishuAgentModeInput): Promise<Fei
   const runId = `run_${Date.now()}_${process.pid}`;
   const claudeBin = process.env.CLAUDE_BIN || 'claude';
   const workdir = agentWorkdir(input.config);
+  syncChatSkills(workdir);
   const prompt = await buildFeishuAgentPrompt(input);
   const child = spawn(claudeBin, claudeAgentArgs(input.config, input.session), {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -256,6 +258,35 @@ async function startClaudeAgentModeRun(input: FeishuAgentModeInput): Promise<Fei
   };
 }
 
+/**
+ * Put the skills Daily OS ships (`prompts/skills/*`) where the chat finds them:
+ * `<workdir>/.claude/skills/`, the project skills of a `claude -p` started
+ * there. The bundled copy is the source; a copy that differs is replaced, so a
+ * skill the scheduled run reads and the one the chat loads stay the same.
+ * Never throws: a chat without its skills is still a chat.
+ */
+export function syncChatSkills(workdir: string, source: string = bundledAsset('prompts', 'skills')): string[] {
+  const synced: string[] = [];
+  try {
+    if (!fs.existsSync(source)) return synced;
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const from = path.join(source, entry.name, 'SKILL.md');
+      if (!fs.existsSync(from)) continue;
+      const to = path.join(workdir, '.claude', 'skills', entry.name, 'SKILL.md');
+      const text = fs.readFileSync(from, 'utf8');
+      if (!fs.existsSync(to) || fs.readFileSync(to, 'utf8') !== text) {
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.writeFileSync(to, text, 'utf8');
+      }
+      synced.push(entry.name);
+    }
+  } catch (error) {
+    console.warn(`[agent-mode] chat skills not synced: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return synced;
+}
+
 /** "正在改 routines.json" for an assistant turn that calls a tool; empty otherwise. */
 function claudeToolProgress(event: Record<string, unknown>): string {
   const message = isObject(event.message) ? event.message : null;
@@ -264,6 +295,7 @@ function claudeToolProgress(event: Record<string, unknown>): string {
     if (!isObject(block) || block.type !== 'tool_use') continue;
     const toolInput = isObject(block.input) ? block.input : {};
     const target = typeof toolInput.file_path === 'string' ? path.basename(toolInput.file_path) : typeof toolInput.pattern === 'string' ? toolInput.pattern : '';
+    if (block.name === 'Skill') return `正在用技能 ${typeof toolInput.skill === 'string' ? toolInput.skill : ''}`.trim();
     const verb = block.name === 'Edit' || block.name === 'Write' ? '正在改' : '正在看';
     return target ? `${verb} ${target}` : `${verb}文件`;
   }
@@ -312,6 +344,7 @@ const DAILY_OS_FILE_GUIDE = [
   '改 JSON 时保持合法 JSON，不要动和这次请求无关的字段。改之前先读文件，改完用一两句话说清改了什么。',
   '今天的计划不在这个目录，改不了；用户想改今天的计划，告诉他们在今天页上改，或者改作息后重新生成。',
   '不确定用户指的是哪一块、改动可能影响很多天时，先问一句再改。',
+  '.claude/skills/ 下是 Daily OS 的技能（比如 daily-plan：每天的计划怎么排）。问题对得上时用 Skill 工具加载它，按里面的规则回答；这些文件由 Daily OS 维护，不要改。',
 ];
 
 async function buildFeishuAgentPrompt(input: FeishuAgentModeInput): Promise<string> {

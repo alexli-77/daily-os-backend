@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { anchorToCycle, normalizeCandidates } from '../../src/todo/scorer.js';
 import { fitEvidenceToBudget } from '../../src/workflows/evidence-budget.js';
 import type { Evidence } from '../../src/workflows/types.js';
+import { readWorkflowPrompt } from '../../src/agent/openai-agent.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = new Date('2026-10-06T00:00:00');
@@ -92,7 +93,7 @@ test('with no cycle 要务 there is nothing to anchor to, so nothing is dropped'
 });
 
 test('the prompt keeps its "only this candidate\'s own content" rule', () => {
-  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  const prompt = readWorkflowPrompt('daily_plan');
   assert.match(prompt, /只用这条候选自己的内容/);
   assert.match(prompt, /昨天的计划不是今天的候选/);
   assert.match(prompt, /写得朴素也比编得具体好/);
@@ -117,7 +118,7 @@ test('an issue the cycle left out does not reach the plan prompt at all, only th
 });
 
 test('the prompt keeps the note to the rows it planned', () => {
-  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  const prompt = readWorkflowPrompt('daily_plan');
   assert.match(prompt, /备注只谈今天排了的条目/);
   assert.match(prompt, /没进候选，就不是今天的事/);
 });

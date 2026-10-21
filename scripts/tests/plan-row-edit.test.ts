@@ -25,6 +25,7 @@ import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/
 import { recordTodoFeedback, type TodoFeedbackEvent } from '../../src/todo/feedback.js';
 import { buildPlanSnapshotForDate, buildTodayPlanSnapshot, isRhythmRow } from '../../src/todo/today-plan.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
+import { readWorkflowPrompt } from '../../src/agent/openai-agent.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ORIGINAL_CWD = process.cwd();
@@ -117,7 +118,7 @@ test('one update can carry text, colour and a note together', () => {
 });
 
 test('the plan prompt asks for rows of at most 150 characters', () => {
-  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  const prompt = readWorkflowPrompt('daily_plan');
   assert.match(prompt, /每条不超过 150 个字/);
 });
 
@@ -169,7 +170,7 @@ test('editing a ticked row leaves it ticked', () => {
 });
 
 test('the plan prompt lets the model suggest the MIT', () => {
-  const prompt = fs.readFileSync(path.join(REPO_ROOT, 'prompts', 'daily_plan.md'), 'utf8');
+  const prompt = readWorkflowPrompt('daily_plan');
   assert.match(prompt, /`mit` 可选/);
 });
 

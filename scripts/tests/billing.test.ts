@@ -38,9 +38,10 @@ function makeTmpWorkdir(): string {
   // buildSystemPrompt/buildUserPrompt read prompts relative to cwd; copy them in.
   fs.mkdirSync(path.join(dir, 'prompts'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'data', 'runtime'), { recursive: true });
-  for (const name of ['system.md', 'daily_plan.md', 'daily_review.md', 'weekly_review.md']) {
+  for (const name of ['system.md', 'daily_review.md', 'weekly_review.md']) {
     fs.copyFileSync(path.join(REPO_ROOT, 'prompts', name), path.join(dir, 'prompts', name));
   }
+  fs.cpSync(path.join(REPO_ROOT, 'prompts', 'skills'), path.join(dir, 'prompts', 'skills'), { recursive: true });
   return dir;
 }
 
