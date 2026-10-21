@@ -128,6 +128,13 @@ export interface CyclePatch {
 export interface CycleWriteOptions {
   /** ISO-8601 timestamp to stamp the write with. Defaults to now. */
   now?: string;
+  /**
+   * Keep a section's pending draft through a body write. For small automatic
+   * edits (filing a line, marking a Linear issue done) that are not the user
+   * settling the body: without it, they would throw away a draft 结束本期
+   * staged for the user to compare.
+   */
+  keepDraft?: boolean;
 }
 
 const CYCLE_ID_PATTERN = /^(\d{4}-\d{2}-\d{2})_([^\s/\\]+)$/;
@@ -249,7 +256,7 @@ export function writeCycle(config: AppConfig, id: string, patch: CyclePatch, opt
       content = normalizeContent(update.content);
       source = update.source ?? source;
       updatedAt = now;
-      pendingDraft = undefined;
+      if (!options.keepDraft) pendingDraft = undefined;
       upsertBlock(next.blocks, section, content);
     }
     if (update.pendingDraft !== undefined) {
