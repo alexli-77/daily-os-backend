@@ -8,6 +8,7 @@ import { collectEvidence } from './workflows/evidence.js';
 import { todayInTimezone } from './utils/date.js';
 import { ensureMemoryFiles } from './storage/memory.js';
 import { formatDoctor, runDoctor } from './cli/doctor.js';
+import { writeDiagnosticsBundle } from './cli/diagnostics.js';
 import { appVersion } from './utils/version.js';
 import { installLaunchAgent, runScheduler, uninstallLaunchAgent } from './service/launchd.js';
 import { createScheduler } from './service/scheduler-port.js';
@@ -72,6 +73,15 @@ async function main(): Promise<void> {
     case 'doctor': {
       console.log(`daily-os-feishu v${appVersion()}`);
       console.log(formatDoctor(await runDoctor(config, options.configPath)));
+      break;
+    }
+    case 'diagnostics': {
+      const bundle = await writeDiagnosticsBundle(config, {
+        configPath: options.configPath,
+        includeContent: process.argv.includes('--include-content'),
+      });
+      console.log(`诊断包已生成：${bundle}`);
+      console.log('发出前请打开 REDACTION.md 核对抹掉了什么。');
       break;
     }
     case 'collect': {

@@ -113,6 +113,9 @@ try {
     'scripts/tests/okr.test.ts',
     'scripts/tests/todo-scorer.test.ts',
     'scripts/tests/todo-inbox-history.test.ts',
+    // LEO-294 diagnostic bundle: every sensitive category is redacted, and the
+    // bundle builds even with no service running.
+    'scripts/tests/diagnostics.test.ts',
     // 记下 capture must not silently drop a todo that starts with a command word
     // (完成/删除/…): honour the command only when its target names an open todo.
     'scripts/tests/todo-capture.test.ts',
