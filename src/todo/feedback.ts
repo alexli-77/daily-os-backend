@@ -134,7 +134,7 @@ export function resolveFeedbackDate(
   if (date > today) return { ok: false, error: '还没到的日子不能补记，去双周排期里排它。' };
   if (date === today) return { ok: true, date, past: false };
   if (!(PAST_DAY_EVENTS as readonly string[]).includes(event)) {
-    return { ok: false, error: event === 'defer' ? '顺延只对今天：那天的第二天已经过去了。可以记成未做。' : `往日不能 ${event}。` };
+    return { ok: false, error: event === 'defer' ? '推到明天只对今天：那天的明天已经过去了。可以记成未做，或者挪到今天。' : `往日不能 ${event}。` };
   }
   return { ok: true, date, past: true };
 }

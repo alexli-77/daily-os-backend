@@ -10,6 +10,7 @@ import { sendFeishuCard, sendFeishuMessage } from '../connectors/lark-cli.js';
 import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftCard } from '../progress/sync-drift.js';
 import { buildDailyPlanTable, buildWorkflowEvidenceTrace, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, parseDailyPlanTodoPlan, workflowJsonError } from './summary.js';
 import { mergeOpenCapturesIntoPlan } from '../todo/inbox.js';
+import { mergeMovedRowsIntoPlan } from '../todo/wrapup.js';
 import { buildScoredTodos } from '../todo/scorer.js';
 import { getRemovedCandidateIds, listTodoFeedback, recordTodoPresented } from '../todo/feedback.js';
 import {
@@ -129,7 +130,9 @@ export async function runWorkflowDetailed(
     // Captures go straight onto the sheet and stay there until they are done,
     // deferred or deleted. The model re-plans from scratch every morning, so the
     // only way that promise holds is to put them back after it has chosen.
-    const text = workflow === 'daily_plan' ? mergeOpenCapturesIntoPlan(config, generated, date) : generated;
+    // Rows moved here from a day being closed out (回收 → 挪到今天) before this
+    // plan existed are added the same way.
+    const text = workflow === 'daily_plan' ? mergeMovedRowsIntoPlan(mergeOpenCapturesIntoPlan(config, generated, date), date) : generated;
     const evidenceTrace = buildWorkflowEvidenceTrace({ evidence, memory });
 
     appendDailyMemory(config, workflow, date, text);

@@ -18,6 +18,7 @@ import { readLatestWorkflowOutput } from '../storage/memory.js';
 import { listTodoFeedback } from '../todo/feedback.js';
 import { applyUserOrder, buildTodayPlanSnapshot } from '../todo/today-plan.js';
 import { isHistoryDate, listPlanDates, readDayHistory } from '../todo/day-history.js';
+import { dayWasReviewed, moveRowToDay, pendingWrapups, recordWrapup } from '../todo/wrapup.js';
 import { readArtifactsIndex } from '../storage/artifacts.js';
 import { buildDailyPlanTable, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, normalizePlanMinutes, type DailyPlanTodo } from '../workflows/summary.js';
 import { bundledAsset } from '../utils/install-root.js';
@@ -523,6 +524,9 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'GET' && url.pathname === '/api/day/plan') {
       return sendJson(response, readDayPlan(options, url.searchParams.get('date')));
     }
+    if (request.method === 'GET' && url.pathname === '/api/day/wrapups') return sendJson(response, readWrapupState(options));
+    if (request.method === 'POST' && url.pathname === '/api/day/wrapup') return sendJson(response, resolveWrapup(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/day/move-to-today') return sendJson(response, moveToToday(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/capture') return sendJson(response, await captureTodo(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/todo-inbox') return sendJson(response, await updateTodoInbox(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/decision-policy') return sendJson(response, await saveDecisionPolicy(options, await readJson(request)));
@@ -615,6 +619,10 @@ function isWriteRequest(method: string | undefined): boolean {
 // (durable-write / free-form agent) turns for the member role.
 const MEMBER_WRITE_WHITELIST = new Set([
   '/api/today/todo-feedback',
+  // Closing out one of your own past days (回收 / 跳过), and moving its
+  // unfinished rows to today, are the same class of act as ticking them.
+  '/api/day/wrapup',
+  '/api/day/move-to-today',
   // Reordering your own day is the same class of act as ticking a row on it.
   '/api/today/plan-order',
   // As is putting one of your own captures on it.
@@ -1679,6 +1687,61 @@ function readDayPlan(options: UiServerOptions, requested: string | null): Record
   // A service without it would stamp a past day's tick onto today, so the
   // client keeps 往日 read-only unless this is said.
   return { ok: true, today, dates, ...readDayHistory(config, date), ...(date < today ? { editable: true } : {}) };
+}
+
+/** Past days still waiting to be closed out (回收), oldest first. See `src/todo/wrapup.ts`. */
+function readWrapupState(options: UiServerOptions): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = todayInTimezone(config);
+  return { ok: true, today, pending: pendingWrapups(config, today) };
+}
+
+/**
+ * 回收完成 or 跳过 for one past day. 回收完成 also runs that day's review late,
+ * in the background and without a Feishu message — the user is at the Mac
+ * and has just made every decision the review would have asked about.
+ */
+function resolveWrapup(options: UiServerOptions, body: unknown): Record<string, unknown> {
+  const request = readRecord(body);
+  const date = String(request.date || '').trim();
+  const action = String(request.action || '').trim();
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = todayInTimezone(config);
+  if (!isHistoryDate(date) || date >= today) return { ok: false, error: '只能回收今天以前的日子。' };
+  if (action !== 'done' && action !== 'skip') return { ok: false, error: 'action must be done or skip.' };
+  const short = `${Number(date.slice(5, 7))}.${Number(date.slice(8, 10))}`;
+  if (action === 'skip') {
+    recordWrapup(date, 'skipped');
+    return { ok: true, date, action, text: `${short} 跳过了回收，没勾的留在那天` };
+  }
+  recordWrapup(date, 'done');
+  const reviewStarted = !dayWasReviewed(config, date);
+  if (reviewStarted) {
+    void runWorkflow(config, 'daily_review', { date, send: false, trigger: 'ui', source: 'wrapup-backfill' }).catch((error) => {
+      console.warn(`[wrapup] review for ${date} failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+  return { ok: true, date, action, reviewStarted, text: reviewStarted ? `${short} 回收完了，复盘在后台补跑` : `${short} 回收完了` };
+}
+
+/** 挪到今天: an unfinished row of a past day onto today's sheet. */
+function moveToToday(options: UiServerOptions, body: unknown): Record<string, unknown> {
+  const request = readRecord(body);
+  const date = String(request.date || '').trim();
+  const candidateId = String(request.candidateId || '').trim();
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = todayInTimezone(config);
+  if (!isHistoryDate(date) || date >= today) return { ok: false, error: '只能从今天以前的日子挪过来。' };
+  if (!candidateId) return { ok: false, error: 'candidateId is required.' };
+  const result = moveRowToDay(config, date, today, candidateId, Number(request.rank) || 0);
+  if (!result.ok) return result;
+  return { ...result, date, candidateId };
 }
 
 async function captureTodo(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {

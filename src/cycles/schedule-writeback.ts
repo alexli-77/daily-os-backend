@@ -64,6 +64,27 @@ export function deferScheduled(config: AppConfig, date: string, itemKey: string)
   return inCycle ? `排期也挪了：${today[0]!.label.slice(0, 16)} 移到 ${short(tomorrow)}` : '排期里这一次划掉了（这一期已经到最后一天）';
 }
 
+/**
+ * 挪到今天, from 回收: a past day's sessions of the 要务 move to `to` (today),
+ * the way 顺到明天 moves them to the next day. Only within the cycle `from`
+ * belongs to; a `to` outside it leaves the schedule alone.
+ */
+export function moveScheduledTo(config: AppConfig, from: string, to: string, itemKey: string): string | null {
+  const loaded = load(config, from);
+  if (!loaded || !loaded.days.includes(to)) return null;
+  const moving = loaded.schedule.sessions.filter((session) => session.date === from && session.itemKey === itemKey && !session.skipped);
+  if (moving.length === 0) return null;
+  for (const session of moving) {
+    session.movedFrom = from;
+    session.date = to;
+    // A reserved time on the day it was missed is not one on today.
+    delete session.start;
+    delete session.bigRock;
+  }
+  writeSchedule(config, loaded.schedule);
+  return `排期也挪了：${moving[0]!.label.slice(0, 16)} 移到 ${short(to)}`;
+}
+
 /** 这次不做了: today's sessions of the 要务 are skipped. */
 export function skipScheduled(config: AppConfig, date: string, itemKey: string): string | null {
   const loaded = load(config, date);
