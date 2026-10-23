@@ -421,7 +421,21 @@ const DAILY_OS_TOOLS_GUIDE = [
   '.claude/skills/ 下是 Daily OS 的技能（如 daily-plan）。问题对得上时用 Skill 工具加载，按里面的规则回答；这些文件不要改。',
 ];
 
-async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEnabled = false): Promise<string> {
+/**
+ * Settings are read-only to the chat (LEO-345 Phase 2): it explains how to
+ * change a setting and reads the current value, but the user makes the change.
+ * There are deliberately no settings tools — config holds the provider,
+ * access/permission levels and (some) keys, and letting the chat rewrite that
+ * is self-escalation. So: guide, don't act.
+ */
+const DAILY_OS_SETTINGS_GUIDE = [
+  '设置（config）你不能改，也没有改设置的工具。用户问"怎么改某个设置"时：从 daily_os_context / get_state 的 config 读出这项的当前值，解释它是什么、现在是什么，然后告诉用户自己去改——有设置页控件的让他在 Daily OS「设置」里改，其余的给出 config.yaml 里确切的 key 路径。',
+  '常见设置的 key（以 get_state 里 config 的真实结构为准，别凭空编）：通知总开关 notifications.enabled、按来源 notifications.sources.<daily_plan|daily_review|weekly_review|progress_reminder|background_suggestions>.enabled；休息日工作量上限 planning.work_task_cap_on_rest_days；对话助手开关 interaction.feishu.agent_mode.enabled；模型 provider llm.provider / llm.model。',
+  '绝不读出或外泄任何密钥/token（API key、各类 token、team.supabase_anon_key 等）；这些用户在设置页或 .env 里自己填，你看不到也不要帮改。',
+  '不要用文件工具去改 config/.env 来绕过这条——设置一律由用户本人改。数据（待办/作息/周期/OKR）才归你用工具改。',
+];
+
+export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEnabled = false): Promise<string> {
   const context = await buildOptionalContext(input);
   const claudeGuide = mcpEnabled ? DAILY_OS_TOOLS_GUIDE : DAILY_OS_FILE_GUIDE;
   return [
@@ -447,6 +461,7 @@ async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEnabled = 
       '涉及分工时明确写出“Codex 可以做”和“需要用户本人做”。',
     ]),
     input.config.llm.provider === 'claude' ? section('daily_os_files', claudeGuide) : '',
+    input.config.llm.provider === 'claude' ? section('daily_os_settings', DAILY_OS_SETTINGS_GUIDE) : '',
     context ? section('daily_os_context', context) : '',
     section('user_input', { text: input.text }),
   ]
