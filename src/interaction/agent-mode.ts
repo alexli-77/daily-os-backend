@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { collectEvidence } from '../workflows/evidence.js';
 import { todayInTimezone } from '../utils/date.js';
-import { loadMemory } from '../storage/memory.js';
+import { loadMemory, resolveMemoryRepositoryPath } from '../storage/memory.js';
 import { buildFeishuAgentContextPack } from './context-pack.js';
 import { describeClaudeFailure } from '../agent/claude-agent.js';
 import { bundledAsset, installRoot } from '../utils/install-root.js';
@@ -60,6 +60,7 @@ export async function startFeishuAgentModeRun(input: FeishuAgentModeInput): Prom
   const outputPath = path.join(os.tmpdir(), `daily-os-feishu-agent-${runId}.md`);
   const codexBin = process.env.CODEX_BIN || 'codex';
   const workdir = agentWorkdir(input.config);
+  fs.mkdirSync(workdir, { recursive: true });
   const args = codexArgs(input, outputPath, workdir);
   const prompt = await buildFeishuAgentPrompt(input);
   const child = spawn(codexBin, args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: workdir, env: { ...process.env } });
@@ -213,6 +214,7 @@ async function startClaudeAgentModeRun(input: FeishuAgentModeInput): Promise<Fei
   const runId = `run_${Date.now()}_${process.pid}`;
   const claudeBin = process.env.CLAUDE_BIN || 'claude';
   const workdir = agentWorkdir(input.config);
+  fs.mkdirSync(workdir, { recursive: true });
   syncChatSkills(workdir);
   const mcpConfigPath = writeMcpConfig();
   const prompt = await buildFeishuAgentPrompt(input, Boolean(mcpConfigPath));
@@ -353,7 +355,14 @@ function claudeToolProgress(event: Record<string, unknown>): string {
 }
 
 export function agentWorkdir(config: AppConfig): string {
-  return path.resolve(config.interaction.feishu.agent_mode.workdir.trim() || process.cwd());
+  const configured = config.interaction.feishu.agent_mode.workdir.trim();
+  if (configured) return path.resolve(configured);
+  // Default to the vault — the data the agent reasons about (10_OKR / 20_CYCLES
+  // / 00_System) — never the service data root. The data root holds
+  // config/config.yaml and .env, and the chat's Read tool is scoped to its
+  // workdir; rooting it there let the model read secrets (LEO-345). The vault is
+  // a different tree, so config/.env are outside what Read can reach.
+  return resolveMemoryRepositoryPath(config);
 }
 
 export function agentModeControlEffect(config: AppConfig): FeishuControlEffect {
@@ -387,7 +396,7 @@ function codexArgs(input: FeishuAgentModeInput, outputPath: string, workdir: str
  * The pages read these files directly, so an edit shows up on the next load.
  */
 const DAILY_OS_FILE_GUIDE = [
-  '当前工作目录就是 Daily OS 的数据目录，用户让你改作息、排期、要务、OKR 时，直接改这里的文件。',
+  '当前工作目录是 Daily OS 的 vault（你的数据，不含配置和密钥），用户让你改作息、排期、要务、OKR 时，直接改这里的文件。',
   '00_System/routines.json：作息。periods[].dayTypes[].modes[].blocks[] 是每种日子的时间块（id、title、start、end，时间用 HH:mm）；dayOverrides 按日期放单日改动。改时间块时保留 id，同一 mode 里按 start 排好顺序。',
   '20_CYCLES/<周期>.md：双周周期，要务在里面；20_CYCLES/<周期>.schedule.json：这个周期的排期。',
   '10_OKR/：OKR。rhythm.md：作息规则的文字说明。',
@@ -403,7 +412,7 @@ const DAILY_OS_FILE_GUIDE = [
  * is the tools' job so validation and side effects actually run.
  */
 const DAILY_OS_TOOLS_GUIDE = [
-  '当前工作目录是 Daily OS 的数据目录。用户让你改作息、待办、周期要务/retro、OKR 时，用 daily-os 的工具（mcp__daily-os__*）来改，不要直接编辑文件——工具会走校验和联动（比如改作息后重算排期、OKR 归一化）。',
+  '当前工作目录是 Daily OS 的 vault（你的数据，不含配置和密钥）。用户让你改作息、待办、周期要务/retro、OKR 时，用 daily-os 的工具（mcp__daily-os__*）来改，不要直接编辑文件——工具会走校验和联动（比如改作息后重算排期、OKR 归一化）。',
   '先用 get_state 看现状、拿到要改对象的 id，再调对应写工具：capture_todo / update_todo_inbox（按 id）/ save_routines / save_okr / cycle_section。',
   'save_okr、save_routines 是整份覆盖写：先读现状、在完整内容上改，再整份传回，不要只传片段。',
   '你可以读工作目录里的文件来了解细节，但改数据一律走工具。',
