@@ -197,6 +197,9 @@ try {
     // card may mention. All day counts are the user's timezone, never UTC's.
     'scripts/tests/countdown.test.ts',
     'scripts/tests/day-history.test.ts',
+    // 往日 edits: a dated tick lands on that day only, a day that is over
+    // cannot be rescheduled, and the client is told the service takes `date`.
+    'scripts/tests/past-day-edit.test.ts',
     'scripts/tests/safe-candidate-ids.test.ts',
     'scripts/tests/plan-anchor.test.ts',
     'scripts/tests/cycle-schedule.test.ts',

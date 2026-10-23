@@ -98,6 +98,56 @@ export const PLAN_ROW_TEXT_MAX = 150;
 
 export const TODO_FEEDBACK_PATH = 'data/runtime/todo-feedback.jsonl';
 
+/**
+ * What a past day's row can still be told: how it was left, its wording and
+ * note, and "back to untouched". Not `defer`, `remove`, `place` or `unplace` —
+ * those reschedule (move a cycle session to the next day, skip it, pin it to a
+ * clock time), and a day that is over has nothing left to schedule.
+ */
+export const PAST_DAY_EVENTS: readonly TodoFeedbackEvent[] = ['complete', 'partial', 'missed', 'update', 'reopen'];
+
+/**
+ * The day a plan-row edit belongs to.
+ *
+ * Every edit used to be stamped with the day the service received it, so the
+ * 往日 view had to be read-only: ticking yesterday's row would have recorded a
+ * completion on today's sheet. A calendar does not work that way — a past
+ * event is still the same event, and correcting it corrects that day — so the
+ * client may now name the day. Absent means today, which keeps every existing
+ * caller unchanged. A day after today is refused: what has not happened yet is
+ * planned in 双周排期, not ticked off.
+ */
+export function resolveFeedbackDate(
+  requested: unknown,
+  event: string,
+  today: string,
+): { ok: true; date: string; past: boolean } | { ok: false; error: string } {
+  if (requested === undefined || requested === null || requested === '') return { ok: true, date: today, past: false };
+  const date = typeof requested === 'string' ? requested.trim() : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
+    return { ok: false, error: 'date must be YYYY-MM-DD.' };
+  }
+  if (date > today) return { ok: false, error: '还没到的日子不能补记，去双周排期里排它。' };
+  if (date === today) return { ok: true, date, past: false };
+  if (!(PAST_DAY_EVENTS as readonly string[]).includes(event)) {
+    return { ok: false, error: `往日只能补记完成情况和改文字（${PAST_DAY_EVENTS.join(', ')}），${event} 只对今天。` };
+  }
+  return { ok: true, date, past: true };
+}
+
+/**
+ * Whether a day after `date` has already said how this row was left.
+ *
+ * A capture's row and the capture are one thing (`syncTodoInboxFromPlanRow`),
+ * so a tick reaches the inbox. For a past day that is right only when it is
+ * the row's latest word: ticking yesterday's row done must close the capture,
+ * but marking yesterday 未做 must not reopen a capture finished today.
+ */
+export function hasLaterRowState(config: AppConfig, candidateId: string, date: string): boolean {
+  const states = new Set<TodoFeedbackEvent>(['complete', 'partial', 'missed', 'defer', 'reopen', 'remove']);
+  return listTodoFeedback(config).some((entry) => entry.candidateId === candidateId && entry.date > date && states.has(entry.event));
+}
+
 function ledgerPath(_config: AppConfig): string {
   return path.resolve(TODO_FEEDBACK_PATH);
 }

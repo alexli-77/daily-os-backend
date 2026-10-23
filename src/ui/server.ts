@@ -88,7 +88,7 @@ import {
   resolveCountdown,
   saveCountdown,
 } from '../countdown/store.js';
-import { PLAN_ROW_COLORS, PLAN_ROW_TEXT_MAX, recordTodoFeedback, type TodoFeedbackEvent } from '../todo/feedback.js';
+import { PLAN_ROW_COLORS, PLAN_ROW_TEXT_MAX, hasLaterRowState, recordTodoFeedback, resolveFeedbackDate, type TodoFeedbackEvent } from '../todo/feedback.js';
 import { formatCalendarDraftForFeishu, runCalendarDraft, testCalendarBridge } from '../calendar/bridge.js';
 import {
   SESSION_COOKIE,
@@ -1072,12 +1072,16 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     const env = readEnvFile(options.envPath);
     applyEnv(env);
     const config = loadConfig(options.configPath);
+    // 往日 names the day it is correcting; everything else means today.
+    const day = resolveFeedbackDate(request.date, event, todayInTimezone(config));
+    if (!day.ok) return { ok: false, error: day.error };
+    const { date, past } = day;
     recordTodoFeedback(config, {
-      date: todayInTimezone(config),
+      date,
       event: event as TodoFeedbackEvent,
       candidateId,
       rank,
-      source: 'console-today',
+      source: past ? 'console-past-day' : 'console-today',
       ...(note ? { note } : {}),
       ...(minutes ? { minutes } : clearsMinutes ? { minutes: 0 } : {}),
       ...(event === 'place' ? { start } : {}),
@@ -1091,19 +1095,24 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
       updateTodoInboxItemById(config, candidateId.slice('todo_inbox:'.length), { text });
     }
     // An inbox-sourced plan row is the inbox item; keep the inbox's own status
-    // in step so the next plan does not re-propose it (#220).
-    syncTodoInboxFromPlanRow(config, candidateId, event);
+    // in step so the next plan does not re-propose it (#220). From a past day,
+    // only when nothing later has spoken for the row.
+    if (!past || !hasLaterRowState(config, candidateId, date)) syncTodoInboxFromPlanRow(config, candidateId, event);
+    // Past days stop here. The schedule and the 作息 are about days still to
+    // come: `reopen` on yesterday would pull a session that was 顺延 to today
+    // back into yesterday, which is rewriting a plan, not correcting a record.
     // A row from the cycle schedule: the schedule follows (顺延 moves it, 删除
     // skips it, 恢复 undoes either), so the two never disagree.
-    const scheduleNote = scheduleWriteBack(config, todayInTimezone(config), candidateId, event);
+    const scheduleNote = past ? null : scheduleWriteBack(config, date, candidateId, event);
     // A row added by clicking empty time on Today carries room in the 作息 and,
     // for a 要务, a schedule session. They follow the row: moved with it,
     // stretched with it, gone when it is deleted.
-    adhocFollowsRow(config, todayInTimezone(config), candidateId, event, { start, minutes });
+    if (!past) adhocFollowsRow(config, date, candidateId, event, { start, minutes });
     return {
       ok: true,
       candidateId,
       event,
+      date,
       ...(scheduleNote ? { schedule: scheduleNote } : {}),
       ...(minutes ? { minutes } : {}),
       text:
@@ -1649,7 +1658,7 @@ function latestDailyPlanRun(config: AppConfig, today: string): { status: string;
 }
 
 /**
- * A past day's plan and its review, read-only. Without `date` it answers with
+ * A past day's plan and its review. Without `date` it answers with
  * the most recent day before today that has a plan — "yesterday" in practice,
  * or the Friday when today is Monday. `dates` rides along so the client can
  * build its day list from the same call.
@@ -1664,7 +1673,10 @@ function readDayPlan(options: UiServerOptions, requested: string | null): Record
     return { ok: false, error: `date must be YYYY-MM-DD, got: ${requested}` };
   }
   const date = requested ?? dates.find((candidate) => candidate < today) ?? today;
-  return { ok: true, today, dates, ...readDayHistory(config, date) };
+  // `editable` is how a client knows `/api/today/todo-feedback` takes a `date`.
+  // A service without it would stamp a past day's tick onto today, so the
+  // client keeps 往日 read-only unless this is said.
+  return { ok: true, today, dates, ...readDayHistory(config, date), ...(date < today ? { editable: true } : {}) };
 }
 
 async function captureTodo(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {

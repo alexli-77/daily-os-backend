@@ -11,7 +11,8 @@ import { buildPlanSnapshotForDate } from './today-plan.js';
  *
  * Nothing in the product could show a previous day: `/api/today/plan` is today
  * or nothing by design (LEO-309), and the only way to see yesterday was to open
- * `data/memory/daily/<date>.md` and read raw JSON. This is the read-only way in.
+ * `data/memory/daily/<date>.md` and read raw JSON. This is the way in; edits
+ * to a past row go through `/api/today/todo-feedback` with that day's `date`.
  *
  * Two stores, in order:
  *   - `readDailyPlanOutput` (latest-workflow file, then the per-run detail
