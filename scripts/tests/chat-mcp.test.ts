@@ -77,12 +77,17 @@ function cfg(sandbox = 'read-only'): AppConfig {
 }
 const session = {} as FeishuSessionRecord;
 
-test('with mcp-config: MCP tools allowed, Edit/Write dropped', () => {
+test('with mcp-config: MCP tools pre-approved via allowedTools, Edit/Write dropped', () => {
   const args = claudeAgentArgs(cfg('read-only'), session, '/tmp/mcp.json');
   assert.ok(args.includes('--mcp-config') && args.includes('/tmp/mcp.json'), 'passes the config');
   const tools = args[args.indexOf('--tools') + 1];
-  assert.ok(tools.includes('mcp__daily-os__capture_todo'), 'MCP tools in allow-list');
+  assert.ok(tools.includes('mcp__daily-os__capture_todo'), 'MCP tools available');
+  assert.ok(tools.includes('ToolSearch'), 'ToolSearch available to load deferred MCP tools');
   assert.ok(!tools.includes('Edit') && !tools.includes('Write'), 'no raw file-edit tools');
+  // The fix for "writes get denied": tools must also be pre-approved, or `-p`
+  // prompts for each MCP call and the prompt cannot be answered.
+  assert.ok(args.includes('--allowedTools'), 'pre-approves tools');
+  assert.equal(args[args.indexOf('--allowedTools') + 1], tools, 'allow-list matches the available set');
 });
 
 test('without mcp-config: old filesystem behavior (fallback)', () => {
