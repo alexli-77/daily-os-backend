@@ -18,7 +18,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import { TOOLS, TOOL_ALLOW_NAMES, apiCaller } from '../../src/mcp/tools.js';
-import { claudeAgentArgs, writeMcpConfig, mcpServerEntry, agentWorkdir } from '../../src/interaction/agent-mode.js';
+import { claudeAgentArgs, writeMcpConfig, mcpServerEntry, agentWorkdir, buildFeishuAgentPrompt } from '../../src/interaction/agent-mode.js';
 import type { AppConfig } from '../../src/config/schema.js';
 import type { FeishuSessionRecord } from '../../src/interaction/session-catalog.js';
 
@@ -126,6 +126,42 @@ test('agentWorkdir defaults to the vault, not cwd (so config/.env stay unreadabl
 
 test('agentWorkdir honours an explicit workdir', () => {
   assert.equal(agentWorkdir(cfgWorkdir('/v', '/custom/dir')), '/custom/dir');
+});
+
+// --- settings are guide-only: the prompt says "can't change", no tools ----
+
+function promptInput(provider = 'claude') {
+  return {
+    config: {
+      llm: { provider, model: 'default' },
+      memory: { repository_path: '/tmp/daily-os-test-vault' },
+      interaction: {
+        feishu: {
+          agent_mode: { workdir: '', sandbox: 'read-only', context_pack: { enabled: false }, include_memory: false, include_evidence: false },
+          security: { access_level: 'read_only' },
+        },
+      },
+    },
+    text: '帮我关掉通知',
+    bridge: { chatId: 'c', chatType: 'p2p', senderId: 's', messageIds: [], scopeId: 'x', scopeHash: 'h', source: 'web' },
+    access: { role: 'owner' },
+    session: {},
+  } as unknown as Parameters<typeof buildFeishuAgentPrompt>[0];
+}
+
+test('the prompt tells claude it cannot change settings (guide, not act)', async () => {
+  const prompt = await buildFeishuAgentPrompt(promptInput('claude'), true);
+  assert.match(prompt, /daily_os_settings/, 'settings guide section is present');
+  assert.match(prompt, /设置（config）你不能改/, 'states it cannot change settings');
+  assert.match(prompt, /notifications\.enabled/, 'names the real config key to guide the user');
+  assert.match(prompt, /绝不读出或外泄任何密钥/, 'forbids leaking secrets');
+  // No settings-write tool exists in the allow-list.
+  assert.ok(!TOOL_ALLOW_NAMES.some((n) => /setting|config|env/i.test(n)), 'no settings-write tool');
+});
+
+test('the settings guide is claude-only (codex path omits it)', async () => {
+  const prompt = await buildFeishuAgentPrompt(promptInput('codex'), false);
+  assert.ok(!prompt.includes('daily_os_settings'), 'no claude settings section for codex');
 });
 
 // --- end-to-end: SDK client → spawned server → stub HTTP -------------------
