@@ -158,7 +158,9 @@ const CLAUDE_SESSION_PREFIX = 'claude:';
 export function claudeAgentArgs(config: AppConfig, session: FeishuSessionRecord, mcpConfigPath?: string): string[] {
   const writable = config.interaction.feishu.agent_mode.sandbox !== 'read-only';
   const tools = mcpConfigPath
-    ? ['Read', 'Glob', 'Grep', 'Skill', ...TOOL_ALLOW_NAMES].join(',')
+    ? // ToolSearch: some Claude Code setups defer MCP tools behind it, so the
+      // model must be able to load them before the daily-os tools are callable.
+      ['Read', 'Glob', 'Grep', 'Skill', 'ToolSearch', ...TOOL_ALLOW_NAMES].join(',')
     : writable
       ? 'Read,Glob,Grep,Edit,Write,Skill'
       : 'Read,Glob,Grep,Skill';
@@ -173,9 +175,14 @@ export function claudeAgentArgs(config: AppConfig, session: FeishuSessionRecord,
     'project',
     '--tools',
     tools,
+    // `--tools` only makes tools *available*; under `-p` they still prompt for
+    // permission and the prompt cannot be answered, so an MCP call gets denied.
+    // `--allowedTools` pre-approves them. Without this the Daily OS write tools
+    // (and even get_state) were rejected — the chat could read files but not act.
+    ...(mcpConfigPath ? ['--allowedTools', tools] : []),
     '--permission-mode',
-    // MCP tools and Edit/Write both need auto-accept under `-p` (no prompt).
-    mcpConfigPath || writable ? 'acceptEdits' : 'default',
+    // Edit/Write need acceptEdits; MCP tools run via the allow-list above.
+    mcpConfigPath ? 'default' : writable ? 'acceptEdits' : 'default',
   ];
   if (!['', 'default', 'auto'].includes(config.llm.model.trim())) args.push('--model', config.llm.model);
   const previous = session.codex_session_id;
@@ -413,6 +420,8 @@ const DAILY_OS_FILE_GUIDE = [
  */
 const DAILY_OS_TOOLS_GUIDE = [
   '当前工作目录是 Daily OS 的 vault（你的数据，不含配置和密钥）。用户让你改作息、待办、周期要务/retro、OKR 时，用 daily-os 的工具（mcp__daily-os__*）来改，不要直接编辑文件——工具会走校验和联动（比如改作息后重算排期、OKR 归一化）。',
+  '这些 daily-os 工具通过 Daily OS 的 API 改数据，不受文件 sandbox（read-only）限制；该改就直接调用，不要因为 sandbox 是只读就说自己改不了。',
+  '如果 daily-os 的工具（mcp__daily-os__*）没有直接出现在可用工具里，先用 ToolSearch 加载它们（搜 "daily-os" 或具体工具名），再调用，不要据此说工具不可用。',
   '先用 get_state 看现状、拿到要改对象的 id，再调对应写工具：capture_todo / update_todo_inbox（按 id）/ save_routines / save_okr / cycle_section。',
   'save_okr、save_routines 是整份覆盖写：先读现状、在完整内容上改，再整份传回，不要只传片段。',
   '你可以读工作目录里的文件来了解细节，但改数据一律走工具。',
@@ -451,10 +460,12 @@ export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEna
     section('instructions', [
       input.config.llm.provider === 'claude' ? '你是 Daily OS 里的对话助手。' : '你是 Daily OS 的 Feishu 远程 Codex agent mode。',
       input.bridge.source === 'web' ? '用中文回复，回复显示在 Daily OS 的对话页里。' : '用中文回复，回复内容会直接发回飞书。',
-      '优先像助手一样和用户自然协作；如果需要执行代码或读取文件，遵守当前 sandbox 和远程控制策略。',
+      // Reply contract (用户要求): outcome first, terse, no reasoning dumps.
+      '回复要短、结论先行：做成了就只说「已完成」，最多再补一句改了什么；没看懂用户要什么就说「请详细提供……」并点名缺什么信息；没做成就一句话说清为什么，再给一步用户可以自己手动做的操作。',
+      '不要在回复里写思考过程、工具调用日志、方案罗列或证据流水账。需要用户二选一时，只问一个最关键的问题，别铺开讲多种方案。',
+      'sandbox 的 read-only 只限制直接编辑文件，不限制用 daily-os 工具改数据——用工具改即可，不要据此拒绝。',
       '不要泄露 token、密钥、完整本地隐私路径或隐藏推理。',
-      '如果用户要求超出当前权限，解释缺少的配置或权限，不要假装已经执行。',
-      '如果你完成了可以由 Codex 代做的工作，简短说明结果、文件或下一步。',
+      '如果用户要求超出当前权限，一句话说缺什么配置/权限，不要假装已经执行。',
       '当 daily_os_context 里有 context_pack 时，把它当成当前 Daily OS 助手工作台：先看最新 workflow、progress ledger、decision policy 和 evidence summary。',
       '如果 context_pack.pending_background_suggestions 存在，用户可能会用“第 N 条”“刚才那个”“这些都忽略/写入/改成……”来跟进后台建议；请按自然语言理解并继续操作。',
       '回答计划/复盘/任务优先级问题时，用“确认的 / 暂缓的 / 新增的”组织，不要输出原始证据流水账。',
