@@ -18,7 +18,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import { TOOLS, TOOL_ALLOW_NAMES, apiCaller } from '../../src/mcp/tools.js';
-import { claudeAgentArgs, writeMcpConfig, mcpServerEntry } from '../../src/interaction/agent-mode.js';
+import { claudeAgentArgs, writeMcpConfig, mcpServerEntry, agentWorkdir } from '../../src/interaction/agent-mode.js';
 import type { AppConfig } from '../../src/config/schema.js';
 import type { FeishuSessionRecord } from '../../src/interaction/session-catalog.js';
 
@@ -106,6 +106,26 @@ test('writeMcpConfig writes command/args/env for the running service', () => {
   assert.equal(server.env.DAILY_OS_API_URL, 'http://127.0.0.1:14573');
   assert.equal(server.env.DAILY_OS_API_TOKEN, 'abc');
   fs.rmSync(file!, { force: true });
+});
+
+// --- workdir is the vault, never the service data root (secret exposure) ---
+
+function cfgWorkdir(repositoryPath: string, workdir = ''): AppConfig {
+  return {
+    interaction: { feishu: { agent_mode: { workdir } } },
+    memory: { repository_path: repositoryPath },
+  } as unknown as AppConfig;
+}
+
+test('agentWorkdir defaults to the vault, not cwd (so config/.env stay unreadable)', () => {
+  const vault = '/tmp/daily-os-test-vault/daily-os-memory';
+  const resolved = agentWorkdir(cfgWorkdir(vault));
+  assert.equal(resolved, vault, 'unset workdir → the vault path');
+  assert.notEqual(resolved, process.cwd(), 'never the service data root (holds config/.env)');
+});
+
+test('agentWorkdir honours an explicit workdir', () => {
+  assert.equal(agentWorkdir(cfgWorkdir('/v', '/custom/dir')), '/custom/dir');
 });
 
 // --- end-to-end: SDK client → spawned server → stub HTTP -------------------
