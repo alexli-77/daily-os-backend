@@ -8,6 +8,7 @@ import yaml from 'js-yaml';
 import { AppConfigSchema, type AppConfig, type WorkflowName } from '../config/schema.js';
 import { loadConfig } from '../config/load-config.js';
 import { formatDoctor, runDoctor } from '../cli/doctor.js';
+import { writeDiagnosticsBundle } from '../cli/diagnostics.js';
 import { collectEvidence } from '../workflows/evidence.js';
 import { runWorkflow } from '../workflows/run-workflow.js';
 import { addDays, isKnownTimeZone, todayInTimezone, todayInZone } from '../utils/date.js';
@@ -2856,6 +2857,14 @@ async function runActionInner(options: UiServerOptions, request: Record<string, 
     return { ok: true, text: formatDoctor(checks) };
   }
 
+  if (action === 'diagnostics') {
+    const bundle = await writeDiagnosticsBundle(config, {
+      configPath: options.configPath,
+      includeContent: request.includeContent === true,
+    });
+    return { ok: true, text: `诊断包已生成：${bundle}\n发出前请打开包里的 REDACTION.md 核对抹掉了什么。` };
+  }
+
   if (action === 'collect') {
     return { ok: true, text: JSON.stringify(await collectEvidence(config, todayInTimezone(config)), null, 2) };
   }
@@ -3547,6 +3556,7 @@ const HTML = String.raw`<!doctype html>
               <button type="button" data-action="feishu_test">Test Feishu</button>
               <button type="button" data-action="feedback_poll">Poll Feedback</button>
               <button type="button" data-action="collect">Collect</button>
+              <button type="button" data-action="diagnostics" title="生成脱敏诊断包（zip），报障时发这个">诊断包</button>
               <button type="button" data-action="chat_analysis">Chat Analysis</button>
               <button type="button" data-action="chat_analysis_todo">Todo Signals</button>
               <button type="button" data-action="chat_analysis_review">Review Signals</button>
