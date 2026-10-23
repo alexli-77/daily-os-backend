@@ -1097,7 +1097,9 @@ async function todoFeedback(options: UiServerOptions, body: unknown): Promise<Re
     // An inbox-sourced plan row is the inbox item; keep the inbox's own status
     // in step so the next plan does not re-propose it (#220). From a past day,
     // only when nothing later has spoken for the row.
-    if (!past || !hasLaterRowState(config, candidateId, date)) syncTodoInboxFromPlanRow(config, candidateId, event);
+    // Not on a past `remove`: taking a row off yesterday's record is not
+    // deleting the capture, which may well be on today's sheet.
+    if (!past || (event !== 'remove' && !hasLaterRowState(config, candidateId, date))) syncTodoInboxFromPlanRow(config, candidateId, event);
     // Past days stop here. The schedule and the 作息 are about days still to
     // come: `reopen` on yesterday would pull a session that was 顺延 to today
     // back into yesterday, which is rewriting a plan, not correcting a record.

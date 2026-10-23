@@ -95,7 +95,9 @@ export function readDayHistory(config: AppConfig, date: string): DayHistory {
     sections.filter((section) => section.workflow === workflow).at(-1)?.content;
 
   const output = pickReadablePlan(config, date, sections);
-  const snapshot = buildPlanSnapshotForDate(config, date, output);
+  // With the day's 固定日程, so a past day reads the way its calendar column
+  // and its Today page did — and those rows can be ticked there too.
+  const snapshot = buildPlanSnapshotForDate(config, date, output, { fixedRows: true });
   const reviewText = lastOf('daily_review');
   const review = reviewText ? parseDailyReviewReconciliation(reviewText) : null;
 

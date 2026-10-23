@@ -139,8 +139,9 @@ export function buildPlanSnapshotForDate(
   date: string,
   output: { date?: string; generated_at?: string; content: string } | null = readDailyPlanOutput(config, date),
   // Today's sheet only: 往日 replays a day as it was, and those days had no
-  // meal rows (LEO-332).
-  options: { mealRows?: boolean } = {},
+  // meal rows (LEO-332). `fixedRows` puts the day's 固定日程 on it, as the
+  // 双周排期 calendar draws them — the 日 view of a past day needs them.
+  options: { mealRows?: boolean; fixedRows?: boolean } = {},
 ): TodayPlanSnapshot | null {
   const latest = output;
   if (!latest) return null;
@@ -206,7 +207,7 @@ export function buildPlanSnapshotForDate(
   const suggested = new Set(todos.filter((todo) => todo.mit).map((todo) => todo.candidateId));
   // Today's 固定日程. The 要务 they cover are inside them, so a plan row for
   // one of those (a plan written before 固定日程 existed) would say it twice.
-  const fixed = options.mealRows ? fixedScheduleFor(config, date) : [];
+  const fixed = options.mealRows || options.fixedRows ? fixedScheduleFor(config, date) : [];
   const covered = fixedCoverage(fixed);
   const planRows = todos.filter((todo) => !covered.has(weeklyKey(todo.candidateId) ?? ''));
   // A 固定日程 nobody ticked is done when every 要务 it covers was ticked today.

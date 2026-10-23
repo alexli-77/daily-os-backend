@@ -10,8 +10,8 @@
  *
  *   - the edit lands on the named day and nowhere else
  *   - no `date` still means today, so every existing caller is unchanged
- *   - a day after today is refused, and so is anything that reschedules
- *     (顺延, 删除, pinning to a time) on a day that is over
+ *   - a day after today is refused, and so is 顺延 on a day that is over;
+ *     moving, resizing and deleting a past row are allowed and stay on that day
  *   - a capture's inbox status follows a past tick only when no later day has
  *     already said how the row was left
  *   - `/api/day/plan` says `editable`, which is how the client knows the
@@ -56,15 +56,13 @@ async function testResolveFeedbackDate(): Promise<void> {
   await check('today named explicitly allows every event', () => {
     assert.deepEqual(resolveFeedbackDate(today, 'remove', today), { ok: true, date: today, past: false });
   });
-  await check('a past day takes a tick, a correction, a text edit and an undo', () => {
-    for (const event of ['complete', 'partial', 'missed', 'update', 'reopen']) {
+  await check('a past day takes what a calendar allows on a past event', () => {
+    for (const event of ['complete', 'partial', 'missed', 'update', 'reopen', 'remove', 'place', 'unplace']) {
       assert.deepEqual(resolveFeedbackDate('2026-10-21', event, today), { ok: true, date: '2026-10-21', past: true }, event);
     }
   });
-  await check('a past day refuses what reschedules', () => {
-    for (const event of ['defer', 'remove', 'place', 'unplace']) {
-      assert.equal(resolveFeedbackDate('2026-10-21', event, today).ok, false, event);
-    }
+  await check('a past day refuses 顺延: its tomorrow has already happened', () => {
+    assert.equal(resolveFeedbackDate('2026-10-21', 'defer', today).ok, false);
   });
   await check('a day after today is refused', () => {
     assert.equal(resolveFeedbackDate('2026-10-24', 'complete', today).ok, false);
@@ -155,14 +153,30 @@ async function testEndpoint(): Promise<void> {
       assert.equal(entry?.source, 'console-today');
     });
 
-    await check('rescheduling a day that is over is refused, and nothing is written', async () => {
+    await check('顺延 on a day that is over, or any edit to a day not here yet, is refused and writes nothing', async () => {
       const before = listTodoFeedback(config).length;
-      for (const event of ['defer', 'remove', 'place']) {
-        const result = await post({ candidateId: 'linear:T-2', rank: 2, event, start: '10:00', date: yesterday });
-        assert.equal(result.ok, false, event);
-      }
+      assert.equal((await post({ candidateId: 'linear:T-2', rank: 2, event: 'defer', date: yesterday })).ok, false);
       assert.equal((await post({ candidateId: 'linear:T-2', rank: 2, event: 'complete', date: addDays(today, 1) })).ok, false);
       assert.equal(listTodoFeedback(config).length, before);
+    });
+
+    await check('a past row can be moved on the clock, released, and resized — on that day only', async () => {
+      assert.equal((await post({ candidateId: 'linear:T-2', rank: 2, event: 'place', start: '15:00', date: yesterday })).ok, true);
+      assert.equal((await post({ candidateId: 'linear:T-2', rank: 2, event: 'update', minutes: 90, date: yesterday })).ok, true);
+      let row = (await day(yesterday)).todos.find((todo: any) => todo.candidateId === 'linear:T-2');
+      assert.equal(row?.start, '15:00');
+      assert.equal(row?.minutes, 90);
+      assert.equal((await post({ candidateId: 'linear:T-2', rank: 2, event: 'unplace', date: yesterday })).ok, true);
+      row = (await day(yesterday)).todos.find((todo: any) => todo.candidateId === 'linear:T-2');
+      assert.equal(row?.start, undefined);
+      assert.equal(listTodoFeedback(config).some((entry) => entry.candidateId === 'linear:T-2' && entry.date === today), false);
+    });
+
+    await check('a past row can be deleted from that day and put back', async () => {
+      assert.equal((await post({ candidateId: 'linear:T-2', rank: 2, event: 'remove', date: yesterday })).ok, true);
+      assert.equal((await day(yesterday)).todos.some((todo: any) => todo.candidateId === 'linear:T-2'), false);
+      assert.equal((await post({ candidateId: 'linear:T-2', rank: 2, event: 'reopen', date: yesterday })).ok, true);
+      assert.equal((await day(yesterday)).todos.some((todo: any) => todo.candidateId === 'linear:T-2'), true);
     });
 
     await check('ticking yesterday\'s capture closes the capture', async () => {
@@ -178,6 +192,13 @@ async function testEndpoint(): Promise<void> {
       await post({ candidateId: `todo_inbox:${captureId}`, rank: 3, event: 'missed', date: yesterday });
       assert.equal(inboxStatus(), 'done');
       assert.equal((await day(yesterday)).feedback[`todo_inbox:${captureId}`], 'missed');
+    });
+
+    await check('deleting yesterday\'s capture row does not delete the capture', async () => {
+      const before = inboxStatus();
+      await post({ candidateId: `todo_inbox:${captureId}`, rank: 3, event: 'remove', date: yesterday });
+      assert.equal(inboxStatus(), before);
+      await post({ candidateId: `todo_inbox:${captureId}`, rank: 3, event: 'reopen', date: yesterday });
     });
 
     await check('/api/day/plan says a past day is editable, so the client may send dates', async () => {

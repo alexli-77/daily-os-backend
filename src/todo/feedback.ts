@@ -99,12 +99,16 @@ export const PLAN_ROW_TEXT_MAX = 150;
 export const TODO_FEEDBACK_PATH = 'data/runtime/todo-feedback.jsonl';
 
 /**
- * What a past day's row can still be told: how it was left, its wording and
- * note, and "back to untouched". Not `defer`, `remove`, `place` or `unplace` —
- * those reschedule (move a cycle session to the next day, skip it, pin it to a
- * clock time), and a day that is over has nothing left to schedule.
+ * What a past day's row can still be told — everything a calendar lets you do
+ * to a past event: how it was left, its wording, note and length, where it sat
+ * on the clock (`place` / `unplace`), taking it off that day (`remove`), and
+ * "back to untouched". All of it lands on that day's sheet only; the handler
+ * writes nothing back to the cycle schedule or the 作息 for a past day.
+ *
+ * Not `defer`: 顺到明天 is a decision about tomorrow, and for a past day that
+ * tomorrow has already happened.
  */
-export const PAST_DAY_EVENTS: readonly TodoFeedbackEvent[] = ['complete', 'partial', 'missed', 'update', 'reopen'];
+export const PAST_DAY_EVENTS: readonly TodoFeedbackEvent[] = ['complete', 'partial', 'missed', 'update', 'reopen', 'remove', 'place', 'unplace'];
 
 /**
  * The day a plan-row edit belongs to.
@@ -130,7 +134,7 @@ export function resolveFeedbackDate(
   if (date > today) return { ok: false, error: '还没到的日子不能补记，去双周排期里排它。' };
   if (date === today) return { ok: true, date, past: false };
   if (!(PAST_DAY_EVENTS as readonly string[]).includes(event)) {
-    return { ok: false, error: `往日只能补记完成情况和改文字（${PAST_DAY_EVENTS.join(', ')}），${event} 只对今天。` };
+    return { ok: false, error: event === 'defer' ? '顺延只对今天：那天的第二天已经过去了。可以记成未做。' : `往日不能 ${event}。` };
   }
   return { ok: true, date, past: true };
 }
