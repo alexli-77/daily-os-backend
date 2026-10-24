@@ -5,10 +5,12 @@ import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { collectEvidence } from '../workflows/evidence.js';
 import { todayInTimezone } from '../utils/date.js';
-import { loadMemory } from '../storage/memory.js';
+import { loadMemory, resolveMemoryRepositoryPath } from '../storage/memory.js';
 import { buildFeishuAgentContextPack } from './context-pack.js';
 import { describeClaudeFailure } from '../agent/claude-agent.js';
-import { bundledAsset } from '../utils/install-root.js';
+import { bundledAsset, installRoot } from '../utils/install-root.js';
+import { readUiRuntime, type UiRuntime } from '../ui/ui-runtime.js';
+import { MCP_SERVER_NAME, TOOL_ALLOW_NAMES } from '../mcp/tools.js';
 import type { FeishuAccessDecision } from './access-policy.js';
 import type { FeishuControlEffect } from './access-policy.js';
 import type { FeishuSessionRecord } from './session-catalog.js';
@@ -58,6 +60,7 @@ export async function startFeishuAgentModeRun(input: FeishuAgentModeInput): Prom
   const outputPath = path.join(os.tmpdir(), `daily-os-feishu-agent-${runId}.md`);
   const codexBin = process.env.CODEX_BIN || 'codex';
   const workdir = agentWorkdir(input.config);
+  fs.mkdirSync(workdir, { recursive: true });
   const args = codexArgs(input, outputPath, workdir);
   const prompt = await buildFeishuAgentPrompt(input);
   const child = spawn(codexBin, args, { stdio: ['pipe', 'pipe', 'pipe'], cwd: workdir, env: { ...process.env } });
@@ -146,22 +149,40 @@ const CLAUDE_SESSION_PREFIX = 'claude:';
  *   permission prompt, which `-p` cannot show, so they are refused.
  * - `--setting-sources project` keeps the user's own Claude Code settings —
  *   their hooks, plugins and output styles — out of the reply.
- * - `--strict-mcp-config` with no config: no MCP servers.
+ * - MCP (LEO-345): when the service is reachable we pass `--mcp-config` for the
+ *   Daily OS MCP server and drop Edit/Write — data changes go through the
+ *   `mcp__daily-os__*` tools (validated `/api` writes) instead of raw file
+ *   edits. When it is not reachable we fall back to `--strict-mcp-config` with
+ *   no config (no servers) and the old filesystem tools.
  */
-export function claudeAgentArgs(config: AppConfig, session: FeishuSessionRecord): string[] {
+export function claudeAgentArgs(config: AppConfig, session: FeishuSessionRecord, mcpConfigPath?: string): string[] {
   const writable = config.interaction.feishu.agent_mode.sandbox !== 'read-only';
+  const tools = mcpConfigPath
+    ? // ToolSearch: some Claude Code setups defer MCP tools behind it, so the
+      // model must be able to load them before the daily-os tools are callable.
+      ['Read', 'Glob', 'Grep', 'Skill', 'ToolSearch', ...TOOL_ALLOW_NAMES].join(',')
+    : writable
+      ? 'Read,Glob,Grep,Edit,Write,Skill'
+      : 'Read,Glob,Grep,Skill';
   const args = [
     '-p',
     '--output-format',
     'stream-json',
     '--verbose',
     '--strict-mcp-config',
+    ...(mcpConfigPath ? ['--mcp-config', mcpConfigPath] : []),
     '--setting-sources',
     'project',
     '--tools',
-    writable ? 'Read,Glob,Grep,Edit,Write,Skill' : 'Read,Glob,Grep,Skill',
+    tools,
+    // `--tools` only makes tools *available*; under `-p` they still prompt for
+    // permission and the prompt cannot be answered, so an MCP call gets denied.
+    // `--allowedTools` pre-approves them. Without this the Daily OS write tools
+    // (and even get_state) were rejected — the chat could read files but not act.
+    ...(mcpConfigPath ? ['--allowedTools', tools] : []),
     '--permission-mode',
-    writable ? 'acceptEdits' : 'default',
+    // Edit/Write need acceptEdits; MCP tools run via the allow-list above.
+    mcpConfigPath ? 'default' : writable ? 'acceptEdits' : 'default',
   ];
   if (!['', 'default', 'auto'].includes(config.llm.model.trim())) args.push('--model', config.llm.model);
   const previous = session.codex_session_id;
@@ -169,17 +190,49 @@ export function claudeAgentArgs(config: AppConfig, session: FeishuSessionRecord)
   return args;
 }
 
+/** Path to the built MCP server entry inside the installed service. */
+export function mcpServerEntry(): string {
+  return path.join(installRoot(), 'dist', 'mcp', 'daily-os-mcp.js');
+}
+
+/**
+ * Write a throwaway `--mcp-config` for this turn: launch the Daily OS MCP server
+ * with the running service's URL + token in its env, so its tools call `/api`
+ * on this exact instance. Returns the file path, or null when the service is
+ * not reachable (then the caller keeps the no-MCP fallback).
+ */
+export function writeMcpConfig(runtime: UiRuntime = readUiRuntime() as UiRuntime): string | null {
+  if (!runtime || !runtime.url || !runtime.token) return null;
+  const config = {
+    mcpServers: {
+      [MCP_SERVER_NAME]: {
+        command: process.execPath,
+        args: [mcpServerEntry()],
+        env: { DAILY_OS_API_URL: runtime.url, DAILY_OS_API_TOKEN: runtime.token },
+      },
+    },
+  };
+  const file = path.join(os.tmpdir(), `daily-os-mcp-${process.pid}-${Date.now()}.json`);
+  fs.writeFileSync(file, JSON.stringify(config), { encoding: 'utf8', mode: 0o600 });
+  return file;
+}
+
 async function startClaudeAgentModeRun(input: FeishuAgentModeInput): Promise<FeishuAgentModeRun> {
   const runId = `run_${Date.now()}_${process.pid}`;
   const claudeBin = process.env.CLAUDE_BIN || 'claude';
   const workdir = agentWorkdir(input.config);
+  fs.mkdirSync(workdir, { recursive: true });
   syncChatSkills(workdir);
-  const prompt = await buildFeishuAgentPrompt(input);
-  const child = spawn(claudeBin, claudeAgentArgs(input.config, input.session), {
+  const mcpConfigPath = writeMcpConfig();
+  const prompt = await buildFeishuAgentPrompt(input, Boolean(mcpConfigPath));
+  const child = spawn(claudeBin, claudeAgentArgs(input.config, input.session, mcpConfigPath ?? undefined), {
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: workdir,
     env: { ...process.env },
   });
+  const cleanupMcpConfig = (): void => {
+    if (mcpConfigPath) fs.rmSync(mcpConfigPath, { force: true });
+  };
   let stdout = '';
   let stderr = '';
   let stdoutBuffer = '';
@@ -225,11 +278,13 @@ async function startClaudeAgentModeRun(input: FeishuAgentModeInput): Promise<Fei
   const done = new Promise<FeishuAgentModeResult>((resolve, reject) => {
     child.on('error', (error) => {
       clearTimeout(timeout);
+      cleanupMcpConfig();
       settled = true;
       reject(error);
     });
     child.on('close', (code) => {
       clearTimeout(timeout);
+      cleanupMcpConfig();
       settled = true;
       const threadId = sessionId ? `${CLAUDE_SESSION_PREFIX}${sessionId}` : undefined;
       if (stopped) {
@@ -291,19 +346,23 @@ export function syncChatSkills(workdir: string, source: string = bundledAsset('p
 function claudeToolProgress(event: Record<string, unknown>): string {
   const message = isObject(event.message) ? event.message : null;
   const content = message && Array.isArray(message.content) ? message.content : [];
+  // Generic by design (用户要求): a running turn shows only "正在操作…", never
+  // the tool/file names or any detail of what it is doing.
   for (const block of content) {
-    if (!isObject(block) || block.type !== 'tool_use') continue;
-    const toolInput = isObject(block.input) ? block.input : {};
-    const target = typeof toolInput.file_path === 'string' ? path.basename(toolInput.file_path) : typeof toolInput.pattern === 'string' ? toolInput.pattern : '';
-    if (block.name === 'Skill') return `正在用技能 ${typeof toolInput.skill === 'string' ? toolInput.skill : ''}`.trim();
-    const verb = block.name === 'Edit' || block.name === 'Write' ? '正在改' : '正在看';
-    return target ? `${verb} ${target}` : `${verb}文件`;
+    if (isObject(block) && block.type === 'tool_use') return '正在操作…';
   }
   return '';
 }
 
 export function agentWorkdir(config: AppConfig): string {
-  return path.resolve(config.interaction.feishu.agent_mode.workdir.trim() || process.cwd());
+  const configured = config.interaction.feishu.agent_mode.workdir.trim();
+  if (configured) return path.resolve(configured);
+  // Default to the vault — the data the agent reasons about (10_OKR / 20_CYCLES
+  // / 00_System) — never the service data root. The data root holds
+  // config/config.yaml and .env, and the chat's Read tool is scoped to its
+  // workdir; rooting it there let the model read secrets (LEO-345). The vault is
+  // a different tree, so config/.env are outside what Read can reach.
+  return resolveMemoryRepositoryPath(config);
 }
 
 export function agentModeControlEffect(config: AppConfig): FeishuControlEffect {
@@ -337,7 +396,7 @@ function codexArgs(input: FeishuAgentModeInput, outputPath: string, workdir: str
  * The pages read these files directly, so an edit shows up on the next load.
  */
 const DAILY_OS_FILE_GUIDE = [
-  '当前工作目录就是 Daily OS 的数据目录，用户让你改作息、排期、要务、OKR 时，直接改这里的文件。',
+  '当前工作目录是 Daily OS 的 vault（你的数据，不含配置和密钥），用户让你改作息、排期、要务、OKR 时，直接改这里的文件。',
   '00_System/routines.json：作息。periods[].dayTypes[].modes[].blocks[] 是每种日子的时间块（id、title、start、end，时间用 HH:mm）；dayOverrides 按日期放单日改动。改时间块时保留 id，同一 mode 里按 start 排好顺序。',
   '20_CYCLES/<周期>.md：双周周期，要务在里面；20_CYCLES/<周期>.schedule.json：这个周期的排期。',
   '10_OKR/：OKR。rhythm.md：作息规则的文字说明。',
@@ -347,8 +406,40 @@ const DAILY_OS_FILE_GUIDE = [
   '.claude/skills/ 下是 Daily OS 的技能（比如 daily-plan：每天的计划怎么排）。问题对得上时用 Skill 工具加载它，按里面的规则回答；这些文件由 Daily OS 维护，不要改。',
 ];
 
-async function buildFeishuAgentPrompt(input: FeishuAgentModeInput): Promise<string> {
+/**
+ * When the MCP tools are available (LEO-345), changes go through them, not raw
+ * file edits. The model may still read files to understand detail, but writing
+ * is the tools' job so validation and side effects actually run.
+ */
+const DAILY_OS_TOOLS_GUIDE = [
+  '当前工作目录是 Daily OS 的 vault（你的数据，不含配置和密钥）。用户让你改作息、待办、周期要务/retro、OKR 时，用 daily-os 的工具（mcp__daily-os__*）来改，不要直接编辑文件——工具会走校验和联动（比如改作息后重算排期、OKR 归一化）。',
+  '这些 daily-os 工具通过 Daily OS 的 API 改数据，不受文件 sandbox（read-only）限制；该改就直接调用，不要因为 sandbox 是只读就说自己改不了。',
+  '如果 daily-os 的工具（mcp__daily-os__*）没有直接出现在可用工具里，先用 ToolSearch 加载它们（搜 "daily-os" 或具体工具名），再调用，不要据此说工具不可用。',
+  '要改之前先拿到现状，但简单、针对性的改动不要用 get_state（它返回整个状态，又大又慢）：改作息直接 Read 00_System/routines.json 拿 periods；改某期要务/retro 直接 Read 对应的 20_CYCLES 文件；只有需要待办 id 或要跨多块看全局时才用 get_state。拿到后调写工具：capture_todo / update_todo_inbox（按 id）/ save_routines / save_okr / cycle_section。',
+  'save_okr、save_routines 是整份覆盖写：先读现状、在完整内容上改，再整份传回，不要只传片段。',
+  '你可以读工作目录里的文件来了解细节，但改数据一律走工具。',
+  '今天的计划不归这些工具管；用户想改今天计划，告诉他们在今天页上改，或者改作息后重新生成。',
+  '不确定指的是哪一块、或改动会影响很多天时，先问一句再改。',
+  '.claude/skills/ 下是 Daily OS 的技能（如 daily-plan）。问题对得上时用 Skill 工具加载，按里面的规则回答；这些文件不要改。',
+];
+
+/**
+ * Settings are read-only to the chat (LEO-345 Phase 2): it explains how to
+ * change a setting and reads the current value, but the user makes the change.
+ * There are deliberately no settings tools — config holds the provider,
+ * access/permission levels and (some) keys, and letting the chat rewrite that
+ * is self-escalation. So: guide, don't act.
+ */
+const DAILY_OS_SETTINGS_GUIDE = [
+  '设置（config）你不能改，也没有改设置的工具。用户问"怎么改某个设置"时：从 daily_os_context / get_state 的 config 读出这项的当前值，解释它是什么、现在是什么，然后告诉用户自己去改——有设置页控件的让他在 Daily OS「设置」里改，其余的给出 config.yaml 里确切的 key 路径。',
+  '常见设置的 key（以 get_state 里 config 的真实结构为准，别凭空编）：通知总开关 notifications.enabled、按来源 notifications.sources.<daily_plan|daily_review|weekly_review|progress_reminder|background_suggestions>.enabled；休息日工作量上限 planning.work_task_cap_on_rest_days；对话助手开关 interaction.feishu.agent_mode.enabled；模型 provider llm.provider / llm.model。',
+  '绝不读出或外泄任何密钥/token（API key、各类 token、team.supabase_anon_key 等）；这些用户在设置页或 .env 里自己填，你看不到也不要帮改。',
+  '不要用文件工具去改 config/.env 来绕过这条——设置一律由用户本人改。数据（待办/作息/周期/OKR）才归你用工具改。',
+];
+
+export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEnabled = false): Promise<string> {
   const context = await buildOptionalContext(input);
+  const claudeGuide = mcpEnabled ? DAILY_OS_TOOLS_GUIDE : DAILY_OS_FILE_GUIDE;
   return [
     section('bridge_context', input.bridge),
     section('session', {
@@ -362,16 +453,20 @@ async function buildFeishuAgentPrompt(input: FeishuAgentModeInput): Promise<stri
     section('instructions', [
       input.config.llm.provider === 'claude' ? '你是 Daily OS 里的对话助手。' : '你是 Daily OS 的 Feishu 远程 Codex agent mode。',
       input.bridge.source === 'web' ? '用中文回复，回复显示在 Daily OS 的对话页里。' : '用中文回复，回复内容会直接发回飞书。',
-      '优先像助手一样和用户自然协作；如果需要执行代码或读取文件，遵守当前 sandbox 和远程控制策略。',
+      // Reply contract (用户要求): outcome first, terse, no reasoning dumps.
+      '回复要短、结论先行：做成了就只说「已完成」，最多再补一句改了什么；没看懂用户要什么就说「请详细提供……」并点名缺什么信息；没做成就一句话说清为什么，再给一步用户可以自己手动做的操作。',
+      '不要在回复里写思考过程、工具调用日志、方案罗列或证据流水账。',
+      '动手前如果有必须由用户决定的歧义（多种改法、影响范围不清），先问那一个关键问题再动手——不要先试一通、过了很久才回来问用户怎么做。能直接做的就直接做完。',
+      'sandbox 的 read-only 只限制直接编辑文件，不限制用 daily-os 工具改数据——用工具改即可，不要据此拒绝。',
       '不要泄露 token、密钥、完整本地隐私路径或隐藏推理。',
-      '如果用户要求超出当前权限，解释缺少的配置或权限，不要假装已经执行。',
-      '如果你完成了可以由 Codex 代做的工作，简短说明结果、文件或下一步。',
+      '如果用户要求超出当前权限，一句话说缺什么配置/权限，不要假装已经执行。',
       '当 daily_os_context 里有 context_pack 时，把它当成当前 Daily OS 助手工作台：先看最新 workflow、progress ledger、decision policy 和 evidence summary。',
       '如果 context_pack.pending_background_suggestions 存在，用户可能会用“第 N 条”“刚才那个”“这些都忽略/写入/改成……”来跟进后台建议；请按自然语言理解并继续操作。',
       '回答计划/复盘/任务优先级问题时，用“确认的 / 暂缓的 / 新增的”组织，不要输出原始证据流水账。',
       '涉及分工时明确写出“Codex 可以做”和“需要用户本人做”。',
     ]),
-    input.config.llm.provider === 'claude' ? section('daily_os_files', DAILY_OS_FILE_GUIDE) : '',
+    input.config.llm.provider === 'claude' ? section('daily_os_files', claudeGuide) : '',
+    input.config.llm.provider === 'claude' ? section('daily_os_settings', DAILY_OS_SETTINGS_GUIDE) : '',
     context ? section('daily_os_context', context) : '',
     section('user_input', { text: input.text }),
   ]

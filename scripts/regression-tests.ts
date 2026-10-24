@@ -113,6 +113,9 @@ try {
     'scripts/tests/okr.test.ts',
     'scripts/tests/todo-scorer.test.ts',
     'scripts/tests/todo-inbox-history.test.ts',
+    // LEO-345 chat MCP: tool→/api mapping, loopback auth/errors, claude -p
+    // wiring (MCP tools, no Edit/Write), and an end-to-end spawn via the SDK.
+    'scripts/tests/chat-mcp.test.ts',
     // LEO-294 diagnostic bundle: every sensitive category is redacted, and the
     // bundle builds even with no service running.
     'scripts/tests/diagnostics.test.ts',
