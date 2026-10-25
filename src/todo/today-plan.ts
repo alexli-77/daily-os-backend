@@ -216,13 +216,25 @@ export function buildPlanSnapshotForDate(
     const done = row.itemKeys.every((key) => Object.entries(feedback).some(([id, state]) => weeklyKey(id) === key && state === 'complete'));
     if (done) feedback[row.candidateId] = 'complete';
   }
-  // Today's sheet only: a big rock from the cycle schedule sits at its reserved
-  // time unless the user moved it (双周排期). 往日 replays the day as it was.
-  const rockStart = new Map(
-    options.mealRows
-      ? scheduledSessionsFor(config, date).filter((session) => session.bigRock && session.start).map((session) => [session.itemKey, session.start!] as const)
-      : [],
-  );
+  // Today's sheet only: overlay the live 双周排期 onto matching 要务 rows, so a
+  // schedule edit (a re-timed or re-sized session) shows on today without a
+  // regenerate. Earlier only a big rock's reserved start was taken; now every
+  // scheduled 要务 carries its start and combined minutes, and the live schedule
+  // wins over the frozen morning plan — the user's own move still wins over both.
+  // 往日 replays the day as it was, so this is gated on mealRows like the other
+  // live schedule reads. Sessions of one 要务 collapse to one slot: earliest
+  // start, summed minutes — the same rule the scorer uses.
+  const scheduleSlots = new Map<string, { start?: string; minutes: number }>();
+  if (options.mealRows) {
+    for (const session of scheduledSessionsFor(config, date)) {
+      const slot = scheduleSlots.get(session.itemKey);
+      const start = [slot?.start, session.start].filter((value): value is string => Boolean(value)).sort()[0];
+      scheduleSlots.set(session.itemKey, {
+        minutes: (slot?.minutes ?? 0) + session.minutes,
+        ...(start ? { start } : {}),
+      });
+    }
+  }
   if (suggested.size === 0 && todos[0]) suggested.add(todos[0].candidateId);
 
   return {
@@ -242,13 +254,22 @@ export function buildPlanSnapshotForDate(
         ...fixedRows(fixed, todos.length),
       ].filter((todo) => !removed.has(todo.candidateId)).map((row) => {
         const { start: defaultStart, ...plain } = row as DailyPlanTodo;
-        const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : (defaultStart ?? rockStart.get(plain.candidateId.split(':')[2] ?? ''));
+        // The live 双周排期 slot for this 要务 row, if any (weekly rows only; a
+        // non-weekly candidateId has no 8-hex key and never matches).
+        const slot = scheduleSlots.get(plain.candidateId.split(':')[2] ?? '');
+        // Start: the user's pin wins; then the live schedule; then the frozen
+        // plan's own start. Schedule beats the frozen plan so a re-timed session
+        // reflects without a regenerate.
+        const start = pinned.has(plain.candidateId) ? pinned.get(plain.candidateId) : (slot?.start ?? defaultStart);
         const text = editedText.get(plain.candidateId);
         const color = editedColor.get(plain.candidateId) ?? plain.color;
         const userMit = editedMit.get(plain.candidateId);
         const mit = userMit ?? suggested.has(plain.candidateId);
         const todo = {
           ...plain,
+          // The live schedule's length beats the frozen plan's estimate; the
+          // user's own edit (below) still wins over it.
+          ...(slot?.minutes ? { minutes: slot.minutes } : {}),
           ...(start ? { start } : {}),
           ...(text ? { text } : {}),
           ...(color ? { color } : {}),

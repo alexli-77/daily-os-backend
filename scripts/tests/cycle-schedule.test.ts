@@ -279,6 +279,55 @@ await test('a big rock sits at its reserved time on today\'s sheet until the use
   assert.equal(row()?.start, '15:00', 'the user\'s move wins');
 });
 
+await test('today mirrors the live 双周排期: a re-timed/re-sized session reflects without a regenerate, and the user still wins', () => {
+  const { config, id, today } = setup();
+  const candidateId = `weekly:0:${DRAFT}`;
+  // A frozen morning plan that gave this 要务 no start and a 30m estimate.
+  const content = JSON.stringify({ todos: [{ rank: 1, text: '写方案', candidateId, minutes: 30 }] });
+  appendDailyMemory(config, 'daily_plan', today, content);
+  writeLatestWorkflowOutput(config, 'daily_plan', today, content);
+  const row = () => buildTodayPlanSnapshot(config)?.todos.find((todo) => todo.candidateId === candidateId);
+
+  // A NON-big-rock session now carries its start and minutes onto today.
+  writeSchedule(config, {
+    cycleId: id,
+    generatedAt: 'now',
+    sessions: [{ id: 'a', itemKey: DRAFT, label: 'x', date: today, start: '09:30', minutes: 45, bigRock: false }],
+    deadlines: [],
+  });
+  assert.equal(row()?.start, '09:30', 'the schedule start shows on today');
+  assert.equal(row()?.minutes, 45, 'the schedule length beats the frozen estimate');
+
+  // Editing the schedule reflects immediately — no daily_plan re-run, same frozen content.
+  writeSchedule(config, {
+    cycleId: id,
+    generatedAt: 'now',
+    sessions: [{ id: 'a', itemKey: DRAFT, label: 'x', date: today, start: '11:00', minutes: 90, bigRock: false }],
+    deadlines: [],
+  });
+  assert.equal(row()?.start, '11:00', 'a re-timed session reflects without a regenerate');
+  assert.equal(row()?.minutes, 90, 'a re-sized session reflects without a regenerate');
+
+  // Two sessions of one 要务 collapse to one slot: earliest start, summed minutes.
+  writeSchedule(config, {
+    cycleId: id,
+    generatedAt: 'now',
+    sessions: [
+      { id: 'a', itemKey: DRAFT, label: 'x', date: today, start: '11:00', minutes: 90, bigRock: false },
+      { id: 'b', itemKey: DRAFT, label: 'x', date: today, start: '08:00', minutes: 30, bigRock: false },
+    ],
+    deadlines: [],
+  });
+  assert.equal(row()?.start, '08:00', 'earliest of the two sessions');
+  assert.equal(row()?.minutes, 120, 'summed minutes of the two sessions');
+
+  // The user's own edits still win over the live schedule.
+  recordTodoFeedback(config, { date: today, event: 'place', candidateId, rank: 1, start: '15:00' });
+  recordTodoFeedback(config, { date: today, event: 'update', candidateId, rank: 1, minutes: 20 });
+  assert.equal(row()?.start, '15:00', 'the user\'s pinned time wins over the schedule');
+  assert.equal(row()?.minutes, 20, 'the user\'s minutes edit wins over the schedule');
+});
+
 await test('a Feishu agenda is read in the user\'s timezone, declined events left out, midnight-crossers cut at 24:00', () => {
   const events = parseAgenda(
     {
