@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { runCommand } from '../utils/command.js';
-import { todayInTimezone } from '../utils/date.js';
+import { addDays, calendarAround, todayInTimezone, weekdayLabelZh } from '../utils/date.js';
 import { loadMemory, readLatestWorkflowOutput } from '../storage/memory.js';
 import { readProgressLedger } from '../progress/capture.js';
 import {
@@ -25,6 +25,9 @@ import { recentLocalPriorities, recentLocalRetros, renderLocalPrioritiesBlock, r
 import { buildCycleContext, pickReviewAndTarget, renderCycleContextBlock } from '../cycles/cycle-context.js';
 import { bundledAsset } from '../utils/install-root.js';
 import { unplannedForCycle } from '../cycles/unplanned.js';
+import { cycleDays } from '../cycles/schedule.js';
+import { DAY_OUTCOMES_GUIDE, dayOutcomes, renderDayOutcomes } from '../todo/day-outcomes.js';
+import { refreshCalendarSubscriptions, upcomingCalendarLines } from '../calendar/subscriptions.js';
 
 type SkillEntry = AppConfig['skills']['registry'][number];
 type SkillProvider = SkillEntry['provider'];
@@ -264,13 +267,20 @@ export async function buildSkillInputPack(
   // local-first replacement for life-review-os reading the Feishu weekly table.
   const cycleContextBlock = renderCycleContextBlock(buildCycleContext(config, { reviewId: input.reviewCycleId }));
   const unplannedBlock = renderUnplannedBlock(config, input.reviewCycleId, date);
+  const outcomesBlock = renderOutcomesBlock(config, input.reviewCycleId, date);
+  await refreshCalendarSubscriptions(config).catch(() => undefined);
+  const calendar = upcomingCalendarLines(config, 14, 1);
+  const calendarBlock = calendar.status.length > 0 ? [...calendar.status.map((line) => `> ${line}`), ...calendar.lines.map((line) => `- ${line}`)].join('\n') : '';
 
   return redactSensitive(
     [
       '# Daily OS Skill Input Pack',
       '',
       `Generated at: ${new Date().toISOString()}`,
-      `Date: ${date}`,
+      `Date: ${date} ${weekdayLabelZh(date)}`,
+      // Planning next week names days ("下周一 AG1"); the model looks them up
+      // here instead of working weekdays out — see `calendarAround`.
+      `Calendar: ${calendarAround(date).map((day) => `${day.week}${day.weekday.slice(-1)} ${day.date.slice(5)}`).join(' · ')}`,
       `Skill: ${input.skillId}`,
       `Mode: ${input.mode}`,
       `Source: ${input.source}:${input.messageId}`,
@@ -312,6 +322,18 @@ export async function buildSkillInputPack(
       '## 计划外（系统统计）',
       '被复盘那一期里，不属于要务的事（每天加的临时安排和随手记），按花的时间排。写 review 时把它们算进去：这些事吃掉了多少时间、挤掉了哪些要务。值得长期做的，在下期要务里写成一条；一次性的事不要写进要务。',
       unplannedBlock || '(none)',
+      '',
+      // Planning the next cycle around what is already fixed: the subscribed
+      // calendars' events, read from the calendars themselves (2026-10-26).
+      '## 日历（订阅，直接读取）',
+      '订阅日历里从昨天起两周的日程。这些时间已经是每天作息里的固定块，排要务时绕开；日期以这里为准，不要用对话或旧复盘里转述的日期。',
+      calendarBlock || '(no subscribed calendar)',
+      '',
+      // Same cut-off reason: a short per-day count, so the review sees what
+      // each day's To-do came to without reaching the raw daily memory.
+      '## 每日清理结果（系统统计）',
+      DAY_OUTCOMES_GUIDE,
+      outcomesBlock || '(none)',
       '',
       // Same reason as the OKR chain above: life-review-os only reads the first
       // ~20k chars of this pack, and the full Linear dump under "Structured
@@ -815,6 +837,18 @@ function renderUnplannedBlock(config: AppConfig, reviewCycleId: string | undefin
       .join('\n');
   } catch (error) {
     console.warn(`[skills] 计划外 not added to the pack: ${error instanceof Error ? error.message : String(error)}`);
+    return '';
+  }
+}
+
+/** The reviewed cycle's days, or the last 14 when there is no local cycle. */
+function renderOutcomesBlock(config: AppConfig, reviewCycleId: string | undefined, today: string): string {
+  try {
+    const review = pickReviewAndTarget(config, reviewCycleId)?.review;
+    const dates = review ? cycleDays(review).filter((day) => day <= today) : Array.from({ length: 14 }, (_, index) => addDays(today, -13 + index));
+    return renderDayOutcomes(dayOutcomes(config, dates, today));
+  } catch (error) {
+    console.warn(`[skills] 每日清理结果 not added to the pack: ${error instanceof Error ? error.message : String(error)}`);
     return '';
   }
 }

@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { collectEvidence } from '../workflows/evidence.js';
-import { todayInTimezone } from '../utils/date.js';
+import { calendarAround, timeInZone, todayInTimezone, weekdayLabelZh } from '../utils/date.js';
+import { refreshCalendarSubscriptions, upcomingCalendarLines } from '../calendar/subscriptions.js';
 import { loadMemory, resolveMemoryRepositoryPath } from '../storage/memory.js';
 import { buildFeishuAgentContextPack } from './context-pack.js';
 import { describeClaudeFailure } from '../agent/claude-agent.js';
@@ -397,7 +398,7 @@ function codexArgs(input: FeishuAgentModeInput, outputPath: string, workdir: str
  */
 const DAILY_OS_FILE_GUIDE = [
   '当前工作目录是 Daily OS 的 vault（你的数据，不含配置和密钥），用户让你改作息、排期、要务、OKR 时，直接改这里的文件。',
-  '00_System/routines.json：作息。periods[].dayTypes[].modes[].blocks[] 是每种日子的时间块（id、title、start、end，时间用 HH:mm）；dayOverrides 按日期放单日改动。改时间块时保留 id，同一 mode 里按 start 排好顺序。',
+  '00_System/routines.json：作息。periods[].dayTypes[].modes[].blocks[] 是每种日子的时间块（id、title、start、end，时间用 HH:mm）；dayOverrides 按日期放单日改动。改时间块时保留 id，同一 mode 里按 start 排好顺序。某一天加一个会议/活动：dayOverrides["YYYY-MM-DD"].edits 里放一个新 id 的块（kind 用 fixed），日期先在 <now>.calendar 里查。',
   '20_CYCLES/<周期>.md：双周周期，要务在里面；20_CYCLES/<周期>.schedule.json：这个周期的排期。',
   '10_OKR/：OKR。rhythm.md：作息规则的文字说明。',
   '改 JSON 时保持合法 JSON，不要动和这次请求无关的字段。改之前先读文件，改完用一两句话说清改了什么。',
@@ -417,6 +418,7 @@ const DAILY_OS_TOOLS_GUIDE = [
   '如果 daily-os 的工具（mcp__daily-os__*）没有直接出现在可用工具里，先用 ToolSearch 加载它们（搜 "daily-os" 或具体工具名），再调用，不要据此说工具不可用。',
   '要改之前先拿到现状，但简单、针对性的改动不要用 get_state（它返回整个状态，又大又慢）：改作息直接 Read 00_System/routines.json 拿 periods；改某期要务/retro 直接 Read 对应的 20_CYCLES 文件；只有需要待办 id 或要跨多块看全局时才用 get_state。拿到后调写工具：capture_todo / update_todo_inbox（按 id）/ save_routines / save_okr / cycle_section。',
   'save_okr、save_routines 是整份覆盖写：先读现状、在完整内容上改，再整份传回，不要只传片段。',
+  '某一天有会议、活动、retreat 这类固定日程（「下周一下午 3 到 5 点 feedback session」），用 set_day_event 加到那一天：日期先在 <now>.calendar 里查，不要自己推算；save_routines 改的是每天都一样的模板，不是某一天。加完把工具回的日期和星期原样告诉用户。',
   '你可以读工作目录里的文件来了解细节，但改数据一律走工具。',
   '今天的计划不归这些工具管；用户想改今天计划，告诉他们在今天页上改，或者改作息后重新生成。',
   '不确定指的是哪一块、或改动会影响很多天时，先问一句再改。',
@@ -438,6 +440,7 @@ const DAILY_OS_SETTINGS_GUIDE = [
 ];
 
 export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEnabled = false): Promise<string> {
+  await refreshCalendarSubscriptions(input.config).catch(() => undefined);
   const context = await buildOptionalContext(input);
   const claudeGuide = mcpEnabled ? DAILY_OS_TOOLS_GUIDE : DAILY_OS_FILE_GUIDE;
   return [
@@ -450,8 +453,16 @@ export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEna
       access_role: input.access.role,
       access_level: input.config.interaction.feishu.security.access_level,
     }),
+    section('now', buildNowContext(input.config)),
     section('instructions', [
       input.config.llm.provider === 'claude' ? '你是 Daily OS 里的对话助手。' : '你是 Daily OS 的 Feishu 远程 Codex agent mode。',
+      // 2026-10-26: the chat worked weekdays out itself and was a day off for
+      // a week (下周一 → 10/27), then argued with the user about what day it was.
+      '今天几号、星期几、现在几点，以 <now> 为准。用户说的「周X / 下周X / 明天 / 后天」是哪一天，只能在 <now>.calendar 里查，不要自己推算星期。',
+      '往作息 dayOverrides、要务、计划里写日期之前，先在 <now>.calendar 里核对；回复里日期和星期一起写（例如 10/26 星期一），让用户一眼能看出对不对。',
+      '用户说的日期或星期和你的理解对不上时，先查 <now>；是你错了就直接认错并改正，不要让用户去检查设备时间。',
+      // 2026-10-26: the AG1 calendar is read directly now; retelling it in chat is what went wrong.
+      '<now>.events 是从订阅日历（event_sources 里列的）直接读来的日程，已经自动放进每天的作息和计划里：问「哪天有什么安排」以它为准；对话历史或你记得的说法和它冲突时，以日历为准并直接说出来。日历里有的不要再用 set_day_event 重复加；日历之外的事（用户口头说的）才用 set_day_event。',
       input.bridge.source === 'web' ? '用中文回复，回复显示在 Daily OS 的对话页里。' : '用中文回复，回复内容会直接发回飞书。',
       // Reply contract (用户要求): outcome first, terse, no reasoning dumps.
       '回复要短、结论先行：做成了就只说「已完成」，最多再补一句改了什么；没看懂用户要什么就说「请详细提供……」并点名缺什么信息；没做成就一句话说清为什么，再给一步用户可以自己手动做的操作。',
@@ -472,6 +483,24 @@ export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEna
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+/**
+ * Today, the time, three weeks of dates (`calendarAround`) and — when a
+ * calendar is subscribed — its events from yesterday through the next two
+ * weeks, in the user's timezone.
+ */
+export function buildNowContext(config: AppConfig, now: Date = new Date()): Record<string, unknown> {
+  const today = todayInTimezone(config);
+  const { lines, status } = upcomingCalendarLines(config, 14, 1);
+  return {
+    timezone: config.user.timezone,
+    today,
+    weekday: weekdayLabelZh(today),
+    time: timeInZone(config.user.timezone, now),
+    calendar: calendarAround(today),
+    ...(status.length > 0 ? { events: lines, event_sources: status } : {}),
+  };
 }
 
 async function buildOptionalContext(input: FeishuAgentModeInput): Promise<unknown> {

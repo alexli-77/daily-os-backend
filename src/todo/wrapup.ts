@@ -19,11 +19,11 @@ import { isRhythmRow } from './today-plan.js';
  * scheduler catches a missed run up only on the same day. On 2026-10-19 that
  * left a day with three unticked rows that nothing ever looked at again.
  *
- * So a day that ended without a review is *pending*, and the Mac app asks
- * about it before it shows today: 回收 (settle each unticked row — done, not
- * done, or move it to today — then run the review late) or 跳过 (leave the
- * day as it is, on purpose). Either answer is recorded here, and the day is
- * not asked about again.
+ * So a day that ended with rows nobody decided on is *pending*, and the Mac
+ * app asks about it before it shows today: 前往清理 opens that day, where each
+ * open row gets 完成 / 未做 / 挪到今天, and 清理完成 closes it (running its
+ * review late if it never ran). 这天不清了 leaves the day as it is, on purpose.
+ * Either answer is recorded here, and the day is not asked about again.
  */
 
 export const WRAPUP_PATH = 'data/runtime/day-wrapups.json';
@@ -78,9 +78,36 @@ export function dayWasReviewed(config: AppConfig, date: string): boolean {
 }
 
 /**
- * The days before `today`, oldest first, that had a plan with rows, were never
- * reviewed, and the user has not yet closed or skipped. A day with no plan has
- * nothing to bring in, so it is not asked about.
+ * States that are a decision on a row: 完成, 做了一部分, 未做, 推到明天 / 挪到今天.
+ * A row that is untouched, only edited (`update`) or reopened is still open.
+ */
+const SETTLED_STATES = new Set(['complete', 'partial', 'missed', 'defer']);
+
+/**
+ * A row the day cannot be closed with: no decision yet, and not a 固定日程 —
+ * a meal or a standing block is the day's frame, not a to-do to clean up.
+ */
+export function rowNeedsCleanup(candidateId: string, state: string | undefined): boolean {
+  return !isRhythmRow(candidateId) && !SETTLED_STATES.has(state ?? '');
+}
+
+/** The rows of `date` that still need a decision. */
+export function openRowsOf(config: AppConfig, date: string): DailyPlanTodo[] {
+  const day = readDayHistory(config, date);
+  return day.todos.filter((todo) => rowNeedsCleanup(todo.candidateId, day.feedback[todo.candidateId]));
+}
+
+/**
+ * The days before `today`, oldest first, that still have a To-do nobody
+ * decided on, and that the user has not closed or skipped.
+ *
+ * Until 2026-10-26 the test was "the evening review never ran". That let
+ * through the days it mattered most: the review reads the rows, it does not
+ * decide them, so a reviewed day could still end with rows nobody ticked
+ * (10.21 had two, 10.24 one), and the weekly review then counted them as
+ * neither done nor not. Now the rows are the test: a day is clean when every
+ * row has a state. A day whose review never ran but whose rows are all
+ * decided is not asked about; 清理完成 still back-runs a missing review.
  */
 export function pendingWrapups(config: AppConfig, today: string, lookback = WRAPUP_LOOKBACK_DAYS): PendingWrapup[] {
   const resolved = readWrapups();
@@ -90,9 +117,8 @@ export function pendingWrapups(config: AppConfig, today: string, lookback = WRAP
     if (resolved[date]) continue;
     const sections = readDailyMemorySections(config, date);
     if (!sections.some((section) => section.workflow === 'daily_plan')) continue;
-    if (dayWasReviewed(config, date)) continue;
     const day = readDayHistory(config, date);
-    if (day.todos.length === 0) continue;
+    if (!day.todos.some((todo) => rowNeedsCleanup(todo.candidateId, day.feedback[todo.candidateId]))) continue;
     out.push({
       date,
       todos: day.todos.map((todo, index) => ({

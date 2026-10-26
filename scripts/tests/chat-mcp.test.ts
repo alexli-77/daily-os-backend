@@ -20,6 +20,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { TOOLS, TOOL_ALLOW_NAMES, apiCaller } from '../../src/mcp/tools.js';
 import { claudeAgentArgs, writeMcpConfig, mcpServerEntry, agentWorkdir, buildFeishuAgentPrompt } from '../../src/interaction/agent-mode.js';
 import type { AppConfig } from '../../src/config/schema.js';
+import { calendarAround, timeInZone } from '../../src/utils/date.js';
 import type { FeishuSessionRecord } from '../../src/interaction/session-catalog.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -39,6 +40,17 @@ test('tools map to the right /api method + path', () => {
   assert.deepEqual(tool('capture_todo').request({ text: '买菜' }), { method: 'POST', path: '/api/capture', body: { text: '买菜' } });
   assert.equal(tool('cycle_section').request({ id: 'x', section: '要务', content: 'c' }).path, '/api/cycles/section');
   assert.equal(tool('save_okr').request({ level: 'current', markdown: '#' }).path, '/api/okr');
+  const event = tool('set_day_event').request({ date: '2026-10-26', start: '15:00', end: '18:00', title: 'AG1 Feedback Session' }) as any;
+  assert.equal(event.path, '/api/routines/day-override');
+  assert.equal(event.body.date, '2026-10-26');
+  assert.deepEqual({ ...event.body.change.block, id: 'x' }, { id: 'x', start: '15:00', end: '18:00', title: 'AG1 Feedback Session', kind: 'fixed' });
+  assert.match(event.body.change.block.id, /^evt-[a-z0-9]+$/, 'an event without an id gets a stable one');
+  assert.equal(
+    (tool('set_day_event').request({ date: '2026-10-26', start: '15:00', end: '18:00', title: 'AG1 Feedback Session' }) as any).body.change.block.id,
+    event.body.change.block.id,
+    'the same event twice is the same id, not two blocks',
+  );
+  assert.deepEqual((tool('remove_day_event').request({ date: '2026-10-26', id: 'evt-1' }) as any).body, { date: '2026-10-26', change: { type: 'reset', blockId: 'evt-1' } });
 });
 
 test('allow-list names are mcp__daily-os__<tool>', () => {
@@ -139,6 +151,7 @@ function promptInput(provider = 'claude') {
   return {
     config: {
       llm: { provider, model: 'default' },
+      user: { timezone: 'Asia/Tokyo' },
       memory: { repository_path: '/tmp/daily-os-test-vault' },
       interaction: {
         feishu: {
@@ -167,6 +180,43 @@ test('the prompt tells claude it cannot change settings (guide, not act)', async
 test('the settings guide is claude-only (codex path omits it)', async () => {
   const prompt = await buildFeishuAgentPrompt(promptInput('codex'), false);
   assert.ok(!prompt.includes('daily_os_settings'), 'no claude settings section for codex');
+});
+
+// --- dates: looked up, never worked out (2026-10-26) ----------------------
+
+test('the calendar puts 下周一 on the right date — 10/21 was a Wednesday, so it is 10/26', () => {
+  const days = calendarAround('2026-10-21');
+  const find = (week: string, weekday: string) => days.find((day) => day.week === week && day.weekday === weekday)?.date;
+  assert.equal(find('本周', '星期一'), '2026-10-19');
+  assert.equal(find('下周', '星期一'), '2026-10-26');
+  assert.equal(find('下周', '星期二'), '2026-10-27');
+  assert.equal(days.find((day) => day.relative === '今天')?.weekday, '星期三');
+  assert.equal(days.length, 21);
+});
+
+test('a Sunday is the end of its week, not the start of the next', () => {
+  const days = calendarAround('2026-10-25');
+  assert.equal(days.find((day) => day.relative === '今天')?.week, '本周');
+  assert.equal(days.find((day) => day.relative === '明天')?.week, '下周');
+  assert.equal(days.find((day) => day.relative === '明天')?.date, '2026-10-26');
+});
+
+test('every chat turn carries today, its weekday and the calendar, and says to look dates up', async () => {
+  const prompt = await buildFeishuAgentPrompt(promptInput('claude'), true);
+  const now = JSON.parse(prompt.split('<now>\n')[1]!.split('\n</now>')[0]!) as { today: string; weekday: string; time: string; calendar: unknown[] };
+  assert.match(now.today, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(now.weekday, /^星期[一二三四五六日]$/);
+  assert.match(now.time, /^\d{2}:\d{2}$/);
+  assert.equal(now.calendar.length, 21);
+  assert.match(prompt, /只能在 \\u003cnow\\u003e\.calendar 里查/);
+  const codex = await buildFeishuAgentPrompt(promptInput('codex'), false);
+  assert.match(codex, /<now>/, 'the codex path gets it too');
+});
+
+test('timeInZone reads the zone, not the machine', () => {
+  const instant = new Date('2026-10-26T02:08:00Z');
+  assert.equal(timeInZone('Asia/Tokyo', instant), '11:08');
+  assert.equal(timeInZone('America/Toronto', instant), '22:08');
 });
 
 // --- end-to-end: SDK client → spawned server → stub HTTP -------------------

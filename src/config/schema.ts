@@ -703,6 +703,26 @@ export const AppConfigSchema = z.object({
     local_files: enabled.extend({
       files: z.array(z.object({ name: z.string(), path: z.string() })).default([]),
     }),
+    // 2026-10-26: calendars read from an iCal (.ics) address — a Google
+    // calendar's public or secret address, for one. Their events become the
+    // day's fixed blocks (src/calendar/subscriptions.ts): the plan works
+    // around them, the 日 view draws them, the chat is told about them.
+    ics_calendars: z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          /** Put in front of event titles that do not already start with it ("AG1 Feedback Session"). */
+          label: z.string().default(''),
+          url: z.string().url(),
+          enabled: z.boolean().default(true),
+          /** Events whose title contains any of these (case-insensitive) are left out. */
+          exclude: z.array(z.string()).default([]),
+          /** A 作息 category key for the rows (tag and colour); empty = the built-in 日历. */
+          category: z.string().default(''),
+          refresh_minutes: z.number().int().positive().default(30),
+        }),
+      )
+      .default([]),
   }),
   // LEO-282/283: the Supabase project two laptops share so they can read each
   // other's cycles. Both fields empty means "no team", and every team feature

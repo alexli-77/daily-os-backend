@@ -16,6 +16,7 @@
 - 做周复盘时，必须逐条核对 `weekly_priorities.data.items` 里的本周要务：哪些完成、哪些未闭环、哪些缺少证据。不要把多条要务合并成一个笼统结论。
 - 对 🐶 范围的本周要务尤其要完整保留；例如 portfolio、强制令工具、build in public 等条目不能被合并进“换导师材料”后消失。
 - 如果某条本周要务没有 Linear、progress ledger、IM、文档或其他证据证明完成，就列为未闭环或待确认，而不是忽略。
+- 如果 Evidence 里有 `daily_outcomes`，它是这 7 天每天 To-do 的清理结果（完成 / 部分 / 未做 / 推走 / 没清理）。「本周没做完」先从这里取：被未做或推走的条目要写进去；同一条推走两次以上的，建议拆小或明确本期不做。「没清理」的条目结果未知，不能当成完成。
 - 写得像真人助理在做周度对账和下周排班。少写抽象总结，多写具体项目、人名、文档名、任务编号。
 - 可以用“确认的 / 新增的 / 暂缓的”帮助用户快速扫读。
 - Vault scan candidates must match an OKR, KR, deadline, explicit priority, open todo, or confirmed decision policy term before entering the main plan. Use `vault_scan.reasons` and `matched_policy_terms` when explaining the choice.

@@ -3,7 +3,7 @@ import { runAgent } from '../agent/index.js';
 import { collectEvidence } from './evidence.js';
 import { fixedCoverage, fixedScheduleFor } from '../cycles/fixed-schedule.js';
 import { hasCycleSchedule, scheduledElsewhere, scheduledSessionsFor } from '../cycles/schedule.js';
-import { todayInTimezone } from '../utils/date.js';
+import { addDays, todayInTimezone } from '../utils/date.js';
 import { syncLinearIntoPriorities } from '../cycles/linear-sync.js';
 import { appendDailyMemory, loadMemory, readDailyPlanOutput, writeLatestWorkflowOutput, writeWorkflowDetailCache } from '../storage/memory.js';
 import { sendFeishuCard, sendFeishuMessage } from '../connectors/lark-cli.js';
@@ -11,6 +11,8 @@ import { collectSyncDrift, filterUndecidedFindings, renderSyncDriftCard } from '
 import { buildDailyPlanTable, buildWorkflowEvidenceTrace, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, parseDailyPlanTodoPlan, workflowJsonError } from './summary.js';
 import { mergeOpenCapturesIntoPlan } from '../todo/inbox.js';
 import { mergeMovedRowsIntoPlan } from '../todo/wrapup.js';
+import { refreshCalendarSubscriptions } from '../calendar/subscriptions.js';
+import { DAY_OUTCOMES_GUIDE, dayOutcomes, renderDayOutcomes } from '../todo/day-outcomes.js';
 import { buildScoredTodos } from '../todo/scorer.js';
 import { getRemovedCandidateIds, listTodoFeedback, recordTodoPresented } from '../todo/feedback.js';
 import {
@@ -73,6 +75,9 @@ export async function runWorkflowDetailed(
     },
   });
   try {
+    // The day's calendar events are its fixed blocks (`routineForDate`), so
+    // the copy is brought up to date first — at most one fetch per refresh window.
+    await refreshCalendarSubscriptions(config).catch(() => undefined);
     const evidence = await collectEvidence(config, date);
     if (workflow === 'daily_plan') {
       // The work 要务 follow Linear: done issues ticked, started ones added —
@@ -124,6 +129,14 @@ export async function runWorkflowDetailed(
         state: feedbackToday.length > 0 ? 'available' : 'empty',
         data: { date, entries: feedbackToday },
       };
+    }
+    if (workflow === 'weekly_review') {
+      // What each of the last 7 days' To-do came to, so the review reconciles
+      // against outcomes rather than re-deriving them from raw daily memory.
+      const outcomes = dayOutcomes(config, Array.from({ length: 7 }, (_, index) => addDays(date, -6 + index)), date);
+      evidence.sources.daily_outcomes = outcomes.length > 0
+        ? { state: 'available', detail: DAY_OUTCOMES_GUIDE, data: { days: renderDayOutcomes(outcomes) } }
+        : { state: 'empty' };
     }
     const memory = loadMemory(config);
     const generated = await runAgentWithNonEmptyOutput({ config, workflow, date, evidence, memory, runId: run.id });

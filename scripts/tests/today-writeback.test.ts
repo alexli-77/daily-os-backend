@@ -132,12 +132,27 @@ test('today-only 作息 changes: hide, edit, and room cleared for something that
   const edited = applyOverride(blocks, { hidden: ['night'], edits: [{ ...blocks[0]!, start: '17:30', end: '19:00' }], clears: [] });
   assert.deepEqual(edited.map((block) => [block.title, block.start]), [['晚饭', '17:30'], ['画画', '20:00']]);
 
+  // 2026-10-26: a block added for the day (an AG1 Retreat) used to be dropped
+  // on read. It goes in, and the template under it gives way.
+  const retreat = { id: 'ag1-retreat', start: '19:30', end: '22:30', title: 'AG1 Retreat', kind: 'fixed' as const };
+  const withEvent = applyOverride(blocks, { hidden: [], edits: [retreat], clears: [] });
+  assert.deepEqual(withEvent.map((block) => [block.title, block.start, block.end]), [
+    ['晚饭', '18:00', '19:30'], ['AG1 Retreat', '19:30', '22:30'], ['睡觉', '22:30', '23:00'],
+  ]);
+  const otherModesEdit = applyOverride(blocks, { hidden: [], edits: [{ id: 'gym', start: '07:00', end: '08:00', title: '健身', kind: 'fixed' }], clears: [] }, new Set(['gym']));
+  assert.ok(!otherModesEdit.some((block) => block.id === 'gym'), "an edit of another mode's block is not a new block");
+
   const config = setup();
   writeRoutines(config, { periods: [{ id: 'p', name: '两周', from: START, to: DAYS[13], categories: [], rules: [], dayTypes: [{ label: '每天', weekdays: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'], modes: [{ label: '一种', blocks }] }] }] });
   changeDayOverride(config, DAYS[3]!, { type: 'clear', id: 'x', start: '19:00', end: '21:00', label: '打球' });
   assert.equal(routineForDate(config, DAYS[3]!)!.blocks.find((block) => block.title === '晚饭')?.end, '19:00');
   assert.equal(routineForDate(config, DAYS[4]!)!.blocks.find((block) => block.title === '晚饭')?.end, '20:00', 'tomorrow is the template');
   assert.ok(normalizeRoutines(readRoutines(config)).routines.dayOverrides[DAYS[3]!], 'overrides survive a round trip');
+  // What set_day_event sends: a new block for one day, read back on that day only.
+  changeDayOverride(config, DAYS[5]!, { type: 'edit', block: { id: 'evt-ag1', start: '20:30', end: '22:00', title: 'AG1 Feedback Session', kind: 'fixed' } });
+  assert.ok(routineForDate(config, DAYS[5]!)!.blocks.some((block) => block.title === 'AG1 Feedback Session'), 'the added event is on its day');
+  assert.equal(routineForDate(config, DAYS[5]!)!.blocks.find((block) => block.title === '画画')?.end, '20:30', 'and the slot under it gives way');
+  assert.ok(!routineForDate(config, DAYS[6]!)!.blocks.some((block) => block.title === 'AG1 Feedback Session'), 'and only there');
   changeDayOverride(config, DAYS[3]!, { type: 'unclear', id: 'x' });
   assert.equal(routineForDate(config, DAYS[3]!)!.blocks.find((block) => block.title === '晚饭')?.end, '20:00');
   assert.equal(readRoutines(config).dayOverrides[DAYS[3]!], undefined, 'nothing left to override, nothing stored');
