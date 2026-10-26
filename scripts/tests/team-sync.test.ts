@@ -682,6 +682,28 @@ async function main(): Promise<void> {
     check("yesterday's plan is still shown", JSON.stringify(staleMate?.plan?.payload).includes('企鹅昨天的事'), JSON.stringify(staleMate?.plan));
     check('and flagged stale', staleMate?.stale === true && staleMate?.plan?.date === yesterday, JSON.stringify({ stale: staleMate?.stale, date: staleMate?.plan?.date }));
 
+    // 2026-10-26: a past day cleaned up the next morning reaches the teammate,
+    // and the teammate's last two weeks come down for the 日 view to step through.
+    memory.appendDailyMemory(config, 'daily_plan', yesterday, JSON.stringify({ todos: [{ rank: 1, text: '我昨天没勾的', candidateId: 'linear:LEO-9' }] }));
+    const pastStub = makeStub({ rows: [], plans: [{ ...matePlan(addDays(today, -10), '企鹅十天前的事'), updated_at: `${today}T02:00:00.000Z` }] });
+    bridge.setTeamSessionProviderForTests(pastStub);
+    const pastFirst = await sync.syncTeamOnce(config);
+    const yesterdayPush = () => planPushes(pastStub).map((call) => call.body?.[0]).find((pushed) => pushed?.plan_date === yesterday);
+    check('a past day with a plan is uploaded under its own date', Boolean(yesterdayPush()), JSON.stringify(planPushes(pastStub).map((call) => call.body?.[0]?.plan_date)));
+    check('a teammate day from ten days ago is pulled', fs.existsSync(path.join(teamCache(), MATE_ID, 'daily', `${addDays(today, -10)}.json`)), JSON.stringify(pastFirst));
+    pastStub.calls.length = 0;
+    await sync.syncTeamOnce(config);
+    check('an unchanged past day is not re-uploaded', !yesterdayPush(), JSON.stringify(planPushes(pastStub).map((call) => call.body?.[0]?.plan_date)));
+    feedback.recordTodoFeedback(config, { date: yesterday, event: 'missed', candidateId: 'linear:LEO-9', rank: 1, source: 'console-past-day' });
+    pastStub.calls.length = 0;
+    await sync.syncTeamOnce(config);
+    check('cleaning a past day up re-uploads that day with its new state', yesterdayPush()?.payload?.feedback?.['linear:LEO-9'] === 'missed', JSON.stringify(yesterdayPush()));
+    const dayView = await sync.readTeamDayState(config, addDays(today, -10));
+    const dayMate = dayView.members.find((member) => member.userId === MATE_ID);
+    check('the teammate day view has that day', dayView.status === 'ready' && JSON.stringify(dayMate?.plan?.payload).includes('企鹅十天前的事'), JSON.stringify(dayMate));
+    check('and lists the dates there are, newest first', (dayMate?.dates || []).includes(addDays(today, -10)) && (dayMate?.dates || [])[0]! >= addDays(today, -10), JSON.stringify(dayMate?.dates));
+    check('a day the teammate had no list for is null, not another day', (await sync.readTeamDayState(config, addDays(today, -12))).members.find((member) => member.userId === MATE_ID)?.plan === null);
+
     // A remote row under my own uuid is never cached, even if the filter is wrong.
     const selfRowStub = makeStub({ rows: [], plans: [matePlan(today, '企鹅今天的事'), { ...matePlan(today, '不该被缓存'), owner: SELF_ID, updated_at: `${today}T12:00:00.000Z` }] });
     bridge.setTeamSessionProviderForTests(selfRowStub);
@@ -1390,7 +1412,7 @@ async function main(): Promise<void> {
 
     fs.mkdirSync(dailyDir, { recursive: true });
     fs.writeFileSync(cachedCycle, cycleFile('8.24-9.6', '- 企鹅的历史周期'), 'utf8');
-    for (const date of [today, addDays(today, -6), addDays(today, -7), addDays(today, -8), addDays(today, -40)]) {
+    for (const date of [today, addDays(today, -13), addDays(today, -14), addDays(today, -15), addDays(today, -40)]) {
       fs.writeFileSync(path.join(dailyDir, `${date}.json`), JSON.stringify({ date, updatedAt: `${date}T09:00:00+00:00`, payload: { todos: [] } }), 'utf8');
     }
     // Something in the shape a stray write would take. Retention deletes plans.
@@ -1409,13 +1431,13 @@ async function main(): Promise<void> {
 
     const remaining = fs.readdirSync(dailyDir).sort();
     check(
-      'cached teammate plans older than 7 days are pruned',
-      !remaining.includes(`${addDays(today, -8)}.json`) && !remaining.includes(`${addDays(today, -40)}.json`),
+      'cached teammate plans older than 14 days are pruned',
+      !remaining.includes(`${addDays(today, -15)}.json`) && !remaining.includes(`${addDays(today, -40)}.json`),
       remaining.join(','),
     );
     check(
-      'plans inside the 7-day window are kept',
-      [today, addDays(today, -6), addDays(today, -7)].every((date) => remaining.includes(`${date}.json`)),
+      'plans inside the 14-day window are kept',
+      [today, addDays(today, -13), addDays(today, -14)].every((date) => remaining.includes(`${date}.json`)),
       remaining.join(','),
     );
     check('the prune is reported', first.plansPruned === 2, String(first.plansPruned));

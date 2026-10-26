@@ -20,7 +20,10 @@ import {
   writeTeamCacheState,
 } from './cache.js';
 import type { CachedCycle, CachedDailyPlan, TeamCacheState } from './cache.js';
+import { readDayHistory } from '../todo/day-history.js';
 import { buildTodayPlanSnapshot, isRhythmRow } from '../todo/today-plan.js';
+import { WRAPUP_LOOKBACK_DAYS } from '../todo/wrapup.js';
+import type { DailyPlanTodo } from '../workflows/summary.js';
 import { addDays, todayInTimezone } from '../utils/date.js';
 import { onLocalChange } from '../utils/change-events.js';
 import type { LocalChangeKind } from '../utils/change-events.js';
@@ -170,16 +173,24 @@ const DAILY_PLANS_PATH = '/rest/v1/daily_plans';
 /**
  * Retention, in two windows for two different costs.
  *
- * Locally a teammate's old "today" list is dead weight the moment the day is
- * over — the Today page only ever reads the newest one — so a week is already
- * generous and only exists so a Monday morning still has Friday in it.
- * Remotely the row costs somebody else's free-tier storage, but deleting it
- * eagerly would race a teammate who is offline and has not pulled it yet, so
- * 30 days. Cycles are exempt from both: they are the review history this whole
- * feature exists to share.
+ * Locally a teammate's daily lists are what the 日 view shows when you switch
+ * to them and step back through their days (2026-10-26: "两个人应该可以相互看"),
+ * so two weeks — one 双周 — are kept and pulled. Remotely the row costs
+ * somebody else's free-tier storage, but deleting it eagerly would race a
+ * teammate who is offline and has not pulled it yet, so 30 days. Cycles are
+ * exempt from both: they are the review history this whole feature exists to
+ * share.
  */
-const LOCAL_PLAN_RETENTION_DAYS = 7;
+const LOCAL_PLAN_RETENTION_DAYS = 14;
+const TEAM_PLAN_HISTORY_DAYS = LOCAL_PLAN_RETENTION_DAYS;
 const REMOTE_PLAN_RETENTION_DAYS = 30;
+/**
+ * How far back our own past days are re-sent when they change. The same
+ * window 清理 works in: a day cleaned up the next morning (or a week later)
+ * reaches the teammate with its final states, instead of freezing at the
+ * last push made while it was still today.
+ */
+const PAST_PLAN_PUSH_DAYS = WRAPUP_LOOKBACK_DAYS;
 
 // --- one sync tick -----------------------------------------------------------
 
@@ -483,11 +494,15 @@ async function readMembers(config: AppConfig, provider: TeamSessionProvider, fal
 // --- daily plans -------------------------------------------------------------
 
 /**
- * Upload today's plan snapshot when it differs from what we last sent. One row
- * per day, keyed by the plan's own date — always today's, because the snapshot
- * is today's plan or nothing (LEO-309). A day whose plan has not run pushes
- * nothing, rather than republishing yesterday's rows under today's date; the
- * teammate keeps seeing yesterday's row, which `pullTeammatePlans` flags.
+ * Upload today's plan, and any of the last `PAST_PLAN_PUSH_DAYS` days, when
+ * they differ from what we last sent. One row per day, keyed by the plan's own
+ * date. A day whose plan has not run pushes nothing, rather than republishing
+ * yesterday's rows under today's date; the teammate keeps seeing yesterday's
+ * row, which `pullTeammatePlans` flags.
+ *
+ * Past days used to be left as last pushed while they were today. Cleaning a
+ * day up the next morning — 完成 / 未做 / 挪到今天 on the rows nobody ticked —
+ * then never reached the teammate, who went on seeing them open.
  */
 async function pushTodayPlan(
   config: AppConfig,
@@ -495,10 +510,35 @@ async function pushTodayPlan(
   session: TeamSession,
   state: TeamCacheState,
 ): Promise<number> {
-  const snapshot = buildTodayPlanSnapshot(config);
-  if (!snapshot || !isPlanDate(snapshot.date)) return 0;
+  const today = todayInTimezone(config);
+  const since = addDays(today, -PAST_PLAN_PUSH_DAYS);
+  const keep: Record<string, string> = Object.fromEntries(Object.entries(state.pushedPlans).filter(([date]) => date >= since));
+  let pushed = 0;
+  for (let offset = PAST_PLAN_PUSH_DAYS; offset >= 0; offset -= 1) {
+    const date = addDays(today, -offset);
+    const snapshot = offset === 0 ? buildTodayPlanSnapshot(config) : pastDaySnapshot(config, date);
+    if (!snapshot || snapshot.date !== date || !isPlanDate(date)) continue;
+    if (await pushPlanSnapshot(config, provider, session, keep, snapshot)) pushed += 1;
+  }
+  state.pushedPlans = keep;
+  return pushed;
+}
 
-  // Meal rows are the owner's own day, not work a teammate needs to see (LEO-332).
+/** A past day as its 日 view shows it, in the shape today's snapshot has. Null when it had no plan. */
+function pastDaySnapshot(config: AppConfig, date: string): { date: string; generated_at: string; todos: DailyPlanTodo[]; feedback: Record<string, string> } | null {
+  const day = readDayHistory(config, date);
+  if (!day.plan || day.todos.length === 0) return null;
+  return { date, generated_at: day.plan.generated_at, todos: day.todos, feedback: day.feedback };
+}
+
+async function pushPlanSnapshot(
+  config: AppConfig,
+  provider: TeamSessionProvider,
+  session: TeamSession,
+  pushedPlans: Record<string, string>,
+  snapshot: { date: string; generated_at: string; todos: DailyPlanTodo[]; feedback: Record<string, string> },
+): Promise<boolean> {
+  // Meal rows and 固定日程 are the owner's own day, not work a teammate needs to see (LEO-332).
   const todos = snapshot.todos.filter((todo) => !isRhythmRow(todo.candidateId));
   const feedback = Object.fromEntries(Object.entries(snapshot.feedback).filter(([id]) => !isRhythmRow(id)));
   const payload = { generated_at: snapshot.generated_at, todos, feedback };
@@ -512,7 +552,7 @@ async function pushTodayPlan(
   // "does what the teammate sees differ?", and that is the rows and their
   // states. A rerun that produces a byte-identical list is not news.
   const hash = crypto.createHash('sha256').update(JSON.stringify({ todos, feedback })).digest('hex');
-  if (state.pushedPlans[snapshot.date] === hash) return 0;
+  if (pushedPlans[snapshot.date] === hash) return false;
 
   assertOwnedBySelf(session, session.userId);
   const response = await provider.supabaseFetch(config, `${DAILY_PLANS_PATH}?on_conflict=team_id,owner,plan_date`, {
@@ -524,9 +564,8 @@ async function pushTodayPlan(
     body: JSON.stringify([{ team_id: session.teamId, owner: session.userId, plan_date: snapshot.date, payload }]),
   });
   await assertOk(response, `push daily plan ${snapshot.date}`);
-  // Only today's hash matters; a date that has rolled over is never pushed again.
-  state.pushedPlans = { [snapshot.date]: hash };
-  return 1;
+  pushedPlans[snapshot.date] = hash;
+  return true;
 }
 
 /**
@@ -556,11 +595,12 @@ async function pullTeammatePlans(
   await assertOk(probe, 'poll daily plans updated_at');
   const first = (await readJsonArray(probe))[0] as Record<string, unknown> | undefined;
   const watermark = first ? String(first.updated_at || '') : '';
-  if (watermark === state.planWatermark) return { changed: false, pulled: 0 };
+  if (watermark === state.planWatermark && state.planHistoryDays === TEAM_PLAN_HISTORY_DAYS) return { changed: false, pulled: 0 };
 
-  // Yesterday too, so a teammate whose morning run hasn't happened yet still
-  // shows their last plan, flagged stale, instead of nothing.
-  const since = addDays(todayInTimezone(config), -1);
+  // Two weeks back: the 日 view steps through a teammate's days, and a
+  // teammate whose morning run hasn't happened yet still shows their last
+  // plan, flagged stale, instead of nothing.
+  const since = addDays(todayInTimezone(config), -TEAM_PLAN_HISTORY_DAYS);
   const response = await provider.supabaseFetch(
     config,
     `${DAILY_PLANS_PATH}?select=owner,plan_date,payload,updated_at&owner=neq.${encodeURIComponent(session.userId)}&plan_date=gte.${since}&order=updated_at.desc`,
@@ -587,6 +627,7 @@ async function pullTeammatePlans(
   }
 
   state.planWatermark = watermark;
+  state.planHistoryDays = TEAM_PLAN_HISTORY_DAYS;
   state.syncedAt = now.toISOString();
   state.members = await readMembers(config, provider, state.members);
   return { changed: true, pulled };
@@ -747,6 +788,35 @@ export async function readTeamTodayState(config: AppConfig, deps: TeamSyncDeps =
     lastCheckedAt: state.lastCheckedAt,
     lastError: state.lastError,
   };
+}
+
+export interface TeamDayMember extends Omit<TeamTodayMember, 'stale'> {
+  /** Dates this teammate has a cached list for, newest first — where ‹ › can go. */
+  dates: string[];
+}
+
+export interface TeamDayState extends Omit<TeamTodayState, 'members'> {
+  date: string;
+  members: TeamDayMember[];
+}
+
+/**
+ * Each teammate's list for one `date`, from disk only — the 日 view of a
+ * teammate (看谁的 → 大汪汪, then ‹ › through their days). `plan` is null on a
+ * day they had none, or one older than the two weeks kept.
+ */
+export async function readTeamDayState(config: AppConfig, date: string, deps: TeamSyncDeps = {}): Promise<TeamDayState> {
+  const today = todayInTimezone(config);
+  const gate = await resolveSyncGate(config, deps);
+  if (!gate.ok) {
+    return { status: gate.status === 'error' ? 'disabled' : gate.status, reason: gate.reason, today, date, members: [], syncedAt: '', lastCheckedAt: '', lastError: '' };
+  }
+  const state = readTeamCacheState();
+  const members = listTeammates(gate.session, state).map((member) => {
+    const plans = listCachedDailyPlans(member.userId);
+    return { ...member, plan: plans.find((plan) => plan.date === date) ?? null, dates: plans.map((plan) => plan.date) };
+  });
+  return { status: 'ready', reason: '', today, date, members, syncedAt: state.syncedAt, lastCheckedAt: state.lastCheckedAt, lastError: state.lastError };
 }
 
 /**

@@ -92,6 +92,13 @@ export interface TeamCacheState {
   /** `plan date -> payload hash` of the daily plans we last uploaded. */
   pushedPlans: Record<string, string>;
   /**
+   * How many days back the last daily-plan pull reached. A pull is skipped
+   * while the teammates' watermark is unchanged, so when the window widens
+   * (yesterday-only → two weeks, 2026-10-26) the older rows would never come
+   * down until the teammate next pushed. A mismatch here forces one pull.
+   */
+  planHistoryDays: number;
+  /**
    * `<owner>/<cycle id> -> server updated_at` of the row currently in the
    * cache. This is the *version* of a cached cycle, and it has to live here
    * rather than in the .md file because `CachedCycle.updatedAt` is parsed out
@@ -123,6 +130,7 @@ const EMPTY_STATE: TeamCacheState = {
   pushed: {},
   planWatermark: '',
   pushedPlans: {},
+  planHistoryDays: 0,
   cycleVersions: {},
   lastPlanPurgeDate: '',
 };
@@ -145,6 +153,7 @@ export function readTeamCacheState(): TeamCacheState {
       pushed: asRecord(parsed.pushed),
       planWatermark: asString(parsed.planWatermark),
       pushedPlans: asRecord(parsed.pushedPlans),
+      planHistoryDays: typeof parsed.planHistoryDays === 'number' ? parsed.planHistoryDays : 0,
       // Absent in a state.json written before this field existed. An empty map
       // means "no known version", which makes the first pull after an upgrade
       // apply every row once and record its version — the right degradation.

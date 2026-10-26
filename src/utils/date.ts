@@ -99,3 +99,45 @@ export function isWeekdayCode(value: string): value is WeekdayCode {
   return (WEEKDAY_CODES as readonly string[]).includes(value);
 }
 
+
+export interface CalendarDay {
+  date: string;
+  /** 星期一 … 星期日. */
+  weekday: string;
+  week: '上周' | '本周' | '下周';
+  /** 前天 / 昨天 / 今天 / 明天 / 后天, when it is one of those. */
+  relative?: string;
+}
+
+const RELATIVE_DAYS: Record<string, string> = { '-2': '前天', '-1': '昨天', '0': '今天', '1': '明天', '2': '后天' };
+
+/**
+ * Three weeks of dates around `today` — last week, this week, next week,
+ * Monday first, as Chinese counts weeks — for a model to look dates up in.
+ *
+ * A model asked "下周一是几号" works the weekday out itself, and gets it wrong
+ * often enough to matter: on Wednesday 2026-10-21 the chat filed "下周一下午
+ * 3-5 点 feedback session" under 10/27 (a Tuesday), then on Monday 10/26
+ * insisted that day was a Sunday and told the user to check their clock. The
+ * dates here come from `weekdayCode`, never from the model.
+ */
+export function calendarAround(today: string): CalendarDay[] {
+  const mondayOffset = (WEEKDAY_CODES.indexOf(weekdayCode(today)) + 6) % 7;
+  const monday = addDays(today, -mondayOffset);
+  return Array.from({ length: 21 }, (_, index) => {
+    const date = addDays(monday, index - 7);
+    const diff = Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
+    const relative = RELATIVE_DAYS[String(diff)];
+    return {
+      date,
+      weekday: weekdayLabelZh(date),
+      week: index < 7 ? '上周' : index < 14 ? '本周' : '下周',
+      ...(relative ? { relative } : {}),
+    } satisfies CalendarDay;
+  });
+}
+
+/** The wall-clock time (`HH:mm`, 24h) in an IANA zone. */
+export function timeInZone(timeZone: string, now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now);
+}

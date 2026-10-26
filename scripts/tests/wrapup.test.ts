@@ -24,7 +24,7 @@ import { appendDailyMemory, writeLatestWorkflowOutput } from '../../src/storage/
 import { listTodoFeedback } from '../../src/todo/feedback.js';
 import { readDayHistory } from '../../src/todo/day-history.js';
 import { buildTodayPlanSnapshot } from '../../src/todo/today-plan.js';
-import { mergeMovedRowsIntoPlan, moveRowToDay, pendingWrapups, recordWrapup } from '../../src/todo/wrapup.js';
+import { mergeMovedRowsIntoPlan, moveRowToDay, openRowsOf, pendingWrapups, recordWrapup, rowNeedsCleanup } from '../../src/todo/wrapup.js';
 import { addDays, todayInTimezone } from '../../src/utils/date.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -76,13 +76,38 @@ async function testPending(): Promise<void> {
     assert.deepEqual(pendingWrapups(config, today).map((day) => day.date), [addDays(today, -3), addDays(today, -1)]);
     assert.deepEqual(pendingWrapups(config, today)[0]!.todos.map((row) => row.candidateId), ['linear:A-2', 'linear:A-3']);
   });
-  await check('a reviewed day, a weekly-review day and a day with no plan are not', () => {
+  await check('a reviewed day with a row nobody decided on is still pending', () => {
     const { config } = freshConfig();
     const today = todayInTimezone(config);
     planDay(config, addDays(today, -1), 'linear:A-1');
     appendDailyMemory(config, 'daily_review', addDays(today, -1), '{"reconciliation":[]}');
     planDay(config, addDays(today, -2), 'linear:A-1');
     appendDailyMemory(config, 'weekly_review', addDays(today, -2), '周复盘');
+    assert.deepEqual(pendingWrapups(config, today).map((day) => day.date), [addDays(today, -2), addDays(today, -1)]);
+  });
+  await check('a day whose rows all have a state is clean, reviewed or not', () => {
+    const { config } = freshConfig();
+    const today = todayInTimezone(config);
+    const yesterday = addDays(today, -1);
+    planDay(config, yesterday, 'linear:A-1', 'linear:A-2', 'linear:A-3', 'linear:A-4');
+    fs.mkdirSync('data/runtime', { recursive: true });
+    const events = [['complete', 'linear:A-1'], ['partial', 'linear:A-2'], ['missed', 'linear:A-3'], ['defer', 'linear:A-4']];
+    fs.writeFileSync(
+      'data/runtime/todo-feedback.jsonl',
+      events.map(([event, candidateId], index) => JSON.stringify({ ts: 'x', date: yesterday, event, candidateId, rank: index + 1 })).join('\n') + '\n',
+    );
+    assert.deepEqual(pendingWrapups(config, today), []);
+    assert.deepEqual(openRowsOf(config, yesterday), []);
+  });
+  await check('an edit alone is not a decision, and 固定日程 never need one', () => {
+    assert.equal(rowNeedsCleanup('linear:A-1', undefined), true);
+    assert.equal(rowNeedsCleanup('linear:A-1', 'update'), true);
+    assert.equal(rowNeedsCleanup('linear:A-1', 'missed'), false);
+    assert.equal(rowNeedsCleanup('rhythm:block:b1', undefined), false);
+  });
+  await check('a day with no plan is not asked about', () => {
+    const { config } = freshConfig();
+    const today = todayInTimezone(config);
     assert.deepEqual(pendingWrapups(config, today), []);
   });
   await check('today is never pending, and a day beyond the lookback is not asked about', () => {
@@ -177,10 +202,10 @@ async function testEndpoints(): Promise<void> {
   const post = async (p: string, body: Record<string, unknown>): Promise<any> =>
     (await fetch(`${controls.url}${p}`, { method: 'POST', headers, body: JSON.stringify(body) })).json();
   try {
-    await check('GET /api/day/wrapups lists the unreviewed day only', async () => {
+    await check('GET /api/day/wrapups lists every day with an open row, oldest first — reviewed or not', async () => {
       const state = await get('/api/day/wrapups');
       assert.equal(state.today, today);
-      assert.deepEqual(state.pending.map((day: any) => day.date), [twoAgo]);
+      assert.deepEqual(state.pending.map((day: any) => day.date), [twoAgo, yesterday]);
     });
     await check('move-to-today puts the row on today\'s sheet', async () => {
       const result = await post('/api/day/move-to-today', { date: twoAgo, candidateId: 'linear:A-1', rank: 1 });
@@ -188,15 +213,27 @@ async function testEndpoints(): Promise<void> {
       assert.equal(result.placed, 'appended');
       assert.ok(buildTodayPlanSnapshot(config)?.todos.some((todo) => todo.candidateId === 'linear:A-1'));
     });
-    await check('跳过 closes the day', async () => {
+    await check('a moved row is a decision: the day it left is clean', async () => {
+      assert.deepEqual((await get('/api/day/wrapups')).pending.map((day: any) => day.date), [yesterday]);
+    });
+    await check('这天不清了 closes the day', async () => {
       const result = await post('/api/day/wrapup', { date: twoAgo, action: 'skip' });
       assert.equal(result.ok, true, JSON.stringify(result));
-      assert.deepEqual((await get('/api/day/wrapups')).pending, []);
+      assert.deepEqual((await get('/api/day/wrapups')).pending.map((day: any) => day.date), [yesterday]);
     });
-    await check('回收完成 on a day that already has its review closes it without running another', async () => {
+    await check('清理完成 is refused while a row is still open, and says which', async () => {
+      const result = await post('/api/day/wrapup', { date: yesterday, action: 'done' });
+      assert.equal(result.ok, false);
+      assert.equal(result.open, 2);
+      assert.match(result.error, /还有 2 条没处理/);
+    });
+    await check('清理完成 on a settled, already-reviewed day closes it without running another review', async () => {
+      assert.equal((await post('/api/today/todo-feedback', { date: yesterday, event: 'complete', candidateId: 'linear:A-1', rank: 1 })).ok, true);
+      assert.equal((await post('/api/today/todo-feedback', { date: yesterday, event: 'missed', candidateId: 'linear:A-2', rank: 2 })).ok, true);
       const result = await post('/api/day/wrapup', { date: yesterday, action: 'done' });
       assert.equal(result.ok, true, JSON.stringify(result));
       assert.equal(result.reviewStarted, false);
+      assert.deepEqual((await get('/api/day/wrapups')).pending, []);
     });
     await check('today and later cannot be closed out or moved from', async () => {
       assert.equal((await post('/api/day/wrapup', { date: today, action: 'skip' })).ok, false);

@@ -24,6 +24,7 @@ import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
 import { isWeekdayCode, weekdayCode, type WeekdayCode } from '../utils/date.js';
 import { resolveMemoryRepositoryPath } from '../storage/memory.js';
+import { CALENDAR_CATEGORY, calendarBlocksFor } from '../calendar/subscriptions.js';
 
 export interface RoutineBlock {
   id: string;
@@ -140,18 +141,19 @@ export function setDayMode(config: AppConfig, date: string, modeId: string): Res
   if (!day.modes.some((mode) => mode.id === modeId)) throw new Error(`这一天没有「${modeId}」这个模式。`);
   const dayModes = { ...routines.dayModes, [date]: modeId };
   writeRoutines(config, { ...routines, dayModes });
-  return resolveRoutine({ ...routines, dayModes }, date)!;
+  return resolveRoutine({ ...routines, dayModes }, date, calendarBlocksFor(config, date))!;
 }
 
+/** The date's 作息 with its subscribed calendars' events in it (see `src/calendar/subscriptions.ts`). */
 export function routineForDate(config: AppConfig, date: string): ResolvedRoutineDay | null {
-  return resolveRoutine(readRoutines(config), date);
+  return resolveRoutine(readRoutines(config), date, calendarBlocksFor(config, date));
 }
 
 /**
  * The period covering `date` (the latest-starting one when two overlap), the
  * day type for its weekday, and the mode picked for the date or the default.
  */
-export function resolveRoutine(routines: RoutineFile, date: string): ResolvedRoutineDay | null {
+export function resolveRoutine(routines: RoutineFile, date: string, calendar: RoutineBlock[] = []): ResolvedRoutineDay | null {
   const period = routines.periods
     .filter((candidate) => candidate.from <= date && date <= candidate.to)
     .sort((left, right) => right.from.localeCompare(left.from))[0];
@@ -164,7 +166,22 @@ export function resolveRoutine(routines: RoutineFile, date: string): ResolvedRou
     ?? dayType.modes.find((candidate) => candidate.id === dayType.defaultMode)
     ?? dayType.modes[0]!;
   const categories = new Map(period.categories.map((category) => [category.key, category]));
-  const blocks = applyOverride(mode.blocks, routines.dayOverrides[date]);
+  // A calendar event is part of the day before the user's own changes to it:
+  // the template under it gives way, and it can still be hidden or moved for
+  // the day like any block.
+  const withCalendar = calendar.length === 0
+    ? mode.blocks
+    : [...giveWay(mode.blocks, calendar), ...calendar].sort((left, right) => left.start.localeCompare(right.start));
+  const known = allTemplateBlockIds(routines);
+  for (const block of calendar) known.add(block.id);
+  // A calendar event moved or stretched for the day is still a row: an edit
+  // saved while it was drawn as a band (2026-10-26, stretched to 18:00) came
+  // back as `fixed`, which would turn the to-do into a band again.
+  const calendarById = new Map(calendar.map((block) => [block.id, block]));
+  const blocks = applyOverride(withCalendar, routines.dayOverrides[date], known).map((block) => {
+    const event = calendarById.get(block.id);
+    return event ? { ...block, kind: event.kind, ...(event.category ? { category: event.category } : {}) } : block;
+  });
   return {
     date,
     period: { id: period.id, name: period.name, ...(period.wake ? { wake: period.wake } : {}), ...(period.sleep ? { sleep: period.sleep } : {}), rules: period.rules },
@@ -172,7 +189,7 @@ export function resolveRoutine(routines: RoutineFile, date: string): ResolvedRou
     mode: { id: mode.id, label: mode.label },
     modes: dayType.modes.map((candidate) => ({ id: candidate.id, label: candidate.label })),
     blocks: blocks.map((block) => {
-      const category = block.category ? categories.get(block.category) : undefined;
+      const category = block.category ? categories.get(block.category) ?? builtInCategory(block.category) : undefined;
       return { ...block, ...(category ? { categoryLabel: category.label, color: category.color, ...(category.habit ? { habit: true } : {}) } : {}) };
     }),
   };
@@ -309,8 +326,9 @@ export function changeDayOverride(config: AppConfig, date: string, change: DayOv
   if (change.type === 'hide' || change.type === 'reset') change = { ...change, blockId: pieceRoot(change.blockId, blockIds) };
   if (change.type === 'edit') {
     // An edit moves or stretches the block for the day; what the block *is*
-    // (a slot and its category, a fixed block's note) stays the template's.
-    const original = templateBlocks(routines, date).find((block) => block.id === change.block.id);
+    // (a slot and its category, a fixed block's note) stays the template's —
+    // or the calendar's, for an event read from a subscribed calendar.
+    const original = [...templateBlocks(routines, date), ...calendarBlocksFor(config, date)].find((block) => block.id === change.block.id);
     const block: RoutineBlock = original
       ? { ...original, start: change.block.start, end: change.block.end, title: change.block.title?.trim() || original.title }
       : change.block;
@@ -328,7 +346,7 @@ export function changeDayOverride(config: AppConfig, date: string, change: DayOv
   }
   const dayOverrides = { ...routines.dayOverrides, [date]: next };
   const saved = writeRoutines(config, { ...routines, dayOverrides }).routines;
-  return resolveRoutine(saved, date)!;
+  return resolveRoutine(saved, date, calendarBlocksFor(config, date))!;
 }
 
 /** The mode's own blocks for `date`, before that day's override. */
@@ -345,20 +363,39 @@ function templateBlocks(routines: RoutineFile, date: string): RoutineBlock[] {
   return mode.blocks;
 }
 
+/** Every block id any mode of any period uses — what an edit can be an edit *of*. */
+export function allTemplateBlockIds(routines: RoutineFile): Set<string> {
+  return new Set(routines.periods.flatMap((period) => period.dayTypes.flatMap((type) => type.modes.flatMap((mode) => mode.blocks.map((block) => block.id)))));
+}
+
 /**
  * The template's blocks for one date, with that date's override applied:
- * hidden ones go, edited ones replace theirs, and anything inside a cleared
- * window gives way (trimmed, or split around it).
+ * hidden ones go, edited ones replace theirs, blocks added for the day go in,
+ * and anything inside a cleared window or under an added block gives way
+ * (trimmed, or split around it).
+ *
+ * Added blocks are 2026-10-26. `changeDayOverride` always stored an edit
+ * whose block the template does not have (an AG1 Retreat, 09:00–18:00), but
+ * this read only edits that replace a template block, so an added one was
+ * dropped without a word — the chat said "排计划时会自动绕开" and nothing did.
+ * `knownIds` is every block id in the routines: an edit naming a block of
+ * another mode is still an edit, not an addition, so switching a day's mode
+ * does not turn yesterday's tweak into a new block.
  */
-export function applyOverride(blocks: RoutineBlock[], override: DayOverride | undefined): RoutineBlock[] {
+export function applyOverride(blocks: RoutineBlock[], override: DayOverride | undefined, knownIds: Set<string> = new Set()): RoutineBlock[] {
   if (!override) return blocks;
   const ids = blocks.map((block) => block.id);
   // Keyed by the template block. Overrides saved before `changeDayOverride`
   // resolved pieces carry a piece id (`out-a-b`); read those as their block.
   const hidden = new Set(override.hidden.map((id) => pieceRoot(id, ids)));
-  const edits = new Map(override.edits.map((block) => [pieceRoot(block.id, ids), { ...block, id: pieceRoot(block.id, ids) }]));
+  const isAdded = (block: RoutineBlock): boolean => {
+    const root = pieceRoot(block.id, ids);
+    return !ids.includes(root) && !knownIds.has(root) && !knownIds.has(block.id);
+  };
+  const added = override.edits.filter(isAdded).filter((block) => !hidden.has(block.id));
+  const edits = new Map(override.edits.filter((block) => !isAdded(block)).map((block) => [pieceRoot(block.id, ids), { ...block, id: pieceRoot(block.id, ids) }]));
   let result = blocks.filter((block) => !hidden.has(block.id)).map((block) => edits.get(block.id) ?? block);
-  for (const clear of override.clears) {
+  for (const clear of [...override.clears, ...added]) {
     result = result.flatMap((block): RoutineBlock[] => {
       if (block.end <= clear.start || block.start >= clear.end) return [block];
       const parts: RoutineBlock[] = [];
@@ -367,7 +404,27 @@ export function applyOverride(blocks: RoutineBlock[], override: DayOverride | un
       return parts;
     });
   }
-  return result.sort((left, right) => left.start.localeCompare(right.start));
+  return [...result, ...added].sort((left, right) => left.start.localeCompare(right.start));
+}
+
+/** Categories that exist without the user defining them: calendar rows (`src/calendar/subscriptions.ts`). */
+function builtInCategory(key: string): RoutineCategory | undefined {
+  return key === CALENDAR_CATEGORY ? { key, label: '日历', color: 'purple' } : undefined;
+}
+
+/** `blocks` with the parts under any of `windows` taken out (trimmed, or split around it). */
+function giveWay(blocks: RoutineBlock[], windows: Array<{ start: string; end: string }>): RoutineBlock[] {
+  let result = blocks;
+  for (const window of windows) {
+    result = result.flatMap((block): RoutineBlock[] => {
+      if (block.end <= window.start || block.start >= window.end) return [block];
+      const parts: RoutineBlock[] = [];
+      if (block.start < window.start) parts.push({ ...block, id: `${block.id}-a`, end: window.start });
+      if (block.end > window.end) parts.push({ ...block, id: `${block.id}-b`, start: window.end });
+      return parts;
+    });
+  }
+  return result;
 }
 
 /**

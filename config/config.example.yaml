@@ -380,6 +380,18 @@ sources:
     files:
       - name: "custom"
         path: "./data/snapshots/custom.txt"
+  # Calendars read from an iCal (.ics) address — e.g. a Google calendar's
+  # "Public address in iCal format" or "Secret address in iCal format". Each
+  # event becomes a row on its day's sheet (tick, drag, stretch, delete), the
+  # morning plan works around it, and the chat is told about it.
+  ics_calendars: []
+  # ics_calendars:
+  #   - name: "Program calendar"
+  #     label: "AG1"            # put in front of titles that do not start with it
+  #     url: "https://calendar.google.com/calendar/ical/<calendar-id>/public/basic.ics"
+  #     category: ""            # a 作息 category key for the tag/colour; empty = 日历
+  #     exclude: ["Cleaning"]   # leave out events whose title contains these
+  #     refresh_minutes: 30
 
 team:
   # Optional Supabase project used only as a transport so teammates can read

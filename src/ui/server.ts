@@ -12,14 +12,14 @@ import { writeDiagnosticsBundle } from '../cli/diagnostics.js';
 import { uiRuntimePath } from './ui-runtime.js';
 import { collectEvidence } from '../workflows/evidence.js';
 import { runWorkflow } from '../workflows/run-workflow.js';
-import { addDays, isKnownTimeZone, todayInTimezone, todayInZone } from '../utils/date.js';
+import { addDays, isKnownTimeZone, todayInTimezone, todayInZone, weekdayLabelZh } from '../utils/date.js';
 import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
 import { sendFeishuMessage } from '../connectors/lark-cli.js';
 import { readLatestWorkflowOutput } from '../storage/memory.js';
 import { listTodoFeedback } from '../todo/feedback.js';
 import { applyUserOrder, buildTodayPlanSnapshot } from '../todo/today-plan.js';
 import { isHistoryDate, listPlanDates, readDayHistory } from '../todo/day-history.js';
-import { dayWasReviewed, moveRowToDay, pendingWrapups, recordWrapup } from '../todo/wrapup.js';
+import { dayWasReviewed, moveRowToDay, openRowsOf, pendingWrapups, recordWrapup } from '../todo/wrapup.js';
 import { readArtifactsIndex } from '../storage/artifacts.js';
 import { buildDailyPlanTable, extractDailyPlanTodos, formatWorkflowSummaryForFeishu, normalizePlanMinutes, type DailyPlanTodo } from '../workflows/summary.js';
 import { bundledAsset } from '../utils/install-root.js';
@@ -55,6 +55,7 @@ import {
   writeSchedule,
 } from '../cycles/schedule.js';
 import { fetchAgenda } from '../calendar/agenda.js';
+import { calendarBlocksFor, refreshCalendarSubscriptions } from '../calendar/subscriptions.js';
 import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
 import { idFragment } from '../todo/scorer.js';
@@ -64,7 +65,7 @@ import { askClaudeOnce } from '../agent/claude-agent.js';
 import { fixedRowFor, scheduleDayView } from '../cycles/fixed-schedule.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
-import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
+import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamDayState, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
 import type { TeamSyncLoop } from '../team/sync.js';
 import { collectProgressCandidates, formatProgressCandidates } from '../progress/capture.js';
 import { analyzeChatContext, formatChatContextAnalysis } from '../chat/context-analysis.js';
@@ -532,6 +533,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // Teammates' today lists, from the team cache on disk. Read-only and
     // network-free like /api/cycles/state; the 60s sync loop is what fills it.
     if (request.method === 'GET' && url.pathname === '/api/team/today') return sendJson(response, await readTeamTodayPage(options));
+    if (request.method === 'GET' && url.pathname === '/api/team/day') return sendJson(response, await readTeamDayPage(options, url.searchParams.get('date')));
     if (request.method === 'POST' && url.pathname === '/api/cycles/section') return sendJson(response, await saveCycleSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/close') return sendJson(response, await startCloseCycle(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/cycles/close') return sendJson(response, readCloseCycle(url.searchParams.get('id') || ''));
@@ -1684,9 +1686,10 @@ function readWrapupState(options: UiServerOptions): Record<string, unknown> {
 }
 
 /**
- * 回收完成 or 跳过 for one past day. 回收完成 also runs that day's review late,
- * in the background and without a Feishu message — the user is at the Mac
- * and has just made every decision the review would have asked about.
+ * 清理完成 or 这天不清了 for one past day. 清理完成 also runs that day's review
+ * late if it never ran, in the background and without a Feishu message — the
+ * user is at the Mac and has just made every decision the review would have
+ * asked about.
  */
 function resolveWrapup(options: UiServerOptions, body: unknown): Record<string, unknown> {
   const request = readRecord(body);
@@ -1696,12 +1699,18 @@ function resolveWrapup(options: UiServerOptions, body: unknown): Record<string, 
   applyEnv(env);
   const config = loadConfig(options.configPath);
   const today = todayInTimezone(config);
-  if (!isHistoryDate(date) || date >= today) return { ok: false, error: '只能回收今天以前的日子。' };
+  if (!isHistoryDate(date) || date >= today) return { ok: false, error: '只能清理今天以前的日子。' };
   if (action !== 'done' && action !== 'skip') return { ok: false, error: 'action must be done or skip.' };
   const short = `${Number(date.slice(5, 7))}.${Number(date.slice(8, 10))}`;
   if (action === 'skip') {
     recordWrapup(date, 'skipped');
-    return { ok: true, date, action, text: `${short} 跳过了回收，没勾的留在那天` };
+    return { ok: true, date, action, text: `${short} 不清了，没处理的留在那天` };
+  }
+  // A day is clean when every row has a decision; closing it with rows still
+  // open would leave the weekly review the same gap this exists to close.
+  const open = openRowsOf(config, date);
+  if (open.length > 0) {
+    return { ok: false, error: `${short} 还有 ${open.length} 条没处理：${open.slice(0, 3).map((row) => `「${row.text}」`).join('、')}${open.length > 3 ? ' 等' : ''}`, open: open.length };
   }
   recordWrapup(date, 'done');
   const reviewStarted = !dayWasReviewed(config, date);
@@ -1710,7 +1719,7 @@ function resolveWrapup(options: UiServerOptions, body: unknown): Record<string, 
       console.warn(`[wrapup] review for ${date} failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
-  return { ok: true, date, action, reviewStarted, text: reviewStarted ? `${short} 回收完了，复盘在后台补跑` : `${short} 回收完了` };
+  return { ok: true, date, action, reviewStarted, text: reviewStarted ? `${short} 清理完了，那天的复盘在后台补跑` : `${short} 清理完了` };
 }
 
 /** 挪到今天: an unfinished row of a past day onto today's sheet. */
@@ -1868,6 +1877,16 @@ async function readTeamTodayPage(options: UiServerOptions): Promise<Record<strin
   return { ok: true, ...(await readTeamTodayState(config)) };
 }
 
+/** Teammates' lists for one day (`?date=YYYY-MM-DD`, default today), from the sync cache. */
+async function readTeamDayPage(options: UiServerOptions, requested: string | null): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const date = requested ?? todayInTimezone(config);
+  if (!isHistoryDate(date)) return { ok: false, error: 'date must be YYYY-MM-DD.' };
+  return { ok: true, ...(await readTeamDayState(config, date)) };
+}
+
 /**
  * Save one section of one cycle. The other two sections are left byte-identical
  * by `writeSection`, so editing the retro mid-cycle cannot restamp the
@@ -2014,8 +2033,12 @@ async function saveDayOverride(options: UiServerOptions, body: unknown): Promise
   if (!['edit', 'hide', 'reset', 'clear', 'unclear'].includes(String((change as { type?: unknown }).type))) {
     return { ok: false, error: 'change.type must be edit, hide, reset, clear or unclear.' };
   }
+  if (!isHistoryDate(date)) return { ok: false, error: 'date must be YYYY-MM-DD.' };
   const day = changeDayOverride(config, date, change);
-  return { ok: true, day, text: '只改了今天，作息模板没动' };
+  // The date and its weekday, said back: the chat writes here too, and a day
+  // off by one is caught the moment someone reads "10/27 星期二".
+  const label = date === todayInTimezone(config) ? '今天' : `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))} ${weekdayLabelZh(date)}`;
+  return { ok: true, day, text: `只改了${label}，作息模板没动` };
 }
 
 const CLOCK_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -2149,7 +2172,7 @@ async function readRoutinesState(options: UiServerOptions, date: string): Promis
   const today = todayInTimezone(config);
   const day = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : today;
   const routines = readRoutines(config);
-  return { ok: true, today, ...routines, day: resolveRoutine(routines, day) };
+  return { ok: true, today, ...routines, day: resolveRoutine(routines, day, calendarBlocksFor(config, day)) };
 }
 
 async function saveRoutines(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {

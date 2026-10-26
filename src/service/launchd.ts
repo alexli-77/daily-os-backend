@@ -12,6 +12,7 @@ import { sendFeishuCard } from '../connectors/lark-cli.js';
 import { notificationAllowed } from '../notifications/policy.js';
 import { runBackgroundSuggestions } from './background-suggestions.js';
 import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
+import { refreshCalendarSubscriptions } from '../calendar/subscriptions.js';
 
 const LABEL = 'com.daily-os-feishu.agent';
 const SCHEDULER_STATE_PATH = './data/memory/scheduler-state.json';
@@ -143,6 +144,10 @@ async function safeTick(configProvider: ConfigProvider, state: SchedulerRuntimeS
 
 async function tick(configProvider: ConfigProvider, state: SchedulerRuntimeState, options: SchedulerTickOptions): Promise<void> {
   const config = readRuntimeConfig(configProvider);
+  // Subscribed calendars (sources.ics_calendars): fetched in the background,
+  // each at most once per its refresh_minutes. Not awaited — a slow calendar
+  // must not hold the minute's workflows.
+  if (!options.runWorkflow) void refreshCalendarSubscriptions(config).catch(() => undefined);
   const runWorkflowFn = options.runWorkflow ?? runWorkflow;
   const now = options.now ? options.now() : new Date();
   const time = timeInZone(now, config.user.timezone);

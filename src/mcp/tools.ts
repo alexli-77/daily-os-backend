@@ -123,6 +123,38 @@ export const TOOLS: ToolDef[] = [
     request: (a) => ({ method: 'POST', path: '/api/routines', body: a }),
   },
   {
+    // 2026-10-26: the chat had no way to put an event on one day — save_routines
+    // leaves dayOverrides alone — so 「下周一 AG1 feedback session」 went into the
+    // file by hand, on the wrong day, in a shape nothing read.
+    name: 'set_day_event',
+    description:
+      '给某一天加（或改）一个固定日程，比如会议、retreat、活动：只改这一天，作息模板不动；那段时间里原来的作息块会让开，排计划时也会绕开它。date 必须先在 <now>.calendar 里查到（不要自己推算星期）。同一个 id 再调一次就是改时间；回复里把日期和星期一起告诉用户。',
+    schema: {
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('那一天，YYYY-MM-DD，从 <now>.calendar 查'),
+      start: z.string().regex(/^\d{2}:\d{2}$/).describe('开始 HH:mm'),
+      end: z.string().regex(/^\d{2}:\d{2}$/).describe('结束 HH:mm，晚于开始'),
+      title: z.string().min(1).describe('显示在时间轴上的名字'),
+      id: z.string().regex(/^[a-z0-9-]+$/).optional().describe('小写字母数字和 -；改已有的那条时传它的 id，新加的可不传'),
+    },
+    request: (a) => ({
+      method: 'POST',
+      path: '/api/routines/day-override',
+      body: {
+        date: a.date,
+        change: { type: 'edit', block: { id: (a.id as string | undefined) || eventId(String(a.title), String(a.start)), start: a.start, end: a.end, title: a.title, kind: 'fixed' } },
+      },
+    }),
+  },
+  {
+    name: 'remove_day_event',
+    description: '删掉 set_day_event 给某一天加的日程（按 id），或把那天改过的作息块恢复成模板。',
+    schema: {
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('那一天，YYYY-MM-DD'),
+      id: z.string().min(1).describe('日程或作息块的 id'),
+    },
+    request: (a) => ({ method: 'POST', path: '/api/routines/day-override', body: { date: a.date, change: { type: 'reset', blockId: a.id } } }),
+  },
+  {
     name: 'cycle_section',
     description: '写入某个周期文件的一个段落：要务 / retro / review（覆盖写该段）。id 是周期 id（形如 2026-09-21_...），用 get_state 找。',
     schema: {
@@ -136,6 +168,13 @@ export const TOOLS: ToolDef[] = [
 
 /** `mcp__daily-os__<tool>` names, for the CLI `--tools` allow-list. */
 export const TOOL_ALLOW_NAMES: string[] = TOOLS.map((tool) => `mcp__${MCP_SERVER_NAME}__${tool.name}`);
+
+/** A stable id for an event added without one: `evt-` + a short hash of what it is and when. */
+function eventId(title: string, start: string): string {
+  let hash = 0;
+  for (const char of `${title}@${start}`) hash = (Math.imul(hash, 31) + char.codePointAt(0)!) >>> 0;
+  return `evt-${hash.toString(36)}`;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
