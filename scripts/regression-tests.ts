@@ -199,6 +199,8 @@ try {
     // occurrence when the anchor is 29 February, and which entries the morning
     // card may mention. All day counts are the user's timezone, never UTC's.
     'scripts/tests/countdown.test.ts',
+    // 日记 (LEO-350): the private per-day journal store — write/clear/list/delete.
+    'scripts/tests/journal.test.ts',
     'scripts/tests/day-history.test.ts',
     // 往日 edits: a dated tick lands on that day only, a day that is over
     // cannot be rescheduled, and the client is told the service takes `date`.

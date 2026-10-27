@@ -91,6 +91,7 @@ import {
   resolveCountdown,
   saveCountdown,
 } from '../countdown/store.js';
+import { deleteJournal, listJournal, readJournal, writeJournal } from '../todo/journal.js';
 import { PLAN_ROW_COLORS, PLAN_ROW_TEXT_MAX, hasLaterRowState, recordTodoFeedback, resolveFeedbackDate, type TodoFeedbackEvent } from '../todo/feedback.js';
 import { formatCalendarDraftForFeishu, runCalendarDraft, testCalendarBridge } from '../calendar/bridge.js';
 import {
@@ -453,6 +454,10 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'GET' && url.pathname === '/api/countdowns') return sendJson(response, listCountdownsResponse(options, url));
     if (request.method === 'POST' && url.pathname === '/api/countdowns/save') return sendJson(response, await saveCountdownEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/countdowns/delete') return sendJson(response, await deleteCountdownEntry(options, await readJson(request)));
+    if (request.method === 'GET' && url.pathname === '/api/journal') return sendJson(response, journalEntryResponse(options, url));
+    if (request.method === 'GET' && url.pathname === '/api/journal/list') return sendJson(response, listJournalResponse(options));
+    if (request.method === 'POST' && url.pathname === '/api/journal/save') return sendJson(response, await saveJournalEntry(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/journal/delete') return sendJson(response, await deleteJournalEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') return sendJson(response, await cancelRun(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/runs/rerun') return sendJson(response, await rerunWorkflow(options, await readJson(request)));
@@ -996,6 +1001,56 @@ async function deleteCountdownEntry(options: UiServerOptions, body: unknown): Pr
   if (!deleteCountdown(config, id)) return { ok: false, error: '这条倒数日已经不在了。' };
   const context = countdownContext(config, typeof request.tz === 'string' ? request.tz : null);
   return { ok: true, ...context, items: listCountdowns(config, context.today) };
+}
+
+/**
+ * 日记 (LEO-350). These four are the only readers/writers of the journal store;
+ * nothing else in the service touches it, so it stays private by construction.
+ */
+function journalToday(config: AppConfig, tz: string | null): string {
+  return tz && isKnownTimeZone(tz) ? todayInZone(tz) : todayInTimezone(config);
+}
+
+function journalEntryResponse(options: UiServerOptions, url: URL): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = journalToday(config, url.searchParams.get('tz'));
+  const requested = url.searchParams.get('date');
+  const date = requested && isCalendarDate(requested) ? requested : today;
+  const entry = readJournal(config, date);
+  return { ok: true, date, today, content: entry?.content ?? '', ...(entry ? { updated_at: entry.updated_at } : {}) };
+}
+
+function listJournalResponse(options: UiServerOptions): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  return { ok: true, entries: listJournal(config) };
+}
+
+async function saveJournalEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const date = String(request.date || '').trim();
+  if (!isCalendarDate(date)) return { ok: false, error: `不是合法日期：${date || '（空）'}` };
+  const content = typeof request.content === 'string' ? request.content : '';
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const entry = writeJournal(config, date, content);
+  // An empty save clears the day; say so rather than inventing an entry back.
+  return { ok: true, date, content: entry?.content ?? '', ...(entry ? { updated_at: entry.updated_at } : { deleted: true }) };
+}
+
+async function deleteJournalEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const date = String(request.date || '').trim();
+  if (!isCalendarDate(date)) return { ok: false, error: `不是合法日期：${date || '（空）'}` };
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  deleteJournal(config, date);
+  return { ok: true, date };
 }
 
 /**

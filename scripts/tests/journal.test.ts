@@ -1,0 +1,98 @@
+/**
+ * 日记 (LEO-350).
+ *
+ * One Markdown file per day under the app's own data dir, private. These pin the
+ * store's contract: a write round-trips, an empty write clears the day, the
+ * browse list is newest-first with a sane preview, and junk in the directory
+ * does not blank it.
+ */
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
+
+import { AppConfigSchema, type AppConfig } from '../../src/config/schema.js';
+import { deleteJournal, listJournal, readJournal, writeJournal } from '../../src/todo/journal.js';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const ORIGINAL_CWD = process.cwd();
+
+let passed = 0;
+let failed = 0;
+function test(name: string, fn: () => void): void {
+  try {
+    fn();
+    passed += 1;
+    console.log(`  ✓ ${name}`);
+  } catch (error) {
+    failed += 1;
+    console.error(`  ✗ ${name}`);
+    console.error(`    ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    process.chdir(ORIGINAL_CWD);
+  }
+}
+
+function setup(): AppConfig {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-os-journal-'));
+  process.chdir(work);
+  const parsed = yaml.load(fs.readFileSync(path.join(REPO_ROOT, 'config', 'config.example.yaml'), 'utf8')) as Record<string, any>;
+  parsed.user.timezone = 'UTC';
+  return AppConfigSchema.parse(parsed);
+}
+
+test('a write round-trips, and the date keys the file', () => {
+  const config = setup();
+  assert.equal(readJournal(config, '2026-10-27'), null, 'nothing written yet');
+  const saved = writeJournal(config, '2026-10-27', '今天把日记功能设计完了。\n还行。');
+  assert.equal(saved?.content, '今天把日记功能设计完了。\n还行。');
+  const read = readJournal(config, '2026-10-27');
+  assert.equal(read?.content.trimEnd(), '今天把日记功能设计完了。\n还行。');
+  assert.ok(read?.updated_at, 'carries an updated_at');
+});
+
+test('an empty or whitespace write clears the day rather than leaving a blank file', () => {
+  const config = setup();
+  writeJournal(config, '2026-10-27', 'something');
+  assert.ok(readJournal(config, '2026-10-27'), 'there now');
+  assert.equal(writeJournal(config, '2026-10-27', '   \n  '), null, 'whitespace returns no entry');
+  assert.equal(readJournal(config, '2026-10-27'), null, 'and the day is gone');
+  assert.deepEqual(listJournal(config), [], 'not left in the list');
+});
+
+test('the list is newest-first with a heading-stripped, clipped preview', () => {
+  const config = setup();
+  writeJournal(config, '2026-10-25', '# 周五\n忙了一天。');
+  writeJournal(config, '2026-10-27', '\n\n第一行是空的前面。\n第二行。');
+  writeJournal(config, '2026-10-26', 'x'.repeat(200));
+  const list = listJournal(config);
+  assert.deepEqual(list.map((entry) => entry.date), ['2026-10-27', '2026-10-26', '2026-10-25'], 'newest first');
+  assert.equal(list[2]?.preview, '周五', 'leading # stripped, first non-empty line');
+  assert.equal(list[0]?.preview, '第一行是空的前面。', 'leading blank lines skipped');
+  assert.equal(list[1]?.preview.length, 81, '200 chars clipped to 80 + ellipsis');
+});
+
+test('delete removes the day; deleting a missing day is a no-op', () => {
+  const config = setup();
+  writeJournal(config, '2026-10-27', 'bye');
+  assert.equal(deleteJournal(config, '2026-10-27'), true);
+  assert.equal(readJournal(config, '2026-10-27'), null);
+  assert.equal(deleteJournal(config, '2026-10-27'), false, 'nothing to remove');
+});
+
+test('a bad date is refused, and non-date files in the dir are ignored', () => {
+  const config = setup();
+  assert.throws(() => writeJournal(config, 'not-a-date', 'x'), /不是合法日期/);
+  assert.equal(readJournal(config, 'not-a-date'), null);
+  // A stray file in the store dir must not crash or pollute the list.
+  const dir = path.resolve(config.journal.store_dir);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'README.md'), 'not a journal');
+  writeJournal(config, '2026-10-27', 'real one');
+  assert.deepEqual(listJournal(config).map((entry) => entry.date), ['2026-10-27'], 'only real dated entries');
+});
+
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);
