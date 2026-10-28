@@ -576,6 +576,14 @@ export const AppConfigSchema = z.object({
       store_path: z.string().default('./data/memory/countdowns.json'),
     })
     .default({ store_path: './data/memory/countdowns.json' }),
+  journal: z
+    .object({
+      // 日记 (LEO-350): one Markdown file per day under here. Private — never
+      // synced to the team, sent to Feishu, or read by any workflow/the chat
+      // sandbox. Lives under data/memory/, which is gitignored runtime data.
+      store_dir: z.string().default('./data/memory/journal'),
+    })
+    .default({ store_dir: './data/memory/journal' }),
   chat_analysis: z
     .object({
       enabled: z.boolean().default(true),
