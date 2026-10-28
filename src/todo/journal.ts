@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import yaml from 'js-yaml';
 import type { AppConfig } from '../config/schema.js';
 import { writeFileAtomic } from '../utils/atomic-write.js';
 import { isCalendarDate } from '../countdown/store.js';
@@ -9,19 +10,38 @@ import { isCalendarDate } from '../countdown/store.js';
  * the app's own data dir.
  *
  * Deliberately the diary, not the task wrap-up (`wrapup.ts`) or the model's
- * 复盘: it is whatever the user felt like writing, and it is private. Nothing
- * here feeds team sync, the Feishu output, or the chat assistant's sandbox — the
- * store lives under `data/memory/`, which the chat workdir (the vault) cannot
- * reach, and no workflow reads it.
+ * 复盘: whatever the user felt like writing, and private. Nothing here feeds
+ * team sync, the Feishu output, or the chat sandbox — the store lives under
+ * `data/memory/`, which the chat workdir (the vault) cannot reach, and no
+ * workflow reads it.
+ *
+ * Each day's weather and the time it was written are frozen into the file's
+ * frontmatter the first time the day is created (LEO-351), so looking back at an
+ * old page shows the weather it *was* that day, not today's.
  */
-export interface JournalEntry {
+export interface JournalWeather {
+  code: number;
+  temp: number;
+  high?: number;
+  low?: number;
+  isDay?: boolean;
+  place: string;
+}
+
+export interface JournalMeta {
+  /** ISO timestamp captured when the day's entry was first created. Frozen. */
+  writtenAt?: string;
+  /** The weather at that moment, frozen so a past day shows its own. */
+  weather?: JournalWeather;
+}
+
+export interface JournalEntry extends JournalMeta {
   date: string;
+  /** The body, with the frontmatter stripped off. */
   content: string;
-  /** ISO timestamp of the file's last write, so the client can show "edited". */
   updated_at: string;
 }
 
-/** One row of the browse list: the date and a short preview of the entry. */
 export interface JournalSummary {
   date: string;
   preview: string;
@@ -36,14 +56,69 @@ function entryPath(config: AppConfig, date: string): string {
   return path.join(storeDir(config), `${date}.md`);
 }
 
+const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?/;
+
+/** Split a file into its frozen meta and its body. Forgiving: bad or absent
+ *  frontmatter just yields empty meta and the whole file as the body. */
+function parse(raw: string): { body: string; meta: JournalMeta } {
+  const match = raw.match(FRONTMATTER);
+  if (!match) return { body: raw, meta: {} };
+  const body = raw.slice(match[0].length);
+  try {
+    return { body, meta: normalizeMeta(yaml.load(match[1])) };
+  } catch {
+    return { body, meta: {} };
+  }
+}
+
+function normalizeMeta(data: unknown): JournalMeta {
+  if (!data || typeof data !== 'object') return {};
+  const row = data as Record<string, unknown>;
+  const meta: JournalMeta = {};
+  if (typeof row.written_at === 'string') meta.writtenAt = row.written_at;
+  const raw = row.weather;
+  if (raw && typeof raw === 'object') {
+    const w = raw as Record<string, unknown>;
+    if (typeof w.code === 'number' && typeof w.temp === 'number' && typeof w.place === 'string') {
+      meta.weather = {
+        code: w.code,
+        temp: w.temp,
+        place: w.place,
+        ...(typeof w.high === 'number' ? { high: w.high } : {}),
+        ...(typeof w.low === 'number' ? { low: w.low } : {}),
+        ...(typeof w.is_day === 'boolean' ? { isDay: w.is_day } : {}),
+      };
+    }
+  }
+  return meta;
+}
+
+function serialize(body: string, meta: JournalMeta): string {
+  const text = body.endsWith('\n') ? body : `${body}\n`;
+  if (!meta.writtenAt && !meta.weather) return text;
+  const front: Record<string, unknown> = {};
+  if (meta.writtenAt) front.written_at = meta.writtenAt;
+  if (meta.weather) {
+    front.weather = {
+      code: meta.weather.code,
+      temp: meta.weather.temp,
+      ...(meta.weather.high !== undefined ? { high: meta.weather.high } : {}),
+      ...(meta.weather.low !== undefined ? { low: meta.weather.low } : {}),
+      ...(meta.weather.isDay !== undefined ? { is_day: meta.weather.isDay } : {}),
+      place: meta.weather.place,
+    };
+  }
+  return `---\n${yaml.dump(front, { lineWidth: -1 }).trimEnd()}\n---\n${text}`;
+}
+
 /** The journal for a day, or null when nothing has been written for it. */
 export function readJournal(config: AppConfig, date: string): JournalEntry | null {
   if (!isCalendarDate(date)) return null;
   const file = entryPath(config, date);
   if (!fs.existsSync(file)) return null;
   try {
-    const content = fs.readFileSync(file, 'utf8');
-    return { date, content, updated_at: fs.statSync(file).mtime.toISOString() };
+    const { body, meta } = parse(fs.readFileSync(file, 'utf8'));
+    return { date, content: body, updated_at: fs.statSync(file).mtime.toISOString(), ...meta };
   } catch (error) {
     console.warn(`[journal] could not read ${file}: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -52,19 +127,25 @@ export function readJournal(config: AppConfig, date: string): JournalEntry | nul
 
 /**
  * Save a day's journal. Empty content deletes the file instead of writing a
- * blank one — an entry the user cleared is not an entry, and a blank file would
- * sit in the browse list saying nothing.
+ * blank one. The weather + written-at are frozen on first creation: an `incoming`
+ * snapshot is only taken when the day has none yet, so editing the body later
+ * never rewrites the weather the day was written under.
  */
-export function writeJournal(config: AppConfig, date: string, content: string): JournalEntry | null {
+export function writeJournal(config: AppConfig, date: string, content: string, incoming: JournalMeta = {}): JournalEntry | null {
   if (!isCalendarDate(date)) throw new Error(`不是合法日期：${date}`);
   if (!content.trim()) {
     deleteJournal(config, date);
     return null;
   }
   const file = entryPath(config, date);
+  const existing = fs.existsSync(file) ? parse(fs.readFileSync(file, 'utf8')).meta : {};
+  const meta: JournalMeta = {
+    ...(existing.writtenAt ?? incoming.writtenAt ? { writtenAt: existing.writtenAt ?? incoming.writtenAt } : {}),
+    ...(existing.weather ?? incoming.weather ? { weather: existing.weather ?? incoming.weather } : {}),
+  };
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  writeFileAtomic(file, content.endsWith('\n') ? content : `${content}\n`);
-  return { date, content, updated_at: new Date().toISOString() };
+  writeFileAtomic(file, serialize(content, meta));
+  return { date, content, updated_at: new Date().toISOString(), ...meta };
 }
 
 /** Remove a day's journal. Returns whether there was one to remove. */
@@ -87,8 +168,8 @@ export function listJournal(config: AppConfig): JournalSummary[] {
     if (!isCalendarDate(date)) continue;
     const file = path.join(dir, name);
     try {
-      const content = fs.readFileSync(file, 'utf8');
-      entries.push({ date, preview: previewOf(content), updated_at: fs.statSync(file).mtime.toISOString() });
+      const { body } = parse(fs.readFileSync(file, 'utf8'));
+      entries.push({ date, preview: previewOf(body), updated_at: fs.statSync(file).mtime.toISOString() });
     } catch {
       // A file that will not read drops out rather than blanking the whole list.
     }
