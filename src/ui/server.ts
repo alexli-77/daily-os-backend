@@ -91,7 +91,7 @@ import {
   resolveCountdown,
   saveCountdown,
 } from '../countdown/store.js';
-import { deleteJournal, listJournal, readJournal, writeJournal } from '../todo/journal.js';
+import { deleteJournal, listJournal, readJournal, writeJournal, type JournalEntry, type JournalMeta, type JournalWeather } from '../todo/journal.js';
 import { PLAN_ROW_COLORS, PLAN_ROW_TEXT_MAX, hasLaterRowState, recordTodoFeedback, resolveFeedbackDate, type TodoFeedbackEvent } from '../todo/feedback.js';
 import { formatCalendarDraftForFeishu, runCalendarDraft, testCalendarBridge } from '../calendar/bridge.js';
 import {
@@ -1011,6 +1011,32 @@ function journalToday(config: AppConfig, tz: string | null): string {
   return tz && isKnownTimeZone(tz) ? todayInZone(tz) : todayInTimezone(config);
 }
 
+/** The entry's content plus its frozen weather / written-at, as the wire shape. */
+function journalPayload(entry: JournalEntry | null): Record<string, unknown> {
+  if (!entry) return { content: '' };
+  return {
+    content: entry.content,
+    updated_at: entry.updated_at,
+    ...(entry.writtenAt ? { written_at: entry.writtenAt } : {}),
+    ...(entry.weather ? { weather: entry.weather } : {}),
+  };
+}
+
+/** Parse a weather snapshot off a save request; anything malformed is dropped. */
+function readJournalWeather(raw: unknown): JournalWeather | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const w = raw as Record<string, unknown>;
+  if (typeof w.code !== 'number' || typeof w.temp !== 'number' || typeof w.place !== 'string') return undefined;
+  return {
+    code: w.code,
+    temp: w.temp,
+    place: w.place,
+    ...(typeof w.high === 'number' ? { high: w.high } : {}),
+    ...(typeof w.low === 'number' ? { low: w.low } : {}),
+    ...(typeof w.isDay === 'boolean' ? { isDay: w.isDay } : {}),
+  };
+}
+
 function journalEntryResponse(options: UiServerOptions, url: URL): Record<string, unknown> {
   const env = readEnvFile(options.envPath);
   applyEnv(env);
@@ -1018,8 +1044,7 @@ function journalEntryResponse(options: UiServerOptions, url: URL): Record<string
   const today = journalToday(config, url.searchParams.get('tz'));
   const requested = url.searchParams.get('date');
   const date = requested && isCalendarDate(requested) ? requested : today;
-  const entry = readJournal(config, date);
-  return { ok: true, date, today, content: entry?.content ?? '', ...(entry ? { updated_at: entry.updated_at } : {}) };
+  return { ok: true, date, today, ...journalPayload(readJournal(config, date)) };
 }
 
 function listJournalResponse(options: UiServerOptions): Record<string, unknown> {
@@ -1034,12 +1059,18 @@ async function saveJournalEntry(options: UiServerOptions, body: unknown): Promis
   const date = String(request.date || '').trim();
   if (!isCalendarDate(date)) return { ok: false, error: `不是合法日期：${date || '（空）'}` };
   const content = typeof request.content === 'string' ? request.content : '';
+  // Frozen on first create only (the store keeps any existing snapshot): the
+  // client sends the moment's weather + its local time with every save.
+  const incoming: JournalMeta = {
+    ...(typeof request.written_at === 'string' ? { writtenAt: request.written_at } : {}),
+    ...(readJournalWeather(request.weather) ? { weather: readJournalWeather(request.weather) } : {}),
+  };
   const env = readEnvFile(options.envPath);
   applyEnv(env);
   const config = loadConfig(options.configPath);
-  const entry = writeJournal(config, date, content);
+  const entry = writeJournal(config, date, content, incoming);
   // An empty save clears the day; say so rather than inventing an entry back.
-  return { ok: true, date, content: entry?.content ?? '', ...(entry ? { updated_at: entry.updated_at } : { deleted: true }) };
+  return { ok: true, date, ...(entry ? journalPayload(entry) : { content: '', deleted: true }) };
 }
 
 async function deleteJournalEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {

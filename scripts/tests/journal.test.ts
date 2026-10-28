@@ -94,5 +94,38 @@ test('a bad date is refused, and non-date files in the dir are ignored', () => {
   assert.deepEqual(listJournal(config).map((entry) => entry.date), ['2026-10-27'], 'only real dated entries');
 });
 
+test('weather and written-at are frozen into frontmatter and read back, body stays clean', () => {
+  const config = setup();
+  const meta = { writtenAt: '2026-10-28T14:30:00-04:00', weather: { code: 0, temp: 8, high: 10, low: 1, isDay: true, place: '蒙特利尔' } };
+  writeJournal(config, '2026-10-28', '今天天气不错。', meta);
+  const read = readJournal(config, '2026-10-28');
+  assert.equal(read?.content.trimEnd(), '今天天气不错。', 'body has no frontmatter in it');
+  assert.equal(read?.writtenAt, '2026-10-28T14:30:00-04:00');
+  assert.deepEqual(read?.weather, { code: 0, temp: 8, high: 10, low: 1, isDay: true, place: '蒙特利尔' });
+  assert.equal(listJournal(config)[0]?.preview, '今天天气不错。', 'preview is the body, not the frontmatter');
+});
+
+test('editing the body later keeps the first weather; a different snapshot does not overwrite it', () => {
+  const config = setup();
+  writeJournal(config, '2026-10-28', '早上写的。', { writtenAt: '2026-10-28T09:00:00-04:00', weather: { code: 0, temp: 5, place: '蒙特利尔' } });
+  // Later edit carries a fresh (wrong, for this day) snapshot — must be ignored.
+  const updated = writeJournal(config, '2026-10-28', '晚上又加了两句。', { writtenAt: '2026-10-28T22:00:00-04:00', weather: { code: 61, temp: 2, place: '蒙特利尔' } });
+  assert.equal(updated?.writtenAt, '2026-10-28T09:00:00-04:00', 'the morning time stays frozen');
+  assert.equal(updated?.weather?.temp, 5, 'the morning weather stays frozen');
+  assert.equal(updated?.content, '晚上又加了两句。', 'but the body updates');
+});
+
+test('a plain entry with no frontmatter still reads, and malformed frontmatter keeps the body', () => {
+  const config = setup();
+  const dir = path.resolve(config.journal.store_dir);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '2026-10-20.md'), '没有 frontmatter 的老日记。\n');
+  assert.equal(readJournal(config, '2026-10-20')?.content.trimEnd(), '没有 frontmatter 的老日记。');
+  fs.writeFileSync(path.join(dir, '2026-10-21.md'), '---\n: : broken\n---\n正文还在。\n');
+  const broken = readJournal(config, '2026-10-21');
+  assert.equal(broken?.content.trimEnd(), '正文还在。', 'body survives bad frontmatter');
+  assert.equal(broken?.weather, undefined, 'and no weather is invented');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
