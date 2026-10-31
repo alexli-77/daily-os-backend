@@ -133,6 +133,53 @@ test('a yearly entry anchored on 29 February falls back to the 28th', () => {
   assert.equal(leapYear.ordinal, 4);
 });
 
+// --- monthly repeats --------------------------------------------------------
+
+test('a monthly entry waits for its first occurrence, then rolls to the same day each month', () => {
+  const cutoff = entry({ id: 'cc', title: '信用卡积分', date: '2026-11-17', repeat: 'monthly' });
+  assert.equal(resolveCountdown(cutoff, '2026-10-30').occurrence, '2026-11-17', 'before the first, that first date is next');
+  assert.equal(resolveCountdown(cutoff, '2026-11-17').occurrence, '2026-11-17', 'the day itself has not passed');
+  assert.equal(resolveCountdown(cutoff, '2026-11-18').occurrence, '2026-12-17', 'rolls to next month');
+  assert.equal(resolveCountdown(cutoff, '2027-01-05').occurrence, '2027-01-17', 'this month still ahead');
+});
+
+test('a monthly entry anchored on the 31st clamps to the month length', () => {
+  const rent = entry({ id: 'r', title: '房租', date: '2026-01-31', repeat: 'monthly' });
+  assert.equal(resolveCountdown(rent, '2026-02-15').occurrence, '2026-02-28', 'February has no 31st');
+});
+
+test('a monthly series ends at its end date and drops off the card', () => {
+  const cc = entry({ id: 'cc', title: '信用卡', date: '2026-11-17', repeat: 'monthly', endDate: '2027-10-17' });
+  assert.equal(resolveCountdown(cc, '2027-10-10').occurrence, '2027-10-17', 'the last occurrence is still coming');
+  const over = resolveCountdown(cc, '2027-10-18');
+  assert.ok(over.daysLeft < 0, 'past the end date there is no next occurrence');
+  assert.equal(cardCountdowns([over]).length, 0, 'so it leaves the card');
+});
+
+test('leadDays keeps a monthly entry off the card until its cutoff is near', () => {
+  const cc = entry({ id: 'cc', title: '信用卡', date: '2026-11-17', repeat: 'monthly', leadDays: 5 });
+  const farOut = resolveCountdown(cc, '2026-11-01');
+  assert.ok(farOut.daysLeft > 5)
+  assert.equal(cardCountdowns([farOut]).length, 0, '16 days out: not yet')
+  const close = resolveCountdown(cc, '2026-11-14');
+  assert.equal(close.daysLeft, 3)
+  assert.equal(cardCountdowns([close]).length, 1, '3 days out: now it shows');
+});
+
+test('monthly, leadDays and endDate round-trip through the store', () => {
+  withTmpWorkdir(() => {
+    const config = makeConfig();
+    const saved = saveCountdown(config, { title: '信用卡', date: '2026-11-17', repeat: 'monthly', leadDays: 5, endDate: '2027-10-17' });
+    assert.equal(saved.repeat, 'monthly');
+    assert.equal(saved.leadDays, 5);
+    assert.equal(saved.endDate, '2027-10-17');
+    const back = readCountdowns(config)[0];
+    assert.equal(back?.repeat, 'monthly');
+    assert.equal(back?.leadDays, 5);
+    assert.equal(back?.endDate, '2027-10-17');
+  });
+});
+
 test('a one-off keeps counting after it passes', () => {
   const deadline = entry({ id: 'd', title: '截稿', date: '2026-03-01' });
   assert.equal(resolveCountdown(deadline, '2026-03-05').daysLeft, -4);

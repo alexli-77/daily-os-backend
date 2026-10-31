@@ -15,18 +15,25 @@ import { todayInTimezone } from '../utils/date.js';
  */
 export type CountdownDirection = 'until' | 'since';
 
-/** No monthly. Nothing in this product recurs monthly on a calendar date. */
-export type CountdownRepeat = 'none' | 'yearly';
+/** `monthly` recurs on the same day each month — a statement cutoff, a rent day
+ *  (LEO-353). `yearly` on the same calendar date; `none` is a one-off. */
+export type CountdownRepeat = 'none' | 'yearly' | 'monthly';
 
 export interface Countdown {
   id: string;
   title: string;
-  /** `YYYY-MM-DD` in the user's timezone. For `yearly`, the first occurrence. */
+  /** `YYYY-MM-DD` in the user's timezone. For `yearly`/`monthly`, the first occurrence. */
   date: string;
   direction: CountdownDirection;
   repeat: CountdownRepeat;
   pinned: boolean;
   note?: string;
+  /** Recurring only: stop after this date — the series ends, nothing more shows. */
+  endDate?: string;
+  /** Recurring only: surface on the morning card only within this many days of
+   *  the occurrence, instead of the default 30-day window. A monthly cutoff is
+   *  always inside 30 days, so without this it would sit on the card every day. */
+  leadDays?: number;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +55,8 @@ export interface CountdownInput {
   repeat?: CountdownRepeat;
   pinned?: boolean;
   note?: string;
+  endDate?: string;
+  leadDays?: number;
 }
 
 /** How far ahead an unpinned entry has to be before the morning card mentions it. */
@@ -107,11 +116,37 @@ function resolveYearly(date: string, today: string): { occurrence: string; ordin
   return { occurrence, ordinal: Number(occurrence.slice(0, 4)) - anchorYear };
 }
 
+/**
+ * The next monthly occurrence on or after `today`, never before the anchor date.
+ *
+ * Clamped to the month's last day for the same reason `yearly` is: an entry
+ * anchored on the 31st has no 31st in February, and `2027-02-31` is not a date.
+ */
+function resolveMonthly(date: string, today: string): string {
+  // Before the first occurrence, that first date is what is coming next.
+  if (date >= today) return date;
+  const day = Number(date.slice(8, 10));
+  const year = Number(today.slice(0, 4));
+  const month = Number(today.slice(5, 7));
+  const thisMonth = occurrenceInYear(year, month, day);
+  if (thisMonth >= today) return thisMonth;
+  return occurrenceInYear(month === 12 ? year + 1 : year, month === 12 ? 1 : month + 1, day);
+}
+
 /** Attach today's day count to one entry. `today` is a `YYYY-MM-DD` in the user's zone. */
 export function resolveCountdown(item: Countdown, today: string): ResolvedCountdown {
   if (item.repeat === 'yearly') {
     const { occurrence, ordinal } = resolveYearly(item.date, today);
     return { ...item, occurrence, daysLeft: diffCalendarDays(today, occurrence), ordinal };
+  }
+  if (item.repeat === 'monthly') {
+    const occurrence = resolveMonthly(item.date, today);
+    // Past the end date the series is over: point at the end and read as passed,
+    // so it drops off the card like any deadline that has gone by.
+    if (item.endDate && occurrence > item.endDate) {
+      return { ...item, occurrence: item.endDate, daysLeft: diffCalendarDays(today, item.endDate) };
+    }
+    return { ...item, occurrence, daysLeft: diffCalendarDays(today, occurrence) };
   }
   return { ...item, occurrence: item.date, daysLeft: diffCalendarDays(today, item.date) };
 }
@@ -135,9 +170,11 @@ function normalizeStored(value: unknown): Countdown | null {
     title,
     date,
     direction: row.direction === 'since' ? 'since' : 'until',
-    repeat: row.repeat === 'yearly' ? 'yearly' : 'none',
+    repeat: row.repeat === 'yearly' ? 'yearly' : row.repeat === 'monthly' ? 'monthly' : 'none',
     pinned: row.pinned === true,
     ...(typeof row.note === 'string' && row.note.trim() ? { note: row.note.trim() } : {}),
+    ...(typeof row.endDate === 'string' && isCalendarDate(row.endDate) ? { endDate: row.endDate } : {}),
+    ...(typeof row.leadDays === 'number' && row.leadDays > 0 ? { leadDays: Math.round(row.leadDays) } : {}),
     created_at: typeof row.created_at === 'string' ? row.created_at : now,
     updated_at: typeof row.updated_at === 'string' ? row.updated_at : now,
   };
@@ -180,6 +217,15 @@ export function saveCountdown(config: AppConfig, input: CountdownInput): Countdo
   const index = input.id ? items.findIndex((item) => item.id === input.id) : -1;
   const existing = index >= 0 ? items[index] : undefined;
 
+  // A provided field wins (and an empty/invalid one clears); an omitted field
+  // (`undefined`) keeps what the entry already had.
+  const endDate = input.endDate !== undefined
+    ? (isCalendarDate(input.endDate) ? input.endDate : undefined)
+    : existing?.endDate;
+  const leadDays = input.leadDays !== undefined
+    ? (input.leadDays > 0 ? Math.round(input.leadDays) : undefined)
+    : existing?.leadDays;
+
   const saved: Countdown = {
     id: existing?.id || crypto.randomUUID(),
     title,
@@ -188,6 +234,8 @@ export function saveCountdown(config: AppConfig, input: CountdownInput): Countdo
     repeat: input.repeat ?? existing?.repeat ?? 'none',
     pinned: input.pinned ?? existing?.pinned ?? false,
     ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+    ...(endDate ? { endDate } : {}),
+    ...(leadDays ? { leadDays } : {}),
     created_at: existing?.created_at || now,
     updated_at: now,
   };
@@ -237,7 +285,9 @@ export function cardCountdowns(items: ResolvedCountdown[], limit = CARD_LIMIT): 
     .filter((item) => {
       if (item.direction === 'since') return item.pinned;
       if (item.daysLeft < 0) return false;
-      return item.pinned || item.daysLeft <= CARD_HORIZON_DAYS;
+      // A recurring entry can narrow its window with `leadDays` — a monthly
+      // cutoff is always inside 30 days, so without it it would show every day.
+      return item.pinned || item.daysLeft <= (item.leadDays ?? CARD_HORIZON_DAYS);
     })
     .slice(0, limit);
 }
