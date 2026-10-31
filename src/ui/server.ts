@@ -978,9 +978,11 @@ async function saveCountdownEntry(options: UiServerOptions, body: unknown): Prom
     title,
     date,
     ...(request.direction === 'since' || request.direction === 'until' ? { direction: request.direction } : {}),
-    ...(request.repeat === 'yearly' || request.repeat === 'none' ? { repeat: request.repeat } : {}),
+    ...(request.repeat === 'yearly' || request.repeat === 'monthly' || request.repeat === 'none' ? { repeat: request.repeat } : {}),
     ...(typeof request.pinned === 'boolean' ? { pinned: request.pinned } : {}),
     ...(typeof request.note === 'string' ? { note: request.note } : {}),
+    ...(typeof request.endDate === 'string' ? { endDate: request.endDate } : {}),
+    ...(typeof request.leadDays === 'number' ? { leadDays: request.leadDays } : {}),
   });
   const context = countdownContext(config, typeof request.tz === 'string' ? request.tz : null);
   return {
