@@ -60,6 +60,7 @@ import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDay
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
 import { idFragment } from '../todo/scorer.js';
 import { adhocImpact, type WorkBlock } from '../cycles/adhoc-impact.js';
+import { buildReviewContext, habitsGuide } from '../cycles/review-context.js';
 import { currentCycle, newCycleDue } from '../workflows/weekly-priorities.js';
 import { adhocSessionId, formatUnplanned, markSuggested, promoteToPriorities, refilePromoted, shouldSuggestPromote, unplannedForCycle } from '../cycles/unplanned.js';
 import { askClaudeOnce } from '../agent/claude-agent.js';
@@ -2039,13 +2040,15 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
   }
 
   const unplanned = formatUnplanned(unplannedForCycle(config, cycle, todayInTimezone(config)));
+  // Completion, 计划外 and the 7 Habits, beside the retro rather than in it
+  // (`buildReviewContext`): the retro stays the user's own words.
+  const skillPath = config.skills.registry.find((candidate) => candidate.id === 'weekly-review')?.path;
   const review = await generateCycleReview(config, 'weekly-review', {
     cycle: cycle.cycle || id,
     mode: cycle.mode || 'biweekly',
     priorities,
-    // The 计划外 ride with the retro: the skill reads the retro as what
-    // actually happened, and that is what these are.
-    retro: unplanned ? `${retro}\n\n【计划外（系统统计，不是用户写的）】${unplanned}` : retro,
+    retro,
+    context: buildReviewContext({ priorities, unplanned, habits: habitsGuide(skillPath ? expandPath(skillPath) : undefined) }),
   });
   const saved = save ? writeSection(config, id, 'review', review.text, 'ai') : null;
   return {
