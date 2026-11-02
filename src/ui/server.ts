@@ -1468,7 +1468,8 @@ async function handleChatSend(
   });
 
   try {
-    await runWebChatTurn({ config, sessionId, role: auth.role, text, onEvent: write });
+    const viewingDate = typeof body.date === 'string' && isHistoryDate(body.date) ? body.date : undefined;
+    await runWebChatTurn({ config, sessionId, role: auth.role, text, ...(viewingDate ? { viewingDate } : {}), onEvent: write });
   } catch (error) {
     write({ type: 'error', message: error instanceof Error ? error.message : String(error) });
   } finally {
@@ -2143,12 +2144,16 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
   applyEnv(env);
   const config = loadConfig(options.configPath);
   const request = readRecord(body);
-  const date = todayInTimezone(config);
+  const today = todayInTimezone(config);
   const title = String(request.title || '').trim();
   const start = String(request.start || '').trim();
   const end = String(request.end || '').trim();
   if (!title) return { ok: false, error: '写一下要做什么。' };
   if (!CLOCK_RE.test(start) || !(CLOCK_RE.test(end) || end === '24:00') || end <= start) return { ok: false, error: '时间不对：结束要晚于开始。' };
+  const requested = typeof request.date === 'string' && isHistoryDate(request.date) ? request.date : today;
+  if (requested > today) return { ok: false, error: '以后的日子在双周排期里加。' };
+  if (requested < today) return addToPastDay(config, requested, title, start, end);
+  const date = today;
   const minutes = (Number(end.slice(0, 2)) * 60 + Number(end.slice(3, 5))) - (Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5)));
 
   const captured = captureTodoItems(config, title, { source: 'console-adhoc' });
@@ -2220,12 +2225,38 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
   };
 }
 
+/**
+ * Something that happened on a day that is over (2026-11-02: 「过去的日子还不能
+ * 新加一条」 was the toast, and the user wants to write down what she did).
+ * Today's path writes a capture, which would then carry to tomorrow as open
+ * work; a past day gets a 作息 block of its own instead — a slot, so it is a
+ * row on that day's sheet that can be ticked, dragged and deleted like the
+ * others, and the 作息 under it gives way. Not a 要务 session: the cycle's
+ * schedule is about what is planned, and this is a record.
+ */
+function addToPastDay(config: AppConfig, date: string, title: string, start: string, end: string): Record<string, unknown> {
+  if (!routineForDate(config, date)) return { ok: false, error: '那天没有作息，加不进去。' };
+  const blockId = `add-${idFragment(`${title}@${start}@${Date.now()}`)}`;
+  try {
+    changeDayOverride(config, date, { type: 'edit', block: { id: blockId, start, end, title, kind: 'slot' } });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  const label = `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))} ${weekdayLabelZh(date)}`;
+  return { ok: true, candidateId: `rhythm:block:${blockId}`, text: `${start}–${end} ${title} 加到${label}了`, undo: { date, blockId, displaced: [] } };
+}
+
 /** Take a 临时安排 back: row, room in the 作息, schedule entry, displaced rows. */
 async function undoAdhoc(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
   const env = readEnvFile(options.envPath);
   applyEnv(env);
   const config = loadConfig(options.configPath);
   const request = readRecord(body);
+  const blockId = String(request.blockId || '').trim();
+  if (blockId && typeof request.date === 'string' && isHistoryDate(request.date)) {
+    changeDayOverride(config, request.date, { type: 'reset', blockId });
+    return { ok: true, text: '已撤销' };
+  }
   const date = todayInTimezone(config);
   const captureId = String(request.captureId || '').trim();
   if (captureId) {

@@ -206,11 +206,13 @@ export interface RunWebChatTurnInput {
   sessionId: string;
   role: Role;
   text: string;
+  /** The day open in the app, so 「加一条」 without a date lands there. */
+  viewingDate?: string;
   onEvent: (event: WebChatEvent) => void;
 }
 
 export async function runWebChatTurn(input: RunWebChatTurnInput): Promise<void> {
-  const { config, sessionId, role, text, onEvent } = input;
+  const { config, sessionId, role, text, viewingDate, onEvent } = input;
   const trimmed = text.trim();
   if (!trimmed) {
     onEvent({ type: 'error', message: '消息为空。' });
@@ -256,7 +258,7 @@ export async function runWebChatTurn(input: RunWebChatTurnInput): Promise<void> 
     if (command.type !== 'ignore') {
       await runCommandTurn({ config, session, access, sessionId, text: effective, runId, onEvent });
     } else {
-      await runAgentTurn({ config, session, access, sessionId, text: trimmed, runId, onEvent });
+      await runAgentTurn({ config, session, access, sessionId, text: trimmed, runId, viewingDate, onEvent });
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -281,6 +283,7 @@ interface TurnContext {
   sessionId: string;
   text: string;
   runId: string;
+  viewingDate?: string;
   onEvent: (event: WebChatEvent) => void;
 }
 
@@ -359,6 +362,7 @@ async function runAgentTurn(ctx: TurnContext): Promise<void> {
     text: ctx.text,
     access: ctx.access,
     session: ctx.session,
+    ...(ctx.viewingDate ? { viewingDate: ctx.viewingDate } : {}),
     onEvent: (event: FeishuAgentModeEvent) => forwardAgentEvent(event, ctx.onEvent),
     bridge: {
       chatId: ctx.session.chat_id,

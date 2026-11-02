@@ -128,7 +128,7 @@ export const TOOLS: ToolDef[] = [
     // file by hand, on the wrong day, in a shape nothing read.
     name: 'set_day_event',
     description:
-      '给某一天加（或改）一个固定日程，比如会议、retreat、活动：只改这一天，作息模板不动；那段时间里原来的作息块会让开，排计划时也会绕开它。date 必须先在 <now>.calendar 里查到（不要自己推算星期）。同一个 id 再调一次就是改时间；回复里把日期和星期一起告诉用户。',
+      '给某一天加（或改）一件事，比如会议、活动、「17:00 买杯子」：在那天的通告单上是一条能勾选、能拖动的 to-do，过去的日子也能加；只改这一天，作息模板不动，那段时间里原来的作息块会让开。date 必须先在 <now>.calendar 里查到（不要自己推算星期），没说日期就用 <now>.viewing（没有就是今天）。同一个 id 再调一次就是改时间；回复里把日期和星期一起告诉用户。',
     schema: {
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('那一天，YYYY-MM-DD，从 <now>.calendar 查'),
       start: z.string().regex(/^\d{2}:\d{2}$/).describe('开始 HH:mm'),
@@ -141,7 +141,7 @@ export const TOOLS: ToolDef[] = [
       path: '/api/routines/day-override',
       body: {
         date: a.date,
-        change: { type: 'edit', block: { id: (a.id as string | undefined) || eventId(String(a.title), String(a.start)), start: a.start, end: a.end, title: a.title, kind: 'fixed' } },
+        change: { type: 'edit', block: { id: (a.id as string | undefined) || eventId(String(a.title), String(a.start)), start: a.start, end: a.end, title: a.title, kind: 'slot' } },
       },
     }),
   },
