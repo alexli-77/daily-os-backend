@@ -43,7 +43,7 @@ test('tools map to the right /api method + path', () => {
   const event = tool('set_day_event').request({ date: '2026-10-26', start: '15:00', end: '18:00', title: 'AG1 Feedback Session' }) as any;
   assert.equal(event.path, '/api/routines/day-override');
   assert.equal(event.body.date, '2026-10-26');
-  assert.deepEqual({ ...event.body.change.block, id: 'x' }, { id: 'x', start: '15:00', end: '18:00', title: 'AG1 Feedback Session', kind: 'fixed' });
+  assert.deepEqual({ ...event.body.change.block, id: 'x' }, { id: 'x', start: '15:00', end: '18:00', title: 'AG1 Feedback Session', kind: 'slot' });
   assert.match(event.body.change.block.id, /^evt-[a-z0-9]+$/, 'an event without an id gets a stable one');
   assert.equal(
     (tool('set_day_event').request({ date: '2026-10-26', start: '15:00', end: '18:00', title: 'AG1 Feedback Session' }) as any).body.change.block.id,
@@ -211,6 +211,16 @@ test('every chat turn carries today, its weekday and the calendar, and says to l
   assert.match(prompt, /只能在 \\u003cnow\\u003e\.calendar 里查/);
   const codex = await buildFeishuAgentPrompt(promptInput('codex'), false);
   assert.match(codex, /<now>/, 'the codex path gets it too');
+});
+
+test('the day open in the app rides along, so 「加一条」 without a date lands there', async () => {
+  const input = { ...promptInput('claude'), viewingDate: '2026-10-31' } as Parameters<typeof buildFeishuAgentPrompt>[0];
+  const prompt = await buildFeishuAgentPrompt(input, true);
+  const now = JSON.parse(prompt.split('<now>\n')[1]!.split('\n</now>')[0]!) as { viewing?: string };
+  assert.equal(now.viewing, '2026-10-31 星期六（用户正开着这一天的页面）');
+  assert.match(prompt, /不要辩解原来的写法没错/);
+  const plain = await buildFeishuAgentPrompt(promptInput('claude'), true);
+  assert.ok(!/"viewing"/.test(plain), 'not said when the user is on today');
 });
 
 test('timeInZone reads the zone, not the machine', () => {

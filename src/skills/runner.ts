@@ -1,3 +1,4 @@
+import type { CycleSection } from '../cycles/file.js';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -52,6 +53,8 @@ export interface SkillRunInput {
   messageId: string;
   /** 结束本期: the cycle being closed. Absent: the cycle before today's. */
   reviewCycleId?: string;
+  /** Write only these cycle sections from the run (see `LocalCycleWritebackOptions.sections`). */
+  writeSections?: CycleSection[];
 }
 
 export interface SkillRunResult {
@@ -183,7 +186,7 @@ async function runConfiguredSkillInner(
     // shared document and deserves an explicit confirm; the user's own vault
     // does not, and gating it would mean a finished biweekly is invisible in
     // the Cycles page until a second command is sent (LEO-278).
-    const localCycles = writeLocalCyclesFromRun(input.config, path.join(workdir, '.runs'), lifeReview.runId);
+    const localCycles = writeLocalCyclesFromRun(input.config, path.join(workdir, '.runs'), lifeReview.runId, input.writeSections ? { sections: input.writeSections } : {});
     const result = {
       runId: lifeReview.runId,
       skillId: entry.id,

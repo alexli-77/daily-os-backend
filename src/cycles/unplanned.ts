@@ -200,14 +200,26 @@ type Ask = (prompt: string) => Promise<string>;
  * Which OKR group each line serves, asked of the model in one go. A line with
  * no group that fits, or any failure, maps to null — the holding pen.
  */
+/**
+ * What `pickHeadings` returns for a line that is a 要务 the cycle already has
+ * under other words (「万圣节视频制作与发布…」 beside 「万圣节视频制作 (CUTTO-1358)」).
+ */
+export const DUPLICATE_HEADING = '\u0000duplicate';
+
 export async function pickHeadings(texts: string[], groups: PriorityGroup[], ask: Ask): Promise<Array<string | null>> {
   if (texts.length === 0) return [];
   if (groups.length === 0) return texts.map(() => null);
+  // 2026-11-02: two Cutto videos were filed under the personal-influence group,
+  // one of them a second copy of a 要务 the work group already had. The model
+  // saw four items per group, so it could not see the copy, and had no rule
+  // for work done for the company vs for one's own accounts.
   const prompt = [
     '把下面每条新要务归到最合适的 OKR 分组。按「条目编号:分组编号」每行回复一条，例如「1:3」，不要别的字。哪组都不合适就写 0。',
+    '如果某条和分组「已有」里的某一条是同一件事（换了说法、带不带工单号都算），写「条目编号:重复」，例如「2:重复」，不要再加一遍。',
+    '按署名归谁分：为公司、团队、客户做的（公司的产品、视频、运营、工单）归工作那组，哪怕内容是做视频、发帖；只有为自己的个人账号、个人作品做的，才归个人影响力那组。',
     '',
     '分组：',
-    ...groups.map((group, index) => `${index + 1}. ${group.heading.replace(/^###\s+/, '')}${group.items.length ? `\n   已有：${group.items.slice(0, 4).join('；')}` : ''}`),
+    ...groups.map((group, index) => `${index + 1}. ${group.heading.replace(/^###\s+/, '')}${group.items.length ? `\n   已有：${group.items.slice(0, 30).join('；')}` : ''}`),
     '',
     '新要务：',
     ...texts.map((text, index) => `${index + 1}. ${text}`),
@@ -215,6 +227,10 @@ export async function pickHeadings(texts: string[], groups: PriorityGroup[], ask
   try {
     const reply = await ask(prompt);
     const picked: Array<string | null> = texts.map(() => null);
+    for (const match of reply.matchAll(/(\d+)\s*[:：]\s*重复/g)) {
+      const item = Number(match[1]) - 1;
+      if (item >= 0 && item < texts.length) picked[item] = DUPLICATE_HEADING;
+    }
     for (const match of reply.matchAll(/(\d+)\s*[:：]\s*(\d+)/g)) {
       const item = Number(match[1]) - 1;
       const group = Number(match[2]) - 1;
@@ -247,6 +263,7 @@ export async function promoteToPriorities(
 
   const content = doc.sections['要务']?.content || '';
   const [picked] = ask ? await pickHeadings([line], priorityGroups(content), ask) : [null];
+  if (picked === DUPLICATE_HEADING) return { added: false, heading: '', doc };
   const heading = picked ?? PROMOTED_HEADING;
   const written = writeSection(config, cycleId, '要务', insertUnderHeading(content, heading, line), 'user', { keepDraft: true });
   return { added: true, heading, doc: written };
@@ -269,7 +286,7 @@ export async function refilePromoted(config: AppConfig, cycleId: string, ask: As
   const moved: Array<{ text: string; heading: string }> = [];
   pen.forEach((text, index) => {
     const heading = picked[index];
-    if (heading) moved.push({ text, heading });
+    if (heading && heading !== DUPLICATE_HEADING) moved.push({ text, heading });
   });
   if (moved.length === 0) return [];
   content = removeFromPen(content, new Set(moved.map((entry) => entry.text)));

@@ -13,6 +13,7 @@ import { notificationAllowed } from '../notifications/policy.js';
 import { runBackgroundSuggestions } from './background-suggestions.js';
 import { pollFeishuFeedback } from '../feedback/feishu-feedback.js';
 import { refreshCalendarSubscriptions } from '../calendar/subscriptions.js';
+import { newCycleDue } from '../workflows/weekly-priorities.js';
 
 const LABEL = 'com.daily-os-feishu.agent';
 const SCHEDULER_STATE_PATH = './data/memory/scheduler-state.json';
@@ -53,6 +54,8 @@ export interface SchedulerTickOptions {
    * plan store otherwise.
    */
   hasPlanFor?: (config: AppConfig, date: string) => boolean;
+  /** Whether a new 双周 is due and unset; the real cycle files otherwise. */
+  newCycleDue?: (config: AppConfig, date: string) => unknown;
 }
 
 export interface SchedulerControls {
@@ -179,6 +182,13 @@ async function tick(configProvider: ConfigProvider, state: SchedulerRuntimeState
     // and accepted; the morning run would replace it with a fresh guess.
     if (item.workflow === 'daily_plan' && (options.hasPlanFor ?? planExistsFor)(config, date)) {
       if (claimFired(state, key)) console.info(`[scheduler] daily_plan for ${date} already exists; keeping it`);
+      continue;
+    }
+    // A new 双周 nobody has set yet: a plan now would have no 要务 to plan
+    // from. The Today page says so and offers both ways; generating by hand
+    // still works.
+    if (item.workflow === 'daily_plan' && (options.newCycleDue ?? newCycleDue)(config, date)) {
+      if (claimFired(state, key)) console.info(`[scheduler] daily_plan for ${date} waits: a new 双周 has not been set`);
       continue;
     }
     if (!claimFired(state, key)) continue;

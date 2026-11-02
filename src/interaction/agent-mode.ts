@@ -33,6 +33,8 @@ export interface FeishuAgentModeInput {
   bridge: FeishuAgentBridgeContext;
   access: FeishuAccessDecision;
   session: FeishuSessionRecord;
+  /** The day the user has open in the app (YYYY-MM-DD), when it is not today. */
+  viewingDate?: string;
   onEvent?: (event: FeishuAgentModeEvent) => void;
 }
 
@@ -398,7 +400,7 @@ function codexArgs(input: FeishuAgentModeInput, outputPath: string, workdir: str
  */
 const DAILY_OS_FILE_GUIDE = [
   '当前工作目录是 Daily OS 的 vault（你的数据，不含配置和密钥），用户让你改作息、排期、要务、OKR 时，直接改这里的文件。',
-  '00_System/routines.json：作息。periods[].dayTypes[].modes[].blocks[] 是每种日子的时间块（id、title、start、end，时间用 HH:mm）；dayOverrides 按日期放单日改动。改时间块时保留 id，同一 mode 里按 start 排好顺序。某一天加一个会议/活动：dayOverrides["YYYY-MM-DD"].edits 里放一个新 id 的块（kind 用 fixed），日期先在 <now>.calendar 里查。',
+  '00_System/routines.json：作息。periods[].dayTypes[].modes[].blocks[] 是每种日子的时间块（id、title、start、end，时间用 HH:mm）；dayOverrides 按日期放单日改动。改时间块时保留 id，同一 mode 里按 start 排好顺序。某一天加一个会议/活动：dayOverrides["YYYY-MM-DD"].edits 里放一个新 id 的块（kind 用 slot，这样那天是一条能勾的 to-do），日期先在 <now>.calendar 里查。',
   '20_CYCLES/<周期>.md：双周周期，要务在里面；20_CYCLES/<周期>.schedule.json：这个周期的排期。',
   '10_OKR/：OKR。rhythm.md：作息规则的文字说明。',
   '改 JSON 时保持合法 JSON，不要动和这次请求无关的字段。改之前先读文件，改完用一两句话说清改了什么。',
@@ -418,7 +420,8 @@ const DAILY_OS_TOOLS_GUIDE = [
   '如果 daily-os 的工具（mcp__daily-os__*）没有直接出现在可用工具里，先用 ToolSearch 加载它们（搜 "daily-os" 或具体工具名），再调用，不要据此说工具不可用。',
   '要改之前先拿到现状，但简单、针对性的改动不要用 get_state（它返回整个状态，又大又慢）：改作息直接 Read 00_System/routines.json 拿 periods；改某期要务/retro 直接 Read 对应的 20_CYCLES 文件；只有需要待办 id 或要跨多块看全局时才用 get_state。拿到后调写工具：capture_todo / update_todo_inbox（按 id）/ save_routines / save_okr / cycle_section。',
   'save_okr、save_routines 是整份覆盖写：先读现状、在完整内容上改，再整份传回，不要只传片段。',
-  '某一天有会议、活动、retreat 这类固定日程（「下周一下午 3 到 5 点 feedback session」），用 set_day_event 加到那一天：日期先在 <now>.calendar 里查，不要自己推算；save_routines 改的是每天都一样的模板，不是某一天。加完把工具回的日期和星期原样告诉用户。',
+  '某一天要加一件事（会议、活动、「17:00 买杯子」），用 set_day_event 加到那一天，它在那天的通告单上是一条能勾、能拖的 to-do；过去的日子也能加。日期先在 <now>.calendar 里查，不要自己推算；没说日期就是 <now>.viewing 那天（没有 viewing 就是今天）。save_routines 改的是每天都一样的模板，不是某一天。加完把工具回的日期和星期原样告诉用户。',
+  '工具回复里出现「提醒：……放不下」时，原话告诉用户哪些要务今天放不下，问他是顺到明天（defer_squeezed）、重新编排本期（replan_cycle_schedule），还是自己安排；用户选了再调。',
   '你可以读工作目录里的文件来了解细节，但改数据一律走工具。',
   '今天的计划不归这些工具管；用户想改今天计划，告诉他们在今天页上改，或者改作息后重新生成。',
   '不确定指的是哪一块、或改动会影响很多天时，先问一句再改。',
@@ -453,7 +456,7 @@ export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEna
       access_role: input.access.role,
       access_level: input.config.interaction.feishu.security.access_level,
     }),
-    section('now', buildNowContext(input.config)),
+    section('now', buildNowContext(input.config, new Date(), input.viewingDate)),
     section('instructions', [
       input.config.llm.provider === 'claude' ? '你是 Daily OS 里的对话助手。' : '你是 Daily OS 的 Feishu 远程 Codex agent mode。',
       // 2026-10-26: the chat worked weekdays out itself and was a day off for
@@ -461,6 +464,11 @@ export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEna
       '今天几号、星期几、现在几点，以 <now> 为准。用户说的「周X / 下周X / 明天 / 后天」是哪一天，只能在 <now>.calendar 里查，不要自己推算星期。',
       '往作息 dayOverrides、要务、计划里写日期之前，先在 <now>.calendar 里核对；回复里日期和星期一起写（例如 10/26 星期一），让用户一眼能看出对不对。',
       '用户说的日期或星期和你的理解对不上时，先查 <now>；是你错了就直接认错并改正，不要让用户去检查设备时间。',
+      // 2026-11-02: 「买 Bluebottle cup」 was asked for while 10/31 was open, went
+      // onto 11/01 (today), and when the user said 10/31 the chat argued that
+      // 11/01 was right and blamed a page cache.
+      '<now>.viewing 是用户在 app 里正开着的那一天。用户加、改某一天的事却没说日期时，指的是 viewing 那天（没有 viewing 才是今天）；拿不准就问一句。',
+      '用户纠正你（「应该是 10/31」「没看到」）时，按用户说的改好再回复：日期错了就把那条从旧日期删掉（remove_day_event）、加到用户说的日期（set_day_event），回一句改到了哪天星期几。不要辩解原来的写法没错，不要把原因推给页面缓存或刷新。',
       // 2026-10-26: the AG1 calendar is read directly now; retelling it in chat is what went wrong.
       '<now>.events 是从订阅日历（event_sources 里列的）直接读来的日程，已经自动放进每天的作息和计划里：问「哪天有什么安排」以它为准；对话历史或你记得的说法和它冲突时，以日历为准并直接说出来。日历里有的不要再用 set_day_event 重复加；日历之外的事（用户口头说的）才用 set_day_event。',
       input.bridge.source === 'web' ? '用中文回复，回复显示在 Daily OS 的对话页里。' : '用中文回复，回复内容会直接发回飞书。',
@@ -490,14 +498,16 @@ export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEna
  * calendar is subscribed — its events from yesterday through the next two
  * weeks, in the user's timezone.
  */
-export function buildNowContext(config: AppConfig, now: Date = new Date()): Record<string, unknown> {
+export function buildNowContext(config: AppConfig, now: Date = new Date(), viewingDate?: string): Record<string, unknown> {
   const today = todayInTimezone(config);
   const { lines, status } = upcomingCalendarLines(config, 14, 1);
+  const viewing = viewingDate && /^\d{4}-\d{2}-\d{2}$/.test(viewingDate) && viewingDate !== today ? viewingDate : undefined;
   return {
     timezone: config.user.timezone,
     today,
     weekday: weekdayLabelZh(today),
     time: timeInZone(config.user.timezone, now),
+    ...(viewing ? { viewing: `${viewing} ${weekdayLabelZh(viewing)}（用户正开着这一天的页面）` } : {}),
     calendar: calendarAround(today),
     ...(status.length > 0 ? { events: lines, event_sources: status } : {}),
   };

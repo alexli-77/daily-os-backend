@@ -125,6 +125,15 @@ test('要务 goes to the planned cycle and review goes to the reviewed cycle', (
   assert.notEqual(priorities?.cycleId, review?.cycleId, 'the two writes must not land in the same file');
 });
 
+test('新建一期 / 生成下一期要务 write the 要务 only — the 总结 waits for its 复盘 (2026-11-02)', () => {
+  const { config, runsDir } = tempWorkspace();
+  writeRun(runsDir, 'run-only');
+  const result = writeLocalCyclesFromRun(config, runsDir, 'run-only', { sections: ['要务'] });
+  assert.ok(readCycle(config, TARGET_ID)?.sections['要务']?.content, 'the next 要务 are written');
+  assert.equal(readCycle(config, REVIEW_ID)?.sections.review, undefined, 'the closing cycle gets no 总结');
+  assert.equal(result.writes.find((write) => write.section === 'review')?.status, 'skipped');
+});
+
 test('both cycle files exist on disk afterwards, each with only its own section', () => {
   const { config, runsDir } = tempWorkspace();
   writeRun(runsDir, 'run-2');

@@ -18,6 +18,8 @@ import { readSchedule, scheduledSessionsFor, writeSchedule } from '../../src/cyc
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../../src/cycles/schedule-writeback.js';
 import { applyOverride, changeDayOverride, normalizeRoutines, readRoutines, routineForDate, writeRoutines } from '../../src/user/routine.js';
 import { addDays } from '../../src/utils/date.js';
+import { fixedScheduleFor } from '../../src/cycles/fixed-schedule.js';
+import { newCycleDue } from '../../src/workflows/weekly-priorities.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -156,6 +158,29 @@ test('today-only 作息 changes: hide, edit, and room cleared for something that
   changeDayOverride(config, DAYS[3]!, { type: 'unclear', id: 'x' });
   assert.equal(routineForDate(config, DAYS[3]!)!.blocks.find((block) => block.title === '晚饭')?.end, '20:00');
   assert.equal(readRoutines(config).dayOverrides[DAYS[3]!], undefined, 'nothing left to override, nothing stored');
+});
+
+test('something added to one day is a row on that day\'s sheet — tickable, and gone again on reset', () => {
+  // 2026-11-02: what the chat added (买 Bluebottle cup) was a fixed band, which
+  // a past day's sheet does not draw; and a past day could not be added to.
+  const config = setup();
+  const blocks = [{ id: 'out', start: '13:30', end: '18:00', title: '出门', kind: 'fixed' as const }, { id: 'draw', start: '20:00', end: '21:30', title: '画画', kind: 'slot' as const }];
+  writeRoutines(config, { periods: [{ id: 'p', name: '两周', from: START, to: DAYS[13], categories: [], rules: [], dayTypes: [{ label: '每天', weekdays: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'], modes: [{ label: '一种', blocks }] }] }] });
+  changeDayOverride(config, DAYS[2]!, { type: 'edit', block: { id: 'add-cup', start: '17:00', end: '18:00', title: '买 Bluebottle cup', kind: 'slot' } });
+  const row = fixedScheduleFor(config, DAYS[2]!).find((entry) => entry.title === '买 Bluebottle cup');
+  assert.equal(row?.candidateId, 'rhythm:block:add-cup');
+  assert.equal(row?.start, '17:00');
+  assert.equal(routineForDate(config, DAYS[2]!)!.blocks.find((block) => block.title === '出门')?.end, '17:00', 'the 作息 under it gives way');
+  assert.ok(!fixedScheduleFor(config, DAYS[3]!).some((entry) => entry.title === '买 Bluebottle cup'), 'that day only');
+  changeDayOverride(config, DAYS[2]!, { type: 'reset', blockId: 'add-cup' });
+  assert.ok(!fixedScheduleFor(config, DAYS[2]!).some((entry) => entry.title === '买 Bluebottle cup'), 'reset takes it away');
+});
+
+test('the day after a 双周 ends with no next one, a new 双周 is due', () => {
+  const config = setup();
+  assert.equal(newCycleDue(config, DAYS[13]!), null, 'its last day is still in it');
+  assert.deepEqual(newCycleDue(config, addDays(START, 14)), { id: ID, cycle: '10.5-10.18' }, 'the next morning is the new 双周');
+  assert.equal(newCycleDue(config, addDays(START, -1)), null, 'before any 双周 there is nothing to set');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

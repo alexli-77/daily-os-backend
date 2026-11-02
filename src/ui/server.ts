@@ -59,7 +59,9 @@ import { calendarBlocksFor, refreshCalendarSubscriptions } from '../calendar/sub
 import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
 import { idFragment } from '../todo/scorer.js';
-import { currentCycle } from '../workflows/weekly-priorities.js';
+import { adhocImpact, type WorkBlock } from '../cycles/adhoc-impact.js';
+import { buildReviewContext, habitsGuide } from '../cycles/review-context.js';
+import { currentCycle, newCycleDue } from '../workflows/weekly-priorities.js';
 import { adhocSessionId, formatUnplanned, markSuggested, promoteToPriorities, refilePromoted, shouldSuggestPromote, unplannedForCycle } from '../cycles/unplanned.js';
 import { askClaudeOnce } from '../agent/claude-agent.js';
 import { fixedRowFor, scheduleDayView } from '../cycles/fixed-schedule.js';
@@ -547,6 +549,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/cycles/refile') return sendJson(response, await refileCyclePromoted(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/cycles/schedule') return sendJson(response, await readCycleSchedule(options, url.searchParams.get('id') || ''));
     if (request.method === 'POST' && url.pathname === '/api/cycles/schedule') return sendJson(response, await saveCycleSchedule(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/cycles/schedule/defer') return sendJson(response, deferSqueezed(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/schedule/generate') return sendJson(response, await startCycleSchedule(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/review') return sendJson(response, await generateCycleReviewSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/create') return sendJson(response, await createCycle(options, await readJson(request)));
@@ -1468,7 +1471,8 @@ async function handleChatSend(
   });
 
   try {
-    await runWebChatTurn({ config, sessionId, role: auth.role, text, onEvent: write });
+    const viewingDate = typeof body.date === 'string' && isHistoryDate(body.date) ? body.date : undefined;
+    await runWebChatTurn({ config, sessionId, role: auth.role, text, ...(viewingDate ? { viewingDate } : {}), onEvent: write });
   } catch (error) {
     write({ type: 'error', message: error instanceof Error ? error.message : String(error) });
   } finally {
@@ -1713,9 +1717,13 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   const today = todayInTimezone(config);
   const snapshot = buildTodayPlanSnapshot(config);
   const lastRun = latestDailyPlanRun(config, today);
-  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, carriedFrom: {}, today, ...(lastRun ? { lastRun } : {}) };
+  // The 双周 that ended with nothing after it: the app asks to set the new one first.
+  const due = newCycleDue(config, today);
+  const newCycle = due ? { newCycle: { previousId: due.id, previous: due.cycle } } : {};
+  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, carriedFrom: {}, today, ...(lastRun ? { lastRun } : {}), ...newCycle };
   return {
     ok: true,
+    ...newCycle,
     plan: { date: snapshot.date, workflow: 'daily_plan', stale: false, generated_at: snapshot.generated_at },
     ...(lastRun ? { lastRun } : {}),
     todos: snapshot.todos,
@@ -2022,7 +2030,9 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
   }
 
   const save = request.save === true;
-  if (save && (cycle.sections.review?.content || '').trim()) {
+  // 生成总结 pressed again after the 复盘 changed: replace on purpose.
+  const replace = request.replace === true;
+  if (save && !replace && (cycle.sections.review?.content || '').trim()) {
     throw new Error(`周期 ${cycle.cycle || id} 已经有 review 了，不会覆盖。要重写就先把这一段清空再生成。`);
   }
   if (save && cycle.frontmatterError) {
@@ -2030,13 +2040,15 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
   }
 
   const unplanned = formatUnplanned(unplannedForCycle(config, cycle, todayInTimezone(config)));
+  // Completion, 计划外 and the 7 Habits, beside the retro rather than in it
+  // (`buildReviewContext`): the retro stays the user's own words.
+  const skillPath = config.skills.registry.find((candidate) => candidate.id === 'weekly-review')?.path;
   const review = await generateCycleReview(config, 'weekly-review', {
     cycle: cycle.cycle || id,
     mode: cycle.mode || 'biweekly',
     priorities,
-    // The 计划外 ride with the retro: the skill reads the retro as what
-    // actually happened, and that is what these are.
-    retro: unplanned ? `${retro}\n\n【计划外（系统统计，不是用户写的）】${unplanned}` : retro,
+    retro,
+    context: buildReviewContext({ priorities, unplanned, habits: habitsGuide(skillPath ? expandPath(skillPath) : undefined) }),
   });
   const saved = save ? writeSection(config, id, 'review', review.text, 'ai') : null;
   return {
@@ -2122,11 +2134,25 @@ async function saveDayOverride(options: UiServerOptions, body: unknown): Promise
     return { ok: false, error: 'change.type must be edit, hide, reset, clear or unclear.' };
   }
   if (!isHistoryDate(date)) return { ok: false, error: 'date must be YYYY-MM-DD.' };
+  let before: WorkBlock[] = [];
+  try {
+    before = (routineForDate(config, date)?.blocks ?? []) as WorkBlock[];
+  } catch {
+    before = [];
+  }
   const day = changeDayOverride(config, date, change);
+  // Something put on today by the chat crowds out 要务 the same way a 临时安排 does.
+  const added = change.type === 'edit' ? change.block : null;
+  const impact = added ? adhocImpact(config, date, before, { start: added.start, end: added.end }) : null;
   // The date and its weekday, said back: the chat writes here too, and a day
   // off by one is caught the moment someone reads "10/27 星期二".
   const label = date === todayInTimezone(config) ? '今天' : `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))} ${weekdayLabelZh(date)}`;
-  return { ok: true, day, text: `只改了${label}，作息模板没动` };
+  return {
+    ok: true,
+    day,
+    text: `只改了${label}，作息模板没动${impact ? `。提醒：${impact.text}要顺到明天，或者重新编排本期，跟用户确认后再做。` : ''}`,
+    ...(impact ? { impact } : {}),
+  };
 }
 
 const CLOCK_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -2143,12 +2169,16 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
   applyEnv(env);
   const config = loadConfig(options.configPath);
   const request = readRecord(body);
-  const date = todayInTimezone(config);
+  const today = todayInTimezone(config);
   const title = String(request.title || '').trim();
   const start = String(request.start || '').trim();
   const end = String(request.end || '').trim();
   if (!title) return { ok: false, error: '写一下要做什么。' };
   if (!CLOCK_RE.test(start) || !(CLOCK_RE.test(end) || end === '24:00') || end <= start) return { ok: false, error: '时间不对：结束要晚于开始。' };
+  const requested = typeof request.date === 'string' && isHistoryDate(request.date) ? request.date : today;
+  if (requested > today) return { ok: false, error: '以后的日子在双周排期里加。' };
+  if (requested < today) return addToPastDay(config, requested, title, start, end);
+  const date = today;
   const minutes = (Number(end.slice(0, 2)) * 60 + Number(end.slice(3, 5))) - (Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5)));
 
   const captured = captureTodoItems(config, title, { source: 'console-adhoc' });
@@ -2161,6 +2191,13 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
 
   const notes: string[] = [`${start}–${end} ${title} 放进今天了`];
   const clearId = adhocClearId(item.id);
+  // The day as it was, to see what the new thing took (`adhocImpact`).
+  let before: WorkBlock[] = [];
+  try {
+    before = (routineForDate(config, date)?.blocks ?? []) as WorkBlock[];
+  } catch {
+    before = [];
+  }
   let cleared = false;
   try {
     if (routineForDate(config, date)) {
@@ -2211,13 +2248,38 @@ async function addAdhoc(options: UiServerOptions, body: unknown): Promise<Record
     }
   }
 
+  // Does it crowd out today's 要务? Said with the add, with what to do about it.
+  const impact = adhocImpact(config, date, before, { start, end });
+
   return {
     ok: true,
     candidateId,
+    ...(impact ? { impact: { ...impact, cycleId: cycle?.id ?? null } } : {}),
     ...(suggestPromote ? { suggestPromote } : {}),
     text: notes.join('；'),
     undo: { captureId: item.id, ...(cleared ? { clearId } : {}), ...(session ? { sessionId: session.sessionId } : {}), displaced },
   };
+}
+
+/**
+ * Something that happened on a day that is over (2026-11-02: 「过去的日子还不能
+ * 新加一条」 was the toast, and the user wants to write down what she did).
+ * Today's path writes a capture, which would then carry to tomorrow as open
+ * work; a past day gets a 作息 block of its own instead — a slot, so it is a
+ * row on that day's sheet that can be ticked, dragged and deleted like the
+ * others, and the 作息 under it gives way. Not a 要务 session: the cycle's
+ * schedule is about what is planned, and this is a record.
+ */
+function addToPastDay(config: AppConfig, date: string, title: string, start: string, end: string): Record<string, unknown> {
+  if (!routineForDate(config, date)) return { ok: false, error: '那天没有作息，加不进去。' };
+  const blockId = `add-${idFragment(`${title}@${start}@${Date.now()}`)}`;
+  try {
+    changeDayOverride(config, date, { type: 'edit', block: { id: blockId, start, end, title, kind: 'slot' } });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  const label = `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))} ${weekdayLabelZh(date)}`;
+  return { ok: true, candidateId: `rhythm:block:${blockId}`, text: `${start}–${end} ${title} 加到${label}了`, undo: { date, blockId, displaced: [] } };
 }
 
 /** Take a 临时安排 back: row, room in the 作息, schedule entry, displaced rows. */
@@ -2226,6 +2288,11 @@ async function undoAdhoc(options: UiServerOptions, body: unknown): Promise<Recor
   applyEnv(env);
   const config = loadConfig(options.configPath);
   const request = readRecord(body);
+  const blockId = String(request.blockId || '').trim();
+  if (blockId && typeof request.date === 'string' && isHistoryDate(request.date)) {
+    changeDayOverride(config, request.date, { type: 'reset', blockId });
+    return { ok: true, text: '已撤销' };
+  }
   const date = todayInTimezone(config);
   const captureId = String(request.captureId || '').trim();
   if (captureId) {
@@ -2317,7 +2384,12 @@ async function startCloseCycle(options: UiServerOptions, body: unknown): Promise
   await assertLocalCycleWriteTarget(config, request.owner ?? request.ownerId);
   const doc = readCycleOrThrow(config, String(request.id || '').trim());
   const running = closeRuns.get(doc.id);
-  if (running && !running.finishedAt) return { ok: true, running: true, startedAt: running.startedAt, nextId: running.nextId, text: '还在收尾，好了会自己出现。' };
+  if (running && !running.finishedAt) return { ok: true, running: true, startedAt: running.startedAt, nextId: running.nextId, text: '还在起草，好了会自己出现。' };
+  // The fourth step (2026-11-02): 完成度 → 复盘 → 生成总结 → this. It writes
+  // the next cycle's 要务 only, from a 总结 the user has seen.
+  if (!(doc.sections.review?.content || '').trim()) {
+    return { ok: false, error: '先写复盘、生成总结，再起草下一期要务。' };
+  }
 
   let next: CycleDoc | null | undefined = listCycles(config)
     .filter((candidate) => candidate.startDate > doc.startDate)
@@ -2339,6 +2411,7 @@ async function startCloseCycle(options: UiServerOptions, body: unknown): Promise
     source: 'cycle-close',
     messageId: doc.id,
     reviewCycleId: doc.id,
+    writeSections: ['要务'],
   })
     .then((result) => {
       closeRuns.set(doc.id, { ...run, finishedAt: new Date().toISOString(), text: result.localCycles ? formatLocalCycleWriteback(result.localCycles) : '做完了。' });
@@ -2346,7 +2419,7 @@ async function startCloseCycle(options: UiServerOptions, body: unknown): Promise
     .catch((error: unknown) => {
       closeRuns.set(doc.id, { ...run, finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
     });
-  return { ok: true, running: true, startedAt: run.startedAt, nextId: next.id, text: `开始收尾 ${doc.cycle || doc.id}：写总结、起草 ${next.cycle || next.id} 的要务，几分钟后好。` };
+  return { ok: true, running: true, startedAt: run.startedAt, nextId: next.id, text: `开始起草 ${next.cycle || next.id} 的要务，几分钟后好。` };
 }
 
 function readCloseCycle(id: string): Record<string, unknown> {
@@ -2457,6 +2530,24 @@ async function startCycleSchedule(options: UiServerOptions, body: unknown): Prom
       scheduleRuns.set(doc.id, { startedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
     });
   return { ok: true, id: doc.id, started: true, text: '开始排期，一两分钟后出来。' };
+}
+
+/** 顺到明天 for the 要务 a 临时安排 crowded out of today (`adhocImpact`). */
+function deferSqueezed(options: UiServerOptions, body: unknown): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const request = readRecord(body);
+  const date = todayInTimezone(config);
+  const keys = (Array.isArray(request.itemKeys) ? request.itemKeys : []).map(String).filter((key) => /^[0-9a-f]{8}$/.test(key));
+  if (keys.length === 0) return { ok: false, error: '没有要挪的要务。' };
+  const notes = keys.map((key) => deferScheduled(config, date, key)).filter((note): note is string => Boolean(note));
+  for (const key of keys) {
+    // The row on today's sheet follows its session, like 顺到明天 on the row.
+    const row = buildTodayPlanSnapshot(config)?.todos.find((todo) => weeklyItemKey(todo.candidateId) === key);
+    if (row) recordTodoFeedback(config, { date, event: 'defer', candidateId: row.candidateId, rank: row.rank ?? 0, source: 'console-today' });
+  }
+  return { ok: true, text: notes.length > 0 ? notes.join('；') : '排期里今天没有这些要务了' };
 }
 
 async function saveCycleSchedule(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
@@ -2641,6 +2732,8 @@ function startCyclePlanning(
     userText: planningRequestText(plan, hints),
     source: 'local-ui-cycle-create',
     messageId: `cycle-create-${plan.id}`,
+    // Not the last cycle's 总结: that waits for its 复盘 and its own button.
+    writeSections: ['要务'],
   })
     .then((result) => {
       appendUiLog({

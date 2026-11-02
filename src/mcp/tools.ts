@@ -128,7 +128,7 @@ export const TOOLS: ToolDef[] = [
     // file by hand, on the wrong day, in a shape nothing read.
     name: 'set_day_event',
     description:
-      '给某一天加（或改）一个固定日程，比如会议、retreat、活动：只改这一天，作息模板不动；那段时间里原来的作息块会让开，排计划时也会绕开它。date 必须先在 <now>.calendar 里查到（不要自己推算星期）。同一个 id 再调一次就是改时间；回复里把日期和星期一起告诉用户。',
+      '给某一天加（或改）一件事，比如会议、活动、「17:00 买杯子」：在那天的通告单上是一条能勾选、能拖动的 to-do，过去的日子也能加；只改这一天，作息模板不动，那段时间里原来的作息块会让开。date 必须先在 <now>.calendar 里查到（不要自己推算星期），没说日期就用 <now>.viewing（没有就是今天）。同一个 id 再调一次就是改时间；回复里把日期和星期一起告诉用户。',
     schema: {
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('那一天，YYYY-MM-DD，从 <now>.calendar 查'),
       start: z.string().regex(/^\d{2}:\d{2}$/).describe('开始 HH:mm'),
@@ -141,7 +141,7 @@ export const TOOLS: ToolDef[] = [
       path: '/api/routines/day-override',
       body: {
         date: a.date,
-        change: { type: 'edit', block: { id: (a.id as string | undefined) || eventId(String(a.title), String(a.start)), start: a.start, end: a.end, title: a.title, kind: 'fixed' } },
+        change: { type: 'edit', block: { id: (a.id as string | undefined) || eventId(String(a.title), String(a.start)), start: a.start, end: a.end, title: a.title, kind: 'slot' } },
       },
     }),
   },
@@ -153,6 +153,24 @@ export const TOOLS: ToolDef[] = [
       id: z.string().min(1).describe('日程或作息块的 id'),
     },
     request: (a) => ({ method: 'POST', path: '/api/routines/day-override', body: { date: a.date, change: { type: 'reset', blockId: a.id } } }),
+  },
+  {
+    // 2026-11-02: set_day_event and 临时安排 say when today's 要务 no longer fit;
+    // these are the two answers, used after the user picks one.
+    name: 'defer_squeezed',
+    description: '把今天被挤掉的要务顺到明天（按 itemKey，8 位）。set_day_event 回复里提醒「放不下」时，用户选了顺到明天才用。',
+    schema: {
+      itemKeys: z.array(z.string().regex(/^[0-9a-f]{8}$/)).min(1).describe('要挪的要务 itemKey'),
+    },
+    request: (a) => ({ method: 'POST', path: '/api/cycles/schedule/defer', body: { itemKeys: a.itemKeys } }),
+  },
+  {
+    name: 'replan_cycle_schedule',
+    description: '从现在起重新编排这一期剩下的排期（一两分钟，在后台跑）。用户选了「重新编排本期」才用。id 是周期 id。',
+    schema: {
+      id: z.string().min(1).describe('周期 id，形如 2026-11-02_11.2-11.15'),
+    },
+    request: (a) => ({ method: 'POST', path: '/api/cycles/schedule/generate', body: { id: a.id } }),
   },
   {
     name: 'cycle_section',
