@@ -19,6 +19,7 @@ import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, 
 import { applyOverride, changeDayOverride, normalizeRoutines, readRoutines, routineForDate, writeRoutines } from '../../src/user/routine.js';
 import { addDays } from '../../src/utils/date.js';
 import { fixedScheduleFor } from '../../src/cycles/fixed-schedule.js';
+import { newCycleDue } from '../../src/workflows/weekly-priorities.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -173,6 +174,13 @@ test('something added to one day is a row on that day\'s sheet — tickable, and
   assert.ok(!fixedScheduleFor(config, DAYS[3]!).some((entry) => entry.title === '买 Bluebottle cup'), 'that day only');
   changeDayOverride(config, DAYS[2]!, { type: 'reset', blockId: 'add-cup' });
   assert.ok(!fixedScheduleFor(config, DAYS[2]!).some((entry) => entry.title === '买 Bluebottle cup'), 'reset takes it away');
+});
+
+test('the day after a 双周 ends with no next one, a new 双周 is due', () => {
+  const config = setup();
+  assert.equal(newCycleDue(config, DAYS[13]!), null, 'its last day is still in it');
+  assert.deepEqual(newCycleDue(config, addDays(START, 14)), { id: ID, cycle: '10.5-10.18' }, 'the next morning is the new 双周');
+  assert.equal(newCycleDue(config, addDays(START, -1)), null, 'before any 双周 there is nothing to set');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

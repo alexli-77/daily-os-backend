@@ -59,7 +59,7 @@ import { calendarBlocksFor, refreshCalendarSubscriptions } from '../calendar/sub
 import { changeDayOverride, readRoutines, resolveRoutine, routineForDate, setDayMode, writeRoutines, type DayOverrideChange } from '../user/routine.js';
 import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, restoreScheduled, skipScheduled, weeklyItemKey } from '../cycles/schedule-writeback.js';
 import { idFragment } from '../todo/scorer.js';
-import { currentCycle } from '../workflows/weekly-priorities.js';
+import { currentCycle, newCycleDue } from '../workflows/weekly-priorities.js';
 import { adhocSessionId, formatUnplanned, markSuggested, promoteToPriorities, refilePromoted, shouldSuggestPromote, unplannedForCycle } from '../cycles/unplanned.js';
 import { askClaudeOnce } from '../agent/claude-agent.js';
 import { fixedRowFor, scheduleDayView } from '../cycles/fixed-schedule.js';
@@ -1714,9 +1714,13 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   const today = todayInTimezone(config);
   const snapshot = buildTodayPlanSnapshot(config);
   const lastRun = latestDailyPlanRun(config, today);
-  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, carriedFrom: {}, today, ...(lastRun ? { lastRun } : {}) };
+  // The 双周 that ended with nothing after it: the app asks to set the new one first.
+  const due = newCycleDue(config, today);
+  const newCycle = due ? { newCycle: { previousId: due.id, previous: due.cycle } } : {};
+  if (!snapshot) return { ok: true, plan: null, todos: [], feedback: {}, notes: {}, carriedFrom: {}, today, ...(lastRun ? { lastRun } : {}), ...newCycle };
   return {
     ok: true,
+    ...newCycle,
     plan: { date: snapshot.date, workflow: 'daily_plan', stale: false, generated_at: snapshot.generated_at },
     ...(lastRun ? { lastRun } : {}),
     todos: snapshot.todos,

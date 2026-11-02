@@ -74,6 +74,28 @@ export function parseCyclePriorities(markdown: string, week: string, source = 'l
 }
 
 /**
+ * A new 双周 is due: no cycle covers `date`, and the latest one before it has
+ * ended. Returns that ended cycle (its 结束本期 writes the next one).
+ *
+ * 2026-11-02: the morning after 10.19–11.1 ended, the plan was generated anyway
+ * — from Linear and the 作息 alone, with no 要务 — and the user wants to be told
+ * a new 双周 has started and set it first. So the scheduled run waits
+ * (`src/service/launchd.ts`) and the Today page asks (`newCycle`).
+ */
+export function newCycleDue(config: AppConfig, date: string): { id: string; cycle: string } | null {
+  try {
+    if (currentCycle(config, date)) return null;
+    const previous = listCycles(config)
+      .filter((doc) => doc.startDate && doc.startDate < date)
+      .sort((left, right) => (right.startDate ?? '').localeCompare(left.startDate ?? ''))[0];
+    return previous ? { id: previous.id, cycle: previous.cycle } : null;
+  } catch {
+    // No vault to read: nothing to say, and the plan runs as before.
+    return null;
+  }
+}
+
+/**
  * The cycle whose span contains `date`. The label carries no year, so the
  * start date is what pins it; the label supplies the end. Narrowest wins when
  * two overlap, same rule as the Feishu header lookup.

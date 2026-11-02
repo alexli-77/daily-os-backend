@@ -70,6 +70,24 @@ test('the morning daily_plan keeps a plan already made for the day (the evening 
   });
 });
 
+// --- a new 双周 nobody set: the morning run waits (2026-11-02) ------------
+
+test('the morning daily_plan waits while a new 双周 has not been set', async () => {
+  await withTmpWorkdir(async () => {
+    const calls: WorkflowName[] = [];
+    const runWorkflow = async (_c: AppConfig, workflow: WorkflowName): Promise<string> => {
+      calls.push(workflow);
+      return 'ok';
+    };
+    const waiting = createSchedulerState();
+    await runSchedulerTick(config, waiting, { now: () => AFTER_DUE, runWorkflow, hasPlanFor: () => false, newCycleDue: () => ({ id: 'x', cycle: '10.19-11.1' }) });
+    assert.deepEqual(calls, [], 'no plan from Linear and the 作息 alone');
+    assert.ok(waiting.fired.has(DAILY_PLAN_KEY), 'and not asked again every minute');
+    await runSchedulerTick(config, createSchedulerState(), { now: () => AFTER_DUE, runWorkflow, hasPlanFor: () => false, newCycleDue: () => null });
+    assert.deepEqual(calls, ['daily_plan'], 'once the 双周 is set, it runs');
+  });
+});
+
 // --- LoopDriver: fire once, no repeat --------------------------------------
 
 test('LoopDriver fires a due workflow exactly once and dedupes on repeat ticks', async () => {
