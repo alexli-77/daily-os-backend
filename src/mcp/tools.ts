@@ -155,6 +155,24 @@ export const TOOLS: ToolDef[] = [
     request: (a) => ({ method: 'POST', path: '/api/routines/day-override', body: { date: a.date, change: { type: 'reset', blockId: a.id } } }),
   },
   {
+    // 2026-11-02: set_day_event and 临时安排 say when today's 要务 no longer fit;
+    // these are the two answers, used after the user picks one.
+    name: 'defer_squeezed',
+    description: '把今天被挤掉的要务顺到明天（按 itemKey，8 位）。set_day_event 回复里提醒「放不下」时，用户选了顺到明天才用。',
+    schema: {
+      itemKeys: z.array(z.string().regex(/^[0-9a-f]{8}$/)).min(1).describe('要挪的要务 itemKey'),
+    },
+    request: (a) => ({ method: 'POST', path: '/api/cycles/schedule/defer', body: { itemKeys: a.itemKeys } }),
+  },
+  {
+    name: 'replan_cycle_schedule',
+    description: '从现在起重新编排这一期剩下的排期（一两分钟，在后台跑）。用户选了「重新编排本期」才用。id 是周期 id。',
+    schema: {
+      id: z.string().min(1).describe('周期 id，形如 2026-11-02_11.2-11.15'),
+    },
+    request: (a) => ({ method: 'POST', path: '/api/cycles/schedule/generate', body: { id: a.id } }),
+  },
+  {
     name: 'cycle_section',
     description: '写入某个周期文件的一个段落：要务 / retro / review（覆盖写该段）。id 是周期 id（形如 2026-09-21_...），用 get_state 找。',
     schema: {

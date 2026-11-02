@@ -174,6 +174,17 @@ test('加进要务 goes under the OKR the model picks, and keeps a pending draft
   assert.equal((await promoteToPriorities(config, id, '再一件', async () => { throw new Error('down'); })).heading, PROMOTED_HEADING);
 });
 
+test('the same 要务 in other words is not added twice, and the model is told who it is for (2026-11-02)', async () => {
+  const { config, id } = setup();
+  const before = readCycle(config, id)!.sections['要务']!.content;
+  let asked = '';
+  const result = await promoteToPriorities(config, id, '用户访谈与记录', async (prompt) => { asked = prompt; return '1:重复'; });
+  assert.equal(result.added, false);
+  assert.equal(readCycle(config, id)!.sections['要务']!.content, before, 'nothing written');
+  assert.match(asked, /按署名归谁分/);
+  assert.match(asked, /写「条目编号:重复」/);
+});
+
 test('what sits in 计划外新增 is refiled to its OKR groups, and the pen goes when empty', async () => {
   const { config, id } = setup();
   await promoteToPriorities(config, id, '用户访谈');

@@ -421,6 +421,7 @@ const DAILY_OS_TOOLS_GUIDE = [
   '要改之前先拿到现状，但简单、针对性的改动不要用 get_state（它返回整个状态，又大又慢）：改作息直接 Read 00_System/routines.json 拿 periods；改某期要务/retro 直接 Read 对应的 20_CYCLES 文件；只有需要待办 id 或要跨多块看全局时才用 get_state。拿到后调写工具：capture_todo / update_todo_inbox（按 id）/ save_routines / save_okr / cycle_section。',
   'save_okr、save_routines 是整份覆盖写：先读现状、在完整内容上改，再整份传回，不要只传片段。',
   '某一天要加一件事（会议、活动、「17:00 买杯子」），用 set_day_event 加到那一天，它在那天的通告单上是一条能勾、能拖的 to-do；过去的日子也能加。日期先在 <now>.calendar 里查，不要自己推算；没说日期就是 <now>.viewing 那天（没有 viewing 就是今天）。save_routines 改的是每天都一样的模板，不是某一天。加完把工具回的日期和星期原样告诉用户。',
+  '工具回复里出现「提醒：……放不下」时，原话告诉用户哪些要务今天放不下，问他是顺到明天（defer_squeezed）、重新编排本期（replan_cycle_schedule），还是自己安排；用户选了再调。',
   '你可以读工作目录里的文件来了解细节，但改数据一律走工具。',
   '今天的计划不归这些工具管；用户想改今天计划，告诉他们在今天页上改，或者改作息后重新生成。',
   '不确定指的是哪一块、或改动会影响很多天时，先问一句再改。',

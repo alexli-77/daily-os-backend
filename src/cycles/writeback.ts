@@ -61,6 +61,12 @@ export interface LocalCycleWritebackResult {
 export interface LocalCycleWritebackOptions {
   now?: string;
   dryRun?: boolean;
+  /**
+   * Only these sections. The run always drafts both the next 要务 and the
+   * closing cycle's 总结; 新建一期 and 生成下一期要务 want the 要务 only — the
+   * 总结 is its own step, after the user's 复盘 (2026-11-02).
+   */
+  sections?: CycleSection[];
 }
 
 /**
@@ -84,6 +90,10 @@ export function writeLocalCyclesFromRun(
   for (const plan of planLocalCycles(run, okrRowLabels(config), writes)) {
     const section = Object.keys(plan.sections)[0] as CycleSection;
     const content = plan.sections[section] || '';
+    if (options.sections && !options.sections.includes(section)) {
+      writes.push({ section, cycleId: plan.id, label: plan.label, status: 'skipped', chars: content.length, reason: 'not asked for this step' });
+      continue;
+    }
     let existing = null;
     try {
       existing = readCycle(config, plan.id);

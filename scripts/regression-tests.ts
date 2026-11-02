@@ -221,6 +221,7 @@ try {
     'scripts/tests/claude-failure.test.ts',
     'scripts/tests/chat-claude-agent.test.ts',
     'scripts/tests/adhoc-sheet.test.ts',
+    'scripts/tests/adhoc-impact.test.ts',
     'scripts/tests/unplanned.test.ts',
     'scripts/tests/close-cycle.test.ts',
     'scripts/tests/linear-sync.test.ts',
