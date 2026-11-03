@@ -17,7 +17,7 @@ function configWith(vault: string): AppConfig {
   return config;
 }
 function memoryCheck(checks: Awaited<ReturnType<typeof runDoctor>>) {
-  return checks.find((check) => check.name.startsWith('memory.repository_path'));
+  return checks.find((check) => check.name.startsWith('记忆仓库路径'));
 }
 
 try {
