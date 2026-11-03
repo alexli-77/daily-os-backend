@@ -20,13 +20,13 @@ export interface DoctorCheck {
 export async function runDoctor(config: AppConfig, configPath = 'config/config.yaml'): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
 
-  checks.push({ name: configPath, ok: fs.existsSync(configPath) });
+  checks.push({ name: '配置文件', ok: fs.existsSync(configPath), detail: configPath });
   const needsLarkCli = usesLarkCliFeishu(config);
   if (needsLarkCli) {
-    checks.push({ name: 'lark-cli', ...(await toCheck('lark-cli', checkLarkCli())) });
+    checks.push({ name: 'lark-cli 命令行', ...(await toCheck('lark-cli', checkLarkCli())) });
   } else {
     checks.push({
-      name: 'lark-cli',
+      name: 'lark-cli 命令行',
       ok: true,
       level: 'warning',
       detail: 'not required for the currently enabled Feishu SDK-only features',
@@ -44,7 +44,7 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
     const bin = config.llm.provider === 'claude' ? process.env.CLAUDE_BIN || 'claude' : process.env.CODEX_BIN || 'codex';
     const probe = await probeCliProvider(config.llm.provider, bin);
     checks.push({
-      name: `llm.provider=${config.llm.provider} 后台可用性`,
+      name: `后台 ${config.llm.provider === 'claude' ? 'Claude' : 'Codex'} 可用性`,
       ok: probe.ok,
       level: probe.ok ? 'ok' : 'missing',
       detail: probe.ok
@@ -58,22 +58,22 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
     const codexEnv = codexProcessEnv();
     const exists = await commandExists(codexBin, codexEnv);
     checks.push({
-      name: `Codex CLI (${codexBin})`,
+      name: 'Codex 命令行',
       ok: exists,
-      detail: exists ? codexHomeDetail() : 'Set CODEX_BIN to the Codex CLI path, or install Codex CLI and make it available in PATH.',
+      detail: exists ? `${codexBin} · ${codexHomeDetail()}` : 'Set CODEX_BIN to the Codex CLI path, or install Codex CLI and make it available in PATH.',
     });
     if (exists) checks.push(await codexLoginCheck(codexBin, codexEnv));
   } else if (config.llm.provider === 'claude') {
     const claudeBin = process.env.CLAUDE_BIN || 'claude';
     const exists = await commandExists(claudeBin);
     checks.push({
-      name: `Claude Code CLI (${claudeBin})`,
+      name: 'Claude Code 命令行',
       ok: exists,
-      detail: exists ? 'found' : 'Set CLAUDE_BIN to the Claude Code CLI path, or install Claude Code and make it available in PATH.',
+      detail: exists ? claudeBin : 'Set CLAUDE_BIN to the Claude Code CLI path, or install Claude Code and make it available in PATH.',
     });
     if (exists) checks.push(await claudeAuthCheck(claudeBin));
   } else {
-    checks.push({ name: 'OPENAI_API_KEY', ok: Boolean(process.env.OPENAI_API_KEY) });
+    checks.push({ name: 'OpenAI API Key', ok: Boolean(process.env.OPENAI_API_KEY), detail: 'OPENAI_API_KEY' });
   }
 
   if (needsLarkCli) {
@@ -81,25 +81,25 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
   }
 
   if (config.interaction.feishu.enabled) {
-    checks.push({ name: 'LARK_APP_ID', ok: Boolean(process.env.LARK_APP_ID), detail: 'required only for Feishu websocket interaction' });
-    checks.push({ name: 'LARK_APP_SECRET', ok: Boolean(process.env.LARK_APP_SECRET), detail: 'required only for Feishu websocket interaction' });
+    checks.push({ name: '飞书 App ID', ok: Boolean(process.env.LARK_APP_ID), detail: 'LARK_APP_ID · 仅飞书 websocket 交互需要' });
+    checks.push({ name: '飞书 App Secret', ok: Boolean(process.env.LARK_APP_SECRET), detail: 'LARK_APP_SECRET · 仅飞书 websocket 交互需要' });
   }
 
   if (config.interaction.feishu.enabled) {
     checks.push({
-      name: 'Feishu interaction layer',
+      name: '飞书交互层',
       ok: true,
       detail: `prefix=${config.interaction.feishu.command_prefix}, debounce=${config.interaction.feishu.debounce_ms}ms`,
     });
     checks.push({
-      name: 'Feishu session catalog',
+      name: '飞书会话目录',
       ok: true,
       detail: feishuSessionCatalogPath(config),
     });
     checks.push(
       hasAnyAccessRule(config)
         ? {
-            name: 'Feishu interaction access policy',
+            name: '飞书权限策略',
             ok: true,
             level: config.interaction.feishu.security.access_level === 'full' ? 'warning' : 'ok',
             detail:
@@ -108,7 +108,7 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
                 : summarizeFeishuAccess(config),
           }
         : {
-            name: 'Feishu interaction access policy',
+            name: '飞书权限策略',
             ok: false,
             level: 'missing',
             detail: `configure ${config.interaction.feishu.security.owner_open_id_env}, allowed_user_open_ids, or allowed_chat_ids before remote control will process messages`,
@@ -116,7 +116,7 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
     );
     for (const warning of feishuSafetyWarnings(config)) {
       checks.push({
-        name: 'Feishu interaction safety',
+        name: '飞书安全提醒',
         ok: true,
         level: 'warning',
         detail: warning,
@@ -125,11 +125,11 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
   }
 
   if (config.output.feishu.enabled) {
-    checks.push({ name: config.output.feishu.chat_id_env, ok: Boolean(process.env[config.output.feishu.chat_id_env]) });
+    checks.push({ name: '飞书会话 ID', ok: Boolean(process.env[config.output.feishu.chat_id_env]), detail: config.output.feishu.chat_id_env });
     if (config.output.feishu.provider === 'sdk' || config.output.feishu.provider === 'auto') {
       const status = feishuSdkStatus();
       checks.push({
-        name: 'Feishu SDK output',
+        name: '飞书 SDK 发送',
         ok: status.ok || config.output.feishu.provider === 'auto',
         level: status.ok ? 'ok' : config.output.feishu.provider === 'auto' ? 'warning' : 'missing',
         detail: status.ok ? 'will send through official Feishu SDK' : `${status.detail}; ${config.output.feishu.provider === 'auto' ? 'will fall back to lark-cli' : 'required by output.feishu.provider=sdk'}`,
@@ -145,7 +145,7 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
   // reporting ok. A real vault has 10_OKR/ (and usually 20_CYCLES/).
   const looksSeeded = vaultExists && fs.existsSync(path.join(memoryRepositoryPath, '10_OKR'));
   checks.push({
-    name: usingDefault ? 'memory.repository_path (default)' : 'memory.repository_path',
+    name: usingDefault ? '记忆仓库路径（默认）' : '记忆仓库路径',
     ok: vaultExists && looksSeeded,
     level: !vaultExists ? 'missing' : looksSeeded ? 'ok' : 'warning',
     detail: !vaultExists
@@ -158,7 +158,7 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
   if (config.decision.enabled) {
     const policy = decisionPolicyFiles(config);
     checks.push({
-      name: 'decision policy files',
+      name: '决策规则文件',
       ok: fs.existsSync(policy.policyPath) && fs.existsSync(policy.notesPath),
       level: fs.existsSync(policy.policyPath) && fs.existsSync(policy.notesPath) ? 'ok' : 'warning',
       detail: `policy=${policy.policyPath}, notes=${policy.notesPath}`,
@@ -167,14 +167,14 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
       const statePath = config.decision.onboarding.state_path;
       const hasDecisionChat = Boolean(process.env[config.decision.onboarding.chat_id_env]) || fs.existsSync(statePath);
       checks.push({
-        name: config.decision.onboarding.chat_id_env,
+        name: '决策群会话 ID',
         ok: hasDecisionChat,
         level: hasDecisionChat ? 'ok' : 'warning',
-        detail: '开始决策校准前不是必填项',
+        detail: `${config.decision.onboarding.chat_id_env} · 开始决策校准前不是必填项`,
       });
       if (!hasDecisionChat && !feishuSdkStatus().ok) {
         checks.push({
-          name: 'decision onboarding transport',
+          name: '决策群创建通道',
           ok: true,
           level: 'warning',
           detail: 'configure LARK_APP_ID/LARK_APP_SECRET for SDK group creation, or keep lark-cli available for the fallback path',
@@ -186,10 +186,10 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
   if (config.sources.vault.enabled) {
     if (config.sources.vault.provider === 'remote') {
       const remote = config.sources.vault.remote;
-      checks.push({ name: remote.base_url_env, ok: Boolean(process.env[remote.base_url_env]) });
-      checks.push({ name: remote.token_env, ok: Boolean(process.env[remote.token_env]) });
+      checks.push({ name: '知识库网关地址', ok: Boolean(process.env[remote.base_url_env]), detail: remote.base_url_env });
+      checks.push({ name: '知识库网关令牌', ok: Boolean(process.env[remote.token_env]), detail: remote.token_env });
     } else {
-      checks.push({ name: 'vault.local_path', ok: fs.existsSync(config.sources.vault.local_path), detail: config.sources.vault.local_path });
+      checks.push({ name: '知识库路径', ok: fs.existsSync(config.sources.vault.local_path), detail: config.sources.vault.local_path });
     }
   }
 
@@ -199,29 +199,31 @@ export async function runDoctor(config: AppConfig, configPath = 'config/config.y
       for (const profile of profiles) {
         if (profile.enabled && profile.im_history.enabled) {
           checks.push({
-            name: `${profile.id}.im_history.${profile.im_history.chat_id_env}`,
+            name: `采集会话 ID（${profile.id}）`,
             ok: Boolean(process.env[profile.im_history.chat_id_env]),
+            detail: `${profile.id}.im_history.${profile.im_history.chat_id_env}`,
           });
         }
       }
     } else if (config.sources.feishu.im_history.enabled) {
       checks.push({
-        name: `feishu.im_history.${config.sources.feishu.im_history.chat_id_env}`,
+        name: '采集会话 ID',
         ok: Boolean(process.env[config.sources.feishu.im_history.chat_id_env]),
+        detail: `feishu.im_history.${config.sources.feishu.im_history.chat_id_env}`,
       });
     }
   }
 
-  if (config.sources.github.enabled) checks.push({ name: 'GITHUB_TOKEN', ok: Boolean(process.env.GITHUB_TOKEN) });
+  if (config.sources.github.enabled) checks.push({ name: 'GitHub 令牌', ok: Boolean(process.env.GITHUB_TOKEN), detail: 'GITHUB_TOKEN' });
   if (config.sources.linear.enabled) {
     checks.push(
       process.env.LINEAR_API_KEY
-        ? { name: 'LINEAR_API_KEY', ok: true, level: 'ok' }
+        ? { name: 'Linear API Key', ok: true, level: 'ok', detail: 'LINEAR_API_KEY' }
         : {
-            name: 'LINEAR_API_KEY',
+            name: 'Linear API Key',
             ok: true,
             level: 'warning',
-            detail: 'not configured; Codex Linear fallback will be used',
+            detail: 'LINEAR_API_KEY · not configured; Codex Linear fallback will be used',
           },
     );
   }
@@ -241,7 +243,7 @@ async function codexLoginCheck(codexBin: string, env: NodeJS.ProcessEnv): Promis
   const result = await runCommand(codexBin, ['login', 'status'], { timeoutMs: 10000, env });
   if (result.ok) {
     return {
-      name: 'Codex login',
+      name: 'Codex 登录',
       ok: true,
       detail: (result.stdout || result.stderr).trim() || 'authenticated',
     };
@@ -251,14 +253,14 @@ async function codexLoginCheck(codexBin: string, env: NodeJS.ProcessEnv): Promis
   // the user to run `codex login` (which succeeds in Terminal and changes nothing).
   if (result.timedOut) {
     return {
-      name: 'Codex login',
+      name: 'Codex 登录',
       ok: false,
       level: 'warning',
       detail: 'codex login status 10s 内没有返回，无法判定登录状态。若本服务在 macOS 后台(launchd)运行，订阅版 CLI 会因 Keychain 阻塞而无响应（#199）——这不代表未登录。定时任务请改用 API-key provider。',
     };
   }
   return {
-    name: 'Codex login',
+    name: 'Codex 登录',
     ok: false,
     detail: `Run \`${codexBin} login\` in Terminal, then rerun checks. ${(result.stderr || result.stdout).trim()}`.trim(),
   };
@@ -269,7 +271,7 @@ async function claudeAuthCheck(claudeBin: string): Promise<DoctorCheck> {
   const loggedIn = result.ok && /"loggedIn"\s*:\s*true/.test(result.stdout);
   if (loggedIn) {
     return {
-      name: 'Claude Code auth',
+      name: 'Claude Code 登录',
       ok: true,
       detail: (result.stdout.match(/"authMethod"\s*:\s*"([^"]+)"/)?.[1]) ?? 'authenticated',
     };
@@ -279,14 +281,14 @@ async function claudeAuthCheck(claudeBin: string): Promise<DoctorCheck> {
   // in Terminal and leaves the background service just as broken.
   if (result.timedOut) {
     return {
-      name: 'Claude Code auth',
+      name: 'Claude Code 登录',
       ok: false,
       level: 'warning',
       detail: 'claude auth status 10s 内没有返回，无法判定登录状态。若本服务在 macOS 后台(launchd)运行，订阅版 CLI 会因 Keychain 阻塞而无响应（#199）——这不代表未登录。定时任务请改用 API-key provider。',
     };
   }
   return {
-    name: 'Claude Code auth',
+    name: 'Claude Code 登录',
     ok: false,
     detail: `Run \`${claudeBin} auth login\` in Terminal, then rerun checks. ${(result.stderr || result.stdout).trim()}`.trim(),
   };
@@ -301,7 +303,7 @@ async function larkCliAuthCheck(): Promise<DoctorCheck> {
   const result = await runCommand('lark-cli', ['auth', 'status'], { timeoutMs: 10000 });
   if (!result.ok) {
     return {
-      name: 'lark-cli auth',
+      name: 'lark-cli 登录',
       ok: false,
       detail: `Run \`lark-cli config init\` and \`lark-cli auth login\`, then rerun checks. ${(result.stderr || result.stdout).slice(0, 500)}`.trim(),
     };
@@ -310,7 +312,7 @@ async function larkCliAuthCheck(): Promise<DoctorCheck> {
   const hasUser = /"user"\s*:\s*\{[\s\S]*?"available"\s*:\s*true/.test(text);
   const hasBot = /"bot"\s*:\s*\{[\s\S]*?"available"\s*:\s*true/.test(text);
   return {
-    name: 'lark-cli auth',
+    name: 'lark-cli 登录',
     ok: hasUser || hasBot,
     detail: hasUser || hasBot ? `已登录身份：${[hasUser ? 'user' : '', hasBot ? 'bot' : ''].filter(Boolean).join(', ')}` : '没有可用的 user 或 bot 身份',
   };
