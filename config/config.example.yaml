@@ -402,6 +402,15 @@ team:
   supabase_url: ""
   supabase_anon_key: ""
 
+# 你自己的方法 skill（Agent Skill 文件夹，SKILL.md），分别用在一天的哪一段。
+# 列文件夹名；不填就不用。比如按《高效能人士的七个习惯》复盘、按《为什么精英都是时间控》排时段：
+# habits:
+#   skills_dir: ~/.claude/skills
+#   daily_plan: [brain-cycle-check]                                # 每天 8:00 排计划：怎么配时段
+#   daily_review: [quadrant-ii-time-management, sharpen-the-saw]   # 每晚复盘：柯维视角一两句
+#   cycle_review: [stephen-covey]                                  # 双周总结和柯维诊断
+#   chat: [stephen-covey, brain-cycle-check]                       # 聊天里随时能用
+
 memory:
   # Daily OS working memory repository.
   # Empty means use the generic repository shipped at ./memory-vault/default.

@@ -743,6 +743,24 @@ export const AppConfigSchema = z.object({
       supabase_anon_key: z.string().default(''),
     })
     .default({ supabase_url: '', supabase_anon_key: '' }),
+  // The user's own method skills (2026-11-03): which of the Agent Skills in
+  // `skills_dir` guide which part of the day. Josie plans by The 7 Habits and
+  // places work by 《为什么精英都是时间控》; those live as her own skills
+  // (stephen-covey and its eight habits, brain-cycle-check), and nothing in
+  // Daily OS read them. Each list names skill folders; empty = not used.
+  habits: z
+    .object({
+      skills_dir: z.string().default('~/.claude/skills'),
+      /** The 8:00 plan: how to place the day (brain-cycle-check). */
+      daily_plan: z.array(z.string()).default([]),
+      /** The 21:30 review: a look at the day by the habits (quadrant-ii, sharpen-the-saw). */
+      daily_review: z.array(z.string()).default([]),
+      /** A cycle's 总结 and 柯维诊断 (stephen-covey). */
+      cycle_review: z.array(z.string()).default([]),
+      /** Copied into the chat's skills, for questions asked any time. */
+      chat: z.array(z.string()).default([]),
+    })
+    .default({ skills_dir: '~/.claude/skills', daily_plan: [], daily_review: [], cycle_review: [], chat: [] }),
   memory: z.object({
     repository_path: z.string().default(''),
     long_term_path: z.string().default('./data/memory/long-term.md'),

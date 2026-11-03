@@ -61,6 +61,8 @@ import { addAdhocSession, deferScheduled, moveAdhocSession, removeAdhocSession, 
 import { idFragment } from '../todo/scorer.js';
 import { adhocImpact, type WorkBlock } from '../cycles/adhoc-impact.js';
 import { buildReviewContext, habitsGuide } from '../cycles/review-context.js';
+import { generateCycleDiagnosis, readCycleHabits } from '../cycles/habits.js';
+import { renderGuides } from '../habits/guides.js';
 import { currentCycle, newCycleDue } from '../workflows/weekly-priorities.js';
 import { adhocSessionId, formatUnplanned, markSuggested, promoteToPriorities, refilePromoted, shouldSuggestPromote, unplannedForCycle } from '../cycles/unplanned.js';
 import { askClaudeOnce } from '../agent/claude-agent.js';
@@ -1724,7 +1726,7 @@ function readTodayPlan(options: UiServerOptions): Record<string, unknown> {
   return {
     ok: true,
     ...newCycle,
-    plan: { date: snapshot.date, workflow: 'daily_plan', stale: false, generated_at: snapshot.generated_at },
+    plan: { date: snapshot.date, workflow: 'daily_plan', stale: false, generated_at: snapshot.generated_at, ...(snapshot.focus ? { focus: snapshot.focus } : {}) },
     ...(lastRun ? { lastRun } : {}),
     todos: snapshot.todos,
     feedback: snapshot.feedback,
@@ -1942,6 +1944,7 @@ function readCyclesState(config: AppConfig): Record<string, unknown> {
     path: cycleFilePath(config, doc.id),
     frontmatterError: doc.frontmatterError || '',
     sections: doc.sections,
+    habits: readCycleHabits(config, doc.id),
   }));
   // Whether a weekly/biweekly planning run is on right now. The App uses this to
   // tell "still generating 要务" apart from "generation finished and left it
@@ -2043,13 +2046,20 @@ async function generateCycleReviewSection(options: UiServerOptions, body: unknow
   // Completion, 计划外 and the 7 Habits, beside the retro rather than in it
   // (`buildReviewContext`): the retro stays the user's own words.
   const skillPath = config.skills.registry.find((candidate) => candidate.id === 'weekly-review')?.path;
+  const fallbackGuide = habitsGuide(skillPath ? expandPath(skillPath) : undefined);
+  const habits = renderGuides(config, config.habits?.cycle_review ?? []) || fallbackGuide;
   const review = await generateCycleReview(config, 'weekly-review', {
     cycle: cycle.cycle || id,
     mode: cycle.mode || 'biweekly',
     priorities,
     retro,
-    context: buildReviewContext({ priorities, unplanned, habits: habitsGuide(skillPath ? expandPath(skillPath) : undefined) }),
+    context: buildReviewContext({ priorities, unplanned, habits }),
   });
+  // The 柯维诊断 and the next cycle's 小实验, in the background: one more model
+  // round trip, and the client has hung up on this request long before.
+  if (save && config.llm.provider === 'claude') {
+    void generateCycleDiagnosis(config, cycle, { priorities, retro, unplanned, fallbackGuide });
+  }
   const saved = save ? writeSection(config, id, 'review', review.text, 'ai') : null;
   return {
     ok: true,

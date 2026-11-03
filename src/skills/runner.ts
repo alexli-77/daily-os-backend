@@ -1,3 +1,4 @@
+import { extractHabitsFromDraft, writeCycleHabits } from '../cycles/habits.js';
 import type { CycleSection } from '../cycles/file.js';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -187,6 +188,15 @@ async function runConfiguredSkillInner(
     // does not, and gating it would mean a finished biweekly is invisible in
     // the Cycles page until a second command is sent (LEO-278).
     const localCycles = writeLocalCyclesFromRun(input.config, path.join(workdir, '.runs'), lifeReview.runId, input.writeSections ? { sections: input.writeSections } : {});
+    // The run's 柯维诊断 and 小实验, kept beside the cycle it reviewed — they
+    // were written every time and reached nothing (2026-11-03).
+    try {
+      const reviewed = input.reviewCycleId || localCycles.writes.find((write) => write.section === 'review' && write.cycleId)?.cycleId;
+      const habits = reviewed ? extractHabitsFromDraft(lifeReview.draft) : null;
+      if (reviewed && habits) writeCycleHabits(input.config, reviewed, { ...habits, source: 'run' });
+    } catch (error) {
+      console.warn(`[habits] run diagnosis not kept: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const result = {
       runId: lifeReview.runId,
       skillId: entry.id,

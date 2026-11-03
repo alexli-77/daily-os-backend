@@ -4,7 +4,7 @@ import { scheduledSessionsFor } from '../cycles/schedule.js';
 import { resolveDayShape } from '../user/rhythm.js';
 import { readDailyPlanOutput } from '../storage/memory.js';
 import { todayInTimezone } from '../utils/date.js';
-import { extractDailyPlanTodos, type DailyPlanTodo } from '../workflows/summary.js';
+import { extractDailyPlanTodos, parseDailyPlanTodoPlan, type DailyPlanTodo } from '../workflows/summary.js';
 import { listTodoFeedback } from './feedback.js';
 
 /**
@@ -82,6 +82,8 @@ export interface TodayPlanSnapshot {
   /** The plan's own date. Today's for `buildTodayPlanSnapshot`; any day for `buildPlanSnapshotForDate`. */
   date: string;
   generated_at: string;
+  /** 今日要事, when the plan said one. */
+  focus?: string;
   todos: DailyPlanTodo[];
   /** Latest state per candidateId: complete | partial | missed | defer | update. Absent = untouched. */
   feedback: Record<string, string>;
@@ -237,9 +239,11 @@ export function buildPlanSnapshotForDate(
   }
   if (suggested.size === 0 && todos[0]) suggested.add(todos[0].candidateId);
 
+  const focus = parseDailyPlanTodoPlan(latest.content, { allowEmpty: true })?.focus;
   return {
     date: latest.date || date,
     generated_at: latest.generated_at ?? '',
+    ...(focus ? { focus } : {}),
     // The user's edit wins over the model's guess, and is merged in here rather
     // than shipped as a second map: a client that renders `minutes` should not
     // have to know an override mechanism exists to render the right number.

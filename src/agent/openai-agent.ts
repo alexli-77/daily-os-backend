@@ -1,3 +1,4 @@
+import { guidesFor, renderGuides } from '../habits/guides.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import OpenAI from 'openai';
@@ -80,12 +81,16 @@ export function buildUserPrompt(input: AgentInput): string {
   // because nothing downstream reliably knew it was Saturday. Spell it out.
   const shape = resolveDayShape(input.config, input.date);
   const rhythmSection = renderRhythmPromptSection(input.config, input.date);
+  // The user's own method skills for this workflow (`config.habits`): how she
+  // places a day, how she looks back on one.
+  const guides = renderGuides(input.config, guidesFor(input.config, input.workflow));
   return [
     `# Workflow\n${workflowPrompt}`,
     `# User\n${JSON.stringify(input.config.user, null, 2)}`,
     `# Planning Configuration\n${JSON.stringify(input.config.planning, null, 2)}`,
     `# Date\n${input.date} ${shape.weekdayLabel}${shape.enabled ? `（${shape.dayTypeLabel}）` : ''}${nowLine(input)}`,
     ...(rhythmSection ? [`# 作息\n${rhythmSection}`] : []),
+    ...(guides ? [`# 方法（用户自己的 skill，按它判断）\n${guides}`] : []),
     `# Memory\n${JSON.stringify(input.memory, null, 2)}`,
     // Compact rather than indented. Two-space indentation on a JSON document
     // this size is tens of thousands of characters of whitespace that carries

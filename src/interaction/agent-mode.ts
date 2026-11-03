@@ -1,3 +1,4 @@
+import { syncUserChatSkills } from '../habits/guides.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -485,6 +486,7 @@ export async function buildFeishuAgentPrompt(input: FeishuAgentModeInput, mcpEna
       '涉及分工时明确写出“Codex 可以做”和“需要用户本人做”。',
     ]),
     input.config.llm.provider === 'claude' ? section('daily_os_files', claudeGuide) : '',
+    input.config.llm.provider === 'claude' ? userSkillsSection(input.config) : '',
     input.config.llm.provider === 'claude' ? section('daily_os_settings', DAILY_OS_SETTINGS_GUIDE) : '',
     context ? section('daily_os_context', context) : '',
     section('user_input', { text: input.text }),
@@ -511,6 +513,25 @@ export function buildNowContext(config: AppConfig, now: Date = new Date(), viewi
     calendar: calendarAround(today),
     ...(status.length > 0 ? { events: lines, event_sources: status } : {}),
   };
+}
+
+/**
+ * The user's own method skills the chat can load (2026-11-03): the 7 Habits
+ * (stephen-covey and its eight habits) and 《为什么精英都是时间控》
+ * (brain-cycle-check). They were on her machine and the chat could not see
+ * them, so 「这周为什么没进展」 was answered from nothing.
+ */
+function userSkillsSection(config: AppConfig): string {
+  const skills = syncUserChatSkills(config, agentWorkdir(config));
+  if (skills.length === 0) return '';
+  return section('user_skills', {
+    rule: [
+      '下面是用户自己的方法 skill，在 .claude/skills/ 里。用户问到计划和复盘、优先级、这周 / 这期为什么没进展、方向、倦怠、关系，或者今天怎么排、某件事放几点、效率低时，先用 Skill 工具加载对得上的那个，按里面的方法回答，不要凭感觉说。',
+      '问 weekly、双周计划、优先级、方向这类：加载 stephen-covey，按它先做快诊断，再读对应子习惯（.claude/skills/<子习惯>/SKILL.md）。问今天的时段、几点做什么、事情做不完：加载 brain-cycle-check。两类都沾的，两个都用。',
+      '回答里点名用了哪个方法（比如「按第二象限看」），只说结论和下一步，不要把 skill 原文抄给用户。',
+    ],
+    skills,
+  });
 }
 
 async function buildOptionalContext(input: FeishuAgentModeInput): Promise<unknown> {
