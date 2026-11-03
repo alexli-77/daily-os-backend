@@ -13,6 +13,7 @@ import { mergeOpenCapturesIntoPlan } from '../todo/inbox.js';
 import { mergeMovedRowsIntoPlan } from '../todo/wrapup.js';
 import { refreshCalendarSubscriptions } from '../calendar/subscriptions.js';
 import { DAY_OUTCOMES_GUIDE, dayOutcomes, renderDayOutcomes } from '../todo/day-outcomes.js';
+import { currentExperiment, openMits } from '../cycles/habits.js';
 import { buildScoredTodos } from '../todo/scorer.js';
 import { getRemovedCandidateIds, listTodoFeedback, recordTodoPresented } from '../todo/feedback.js';
 import {
@@ -98,6 +99,16 @@ export async function runWorkflowDetailed(
         ? { today: scheduledSessionsFor(config, date), elsewhere: scheduledElsewhere(config, date), covered: fixedCoverage(fixed) }
         : undefined;
       evidence.sources.todo_scored = { state: 'available', data: buildScoredTodos(config, evidence, date, { schedule }) };
+      // What this 双周 is trying: the 小实验 the last 柯维诊断 handed over, and
+      // the MIT not yet done — the plan's 今日要事 comes from these (2026-11-03).
+      const experiment = currentExperiment(config, date);
+      const mits = openMits(config, date);
+      if (experiment || mits.length > 0) {
+        evidence.sources.cycle_focus = {
+          state: 'available',
+          data: { ...(experiment ? { experiment: experiment.experiment, from: experiment.from } : {}), ...(mits.length > 0 ? { mit: mits } : {}) },
+        };
+      }
       if (fixed.length > 0) {
         evidence.sources.fixed_schedule = {
           state: 'available',

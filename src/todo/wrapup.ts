@@ -1,3 +1,4 @@
+import { planExtras } from '../workflows/summary.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppConfig } from '../config/schema.js';
@@ -144,7 +145,7 @@ function appendToPlan(config: AppConfig, date: string, row: MovedRow): 'appended
   if (!plan) return null;
   if (plan.todos.some((todo) => todo.candidateId === row.candidateId)) return 'already';
   const todos = [...plan.todos, { rank: plan.todos.length + 1, text: row.text, candidateId: row.candidateId, ...(row.minutes ? { minutes: row.minutes } : {}) }];
-  rewriteDailyPlanOutput(config, date, JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) }));
+  rewriteDailyPlanOutput(config, date, JSON.stringify({ todos, ...planExtras(plan) }));
   return 'appended';
 }
 
@@ -216,5 +217,5 @@ export function mergeMovedRowsIntoPlan(planText: string, date: string): string {
     ...plan.todos,
     ...missing.map((row, index) => ({ rank: plan.todos.length + index + 1, text: row.text, candidateId: row.candidateId, ...(row.minutes ? { minutes: row.minutes } : {}) })),
   ];
-  return JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) });
+  return JSON.stringify({ todos, ...planExtras(plan) });
 }

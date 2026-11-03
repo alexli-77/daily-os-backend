@@ -72,6 +72,13 @@ export function normalizePlanMinutes(value: unknown): number | undefined {
 export interface DailyPlanTodoPlan {
   todos: DailyPlanTodo[];
   note?: string;
+  /** 今日要事: the one thing to guard today, from the 双周's 小实验 and MIT (2026-11-03). */
+  focus?: string;
+}
+
+/** The plan's own fields besides its rows, for code that rewrites the rows. */
+export function planExtras(plan: Pick<DailyPlanTodoPlan, 'note' | 'focus'>): { note?: string; focus?: string } {
+  return { ...(plan.note ? { note: plan.note } : {}), ...(plan.focus ? { focus: plan.focus } : {}) };
 }
 
 /**
@@ -114,7 +121,8 @@ export function parseDailyPlanTodoPlan(content: string, options: { allowEmpty?: 
     .map((todo, index) => ({ ...todo, rank: index + 1 }));
   if (todos.length === 0 && !options.allowEmpty) return null;
   const note = typeof (parsed as { note?: unknown }).note === 'string' ? (parsed as { note: string }).note.trim() : '';
-  return { todos, ...(note ? { note } : {}) };
+  const focus = typeof (parsed as { focus?: unknown }).focus === 'string' ? (parsed as { focus: string }).focus.trim() : '';
+  return { todos, ...(note ? { note } : {}), ...(focus ? { focus } : {}) };
 }
 
 /** Structured todos for card buttons; [] when content is not the LEO-209 JSON. */
@@ -136,6 +144,8 @@ export interface DailyReviewReconciliation {
   reconciliation: DailyReviewReconItem[];
   carryOver: string[];
   note?: string;
+  /** The day by the 7 Habits — Q2 squeezed or not, which renewal dimension is slipping (2026-11-03). */
+  habits?: string;
 }
 
 /**
@@ -175,7 +185,8 @@ export function parseDailyReviewReconciliation(content: string): DailyReviewReco
         .filter(Boolean)
     : [];
   const note = typeof (parsed as { note?: unknown }).note === 'string' ? (parsed as { note: string }).note.trim() : '';
-  return { reconciliation, carryOver, ...(note ? { note } : {}) };
+  const habits = typeof (parsed as { habits?: unknown }).habits === 'string' ? (parsed as { habits: string }).habits.trim() : '';
+  return { reconciliation, carryOver, ...(note ? { note } : {}), ...(habits ? { habits } : {}) };
 }
 
 /**
@@ -242,6 +253,7 @@ export function renderDailyReviewReconciliationSummary(
     lines.push('', `> 明天继续 ${carryCount} 项${preview ? `：${preview}` : ''}`);
   }
   if (recon.note) lines.push('', `> ${recon.note}`);
+  if (recon.habits) lines.push('', `🪚 **柯维视角**：${recon.habits}`);
   if (driftLines.length > 0) lines.push('', ...driftLines);
   return trimSummary(lines.join('\n'), MAX_SUMMARY_CHARS);
 }
@@ -396,6 +408,7 @@ function renderDailyPlanTodoSummary(plan: DailyPlanTodoPlan, date?: string, evid
 
   const countdowns = countdownLine(config, today);
   if (countdowns) lines.push(countdowns, '');
+  if (plan.focus) lines.push(`🎯 **今日要事**：${plan.focus}`, '');
 
   if (today && index.size > 0) {
     const urgent = [...index.values()]

@@ -1,3 +1,4 @@
+import { planExtras } from '../workflows/summary.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -398,7 +399,7 @@ export function mergeOpenCapturesIntoPlan(config: AppConfig, planText: string, d
       minutes: CAPTURE_DEFAULT_MINUTES,
     })),
   ];
-  return JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) });
+  return JSON.stringify({ todos, ...planExtras(plan) });
 }
 
 export function addTodoInboxItemToTodayPlan(
@@ -420,7 +421,7 @@ export function addTodoInboxItemToTodayPlan(
     ...plan.todos,
     { rank, text: match.text, candidateId, ...(minutes ? { minutes } : {}) },
   ];
-  rewriteDailyPlanOutput(config, date, JSON.stringify({ todos, ...(plan.note ? { note: plan.note } : {}) }));
+  rewriteDailyPlanOutput(config, date, JSON.stringify({ todos, ...planExtras(plan) }));
   return { text: match.text, rank };
 }
 
