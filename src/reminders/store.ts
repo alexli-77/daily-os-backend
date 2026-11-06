@@ -56,6 +56,13 @@ export interface Sticky {
    */
   x?: number;
   y?: number;
+  /**
+   * Canvas size (points). Absent until the user drags the resize handle; the
+   * client then falls back to its default tile size. Stored and clamped
+   * together with the same `finiteOrUndefined` forgiveness as position.
+   */
+  w?: number;
+  h?: number;
   created_at: string;
   updated_at: string;
   /** Set once the note is archived; archived notes drop off the active board. */
@@ -105,6 +112,15 @@ function normalizeColor(value: unknown): StickyColor {
   return COLORS.includes(value as StickyColor) ? (value as StickyColor) : 'yellow';
 }
 
+/** Sticky size bounds (points), shared by the store and the resize endpoint. */
+export const STICKY_SIZE = { minW: 140, maxW: 460, minH: 72, maxH: 560 } as const;
+
+/** A finite number clamped into `[min, max]`, or undefined if it was not one. */
+function clampDim(value: unknown, min: number, max: number): number | undefined {
+  const n = finiteOrUndefined(value);
+  return n === undefined ? undefined : Math.min(Math.max(n, min), max);
+}
+
 // MARK: - Store
 
 function storePath(config: AppConfig): string {
@@ -127,6 +143,8 @@ function normalizeStored(value: unknown, today: string): Sticky | null {
     typeof row.nextSurface === 'string' && isCalendarDate(row.nextSurface) ? row.nextSurface : today;
   const x = finiteOrUndefined(row.x);
   const y = finiteOrUndefined(row.y);
+  const w = clampDim(row.w, STICKY_SIZE.minW, STICKY_SIZE.maxW);
+  const h = clampDim(row.h, STICKY_SIZE.minH, STICKY_SIZE.maxH);
   return {
     id,
     text,
@@ -135,6 +153,8 @@ function normalizeStored(value: unknown, today: string): Sticky | null {
     nextSurface,
     ...(x !== undefined ? { x } : {}),
     ...(y !== undefined ? { y } : {}),
+    ...(w !== undefined ? { w } : {}),
+    ...(h !== undefined ? { h } : {}),
     created_at: typeof row.created_at === 'string' ? row.created_at : now,
     updated_at: typeof row.updated_at === 'string' ? row.updated_at : now,
     ...(typeof row.archived_at === 'string' && row.archived_at ? { archived_at: row.archived_at } : {}),
@@ -254,6 +274,30 @@ export function moveSticky(
   if (index < 0 || items[index].archived_at) return null;
   const now = new Date().toISOString();
   items[index] = { ...items[index], x, y, updated_at: now };
+  writeStickies(config, items);
+  return items[index];
+}
+
+/**
+ * Resize a note to `w,h` on the canvas (LEO-357). Clamped to `STICKY_SIZE`;
+ * only the size and `updated_at` change. Archived or unknown notes, and
+ * non-finite dimensions, are refused.
+ */
+export function resizeSticky(
+  config: AppConfig,
+  id: string,
+  w: number,
+  h: number,
+  today = todayInTimezone(config),
+): Sticky | null {
+  const clampedW = clampDim(w, STICKY_SIZE.minW, STICKY_SIZE.maxW);
+  const clampedH = clampDim(h, STICKY_SIZE.minH, STICKY_SIZE.maxH);
+  if (clampedW === undefined || clampedH === undefined) return null;
+  const items = readStickies(config, today);
+  const index = items.findIndex((item) => item.id === id);
+  if (index < 0 || items[index].archived_at) return null;
+  const now = new Date().toISOString();
+  items[index] = { ...items[index], w: clampedW, h: clampedH, updated_at: now };
   writeStickies(config, items);
   return items[index];
 }
