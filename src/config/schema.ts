@@ -586,12 +586,16 @@ export const AppConfigSchema = z.object({
     .default({ store_dir: './data/memory/journal' }),
   reminders: z
     .object({
-      // 提醒卡 / 便签墙 (LEO-355): one JSON file of sticky notes. Private, like
-      // the journal — never synced to the team, sent to Feishu, or read by any
-      // workflow/the chat sandbox. Lives under data/memory/ (gitignored runtime).
+      // 提醒卡 / 便签墙 (LEO-355): one JSON file of sticky notes. Private by
+      // default — never sent to Feishu or read by any workflow/the chat sandbox.
+      // Lives under data/memory/ (gitignored runtime).
       store_path: z.string().default('./data/memory/stickies.json'),
+      // Opt-in team sharing (LEO-358), off by default: when on, the whole active
+      // board is pushed to Supabase for teammates to read (never edit). Turning
+      // it off deletes the owner's remote row, so the board disappears for them.
+      share_with_team: z.boolean().default(false),
     })
-    .default({ store_path: './data/memory/stickies.json' }),
+    .default({ store_path: './data/memory/stickies.json', share_with_team: false }),
   chat_analysis: z
     .object({
       enabled: z.boolean().default(true),

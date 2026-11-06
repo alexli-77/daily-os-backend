@@ -11,15 +11,19 @@ import {
   listCachedDailyPlans,
   listCachedOwners,
   pruneCachedDailyPlans,
+  pruneCachedStickyBoards,
   readCachedDailyPlan,
+  readCachedStickyBoard,
   readTeamCacheState,
   resetTeamCache,
   teamCacheDir,
   writeCachedCycle,
   writeCachedDailyPlan,
+  writeCachedStickyBoard,
   writeTeamCacheState,
 } from './cache.js';
-import type { CachedCycle, CachedDailyPlan, TeamCacheState } from './cache.js';
+import type { CachedCycle, CachedDailyPlan, CachedStickyBoard, TeamCacheState } from './cache.js';
+import { listStickies } from '../reminders/store.js';
 import { readDayHistory } from '../todo/day-history.js';
 import { buildTodayPlanSnapshot, isRhythmRow } from '../todo/today-plan.js';
 import { WRAPUP_LOOKBACK_DAYS } from '../todo/wrapup.js';
@@ -169,6 +173,7 @@ export interface TeamSyncDeps {
 /** PostgREST paths, in one place: `supabaseFetch` only prefixes the origin. */
 const CYCLES_PATH = '/rest/v1/cycles';
 const DAILY_PLANS_PATH = '/rest/v1/daily_plans';
+const STICKIES_PATH = '/rest/v1/stickies';
 
 /**
  * Retention, in two windows for two different costs.
@@ -238,16 +243,27 @@ export async function syncTeamOnce(config: AppConfig, deps: TeamSyncDeps = {}): 
     // so a project without the daily_plans table must not be the reason a
     // teammate's stale files pile up forever.
     const plansPruned = pruneCachedDailyPlans(addDays(todayInTimezone(config), -LOCAL_PLAN_RETENTION_DAYS));
+    // Sticky boards (LEO-358) sit on the same footing as daily plans: a later
+    // table the project may not have, and opt-in, so a failure here is reported
+    // and never stops cycles or plans from syncing.
+    let stickyError = '';
+    let stickies = { changed: false, pulled: 0 };
+    try {
+      await pushStickyBoard(config, provider, session, state);
+      stickies = await pullTeammateStickyBoards(config, provider, session, state, now);
+    } catch (error) {
+      stickyError = describeStickyError(error);
+    }
     state.lastCheckedAt = now.toISOString();
-    state.lastError = planError;
-    if (changed || plans.changed || pushed > 0 || plansPushed > 0) state.syncedAt = now.toISOString();
+    state.lastError = planError || stickyError;
+    if (changed || plans.changed || stickies.changed || pushed > 0 || plansPushed > 0) state.syncedAt = now.toISOString();
     if (!state.syncedAt) state.syncedAt = now.toISOString();
     writeTeamCacheState(state);
     return {
       status: 'ok',
-      reason: planError,
+      reason: planError || stickyError,
       checked,
-      changed: changed || plans.changed,
+      changed: changed || plans.changed || stickies.changed,
       pulled,
       pushed,
       plansPulled: plans.pulled,
@@ -665,6 +681,156 @@ async function purgeOwnRemotePlans(
   );
   await assertOk(response, 'prune daily plans');
   return true;
+}
+
+// --- sticky boards (LEO-358) -------------------------------------------------
+
+/**
+ * Push our whole active board as one row when sharing is on; when it is off,
+ * delete our row once so teammates stop seeing it. Deduped by a payload hash so
+ * an unchanged board is not re-sent every minute. Opt-in and quiet, like the
+ * daily-plan push — a failure is the caller's to report, not to surface as a
+ * broken local write.
+ */
+async function pushStickyBoard(
+  config: AppConfig,
+  provider: TeamSessionProvider,
+  session: TeamSession,
+  state: TeamCacheState,
+): Promise<void> {
+  const sharing = config.reminders?.share_with_team === true;
+  if (!sharing) {
+    if (!state.stickyBoardHash) return; // never shared, or already cleaned up.
+    assertOwnedBySelf(session, session.userId);
+    const response = await provider.supabaseFetch(
+      config,
+      `${STICKIES_PATH}?owner=eq.${encodeURIComponent(session.userId)}`,
+      { method: 'DELETE', headers: { prefer: 'return=minimal' } },
+    );
+    await assertOk(response, 'delete sticky board');
+    state.stickyBoardHash = '';
+    return;
+  }
+
+  const items = listStickies(config);
+  const hash = crypto.createHash('sha256').update(JSON.stringify(items)).digest('hex');
+  if (state.stickyBoardHash === hash) return;
+
+  assertOwnedBySelf(session, session.userId);
+  const response = await provider.supabaseFetch(config, `${STICKIES_PATH}?on_conflict=team_id,owner`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      prefer: 'resolution=merge-duplicates,return=minimal',
+    },
+    body: JSON.stringify([{ team_id: session.teamId, owner: session.userId, payload: { items } }]),
+  });
+  await assertOk(response, 'push sticky board');
+  state.stickyBoardHash = hash;
+}
+
+/**
+ * Pull every teammate's shared board and cache it, then drop cached boards for
+ * owners who no longer have a row — the way un-sharing takes effect. No
+ * watermark here on purpose: deleting a row bumps no `updated_at`, so a
+ * watermark would never notice an un-share. The query is one tiny row per
+ * teammate, so fetching it every tick and reconciling is both simpler and
+ * correct.
+ */
+async function pullTeammateStickyBoards(
+  config: AppConfig,
+  provider: TeamSessionProvider,
+  session: TeamSession,
+  state: TeamCacheState,
+  now: Date,
+): Promise<{ changed: boolean; pulled: number }> {
+  const response = await provider.supabaseFetch(
+    config,
+    `${STICKIES_PATH}?select=owner,payload,updated_at&owner=neq.${encodeURIComponent(session.userId)}&order=updated_at.desc`,
+  );
+  await assertOk(response, 'pull stickies');
+  const rows = await readJsonArray(response);
+
+  const present = new Set<string>();
+  let pulled = 0;
+  for (const row of rows) {
+    const record = row as Record<string, unknown>;
+    const owner = String(record.owner || '');
+    const payload = record.payload;
+    if (!isUuid(owner) || owner === session.userId) continue;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+    present.add(owner);
+    const updatedAt = String(record.updated_at || '');
+    const cached = readCachedStickyBoard(owner);
+    if (cached && !isNewerVersion(updatedAt, cached.updatedAt)) continue;
+    writeCachedStickyBoard(session.userId, owner, updatedAt, payload as Record<string, unknown>);
+    pulled += 1;
+  }
+  const removed = pruneCachedStickyBoards(present);
+
+  state.members = await readMembers(config, provider, state.members);
+  if (pulled > 0 || removed > 0) state.syncedAt = now.toISOString();
+  return { changed: pulled > 0 || removed > 0, pulled };
+}
+
+/** A missing `stickies` table means the migration has not been run here. */
+function describeStickyError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/PGRST205|Could not find the table/i.test(message)) {
+    return '便签共享未启用：Supabase 里还没有 stickies 表。在项目的 SQL Editor 里执行 supabase/migrations/20261106000000_stickies.sql 即可，其它同步不受影响。';
+  }
+  return message;
+}
+
+export interface TeamStickyMember {
+  userId: string;
+  memberId: string;
+  displayName: string;
+  label: string;
+  /** The teammate's cached shared board, or null when they share nothing. */
+  board: CachedStickyBoard | null;
+}
+
+export interface TeamStickiesState {
+  status: TeamViewState['status'];
+  reason: string;
+  members: TeamStickyMember[];
+  syncedAt: string;
+  lastCheckedAt: string;
+  lastError: string;
+}
+
+/**
+ * Teammates' shared boards for the sticky screen's member switcher, from disk
+ * only — same contract as `readTeamTodayState`. A teammate who shares nothing is
+ * listed with `board: null` so the picker can say so instead of hiding them.
+ */
+export async function readTeamStickiesState(config: AppConfig, deps: TeamSyncDeps = {}): Promise<TeamStickiesState> {
+  const gate = await resolveSyncGate(config, deps);
+  if (!gate.ok) {
+    return {
+      status: gate.status === 'error' ? 'disabled' : gate.status,
+      reason: gate.reason,
+      members: [],
+      syncedAt: '',
+      lastCheckedAt: '',
+      lastError: '',
+    };
+  }
+
+  const state = readTeamCacheState();
+  const members = listTeammates(gate.session, state).map((member) => ({
+    ...member,
+    board: readCachedStickyBoard(member.userId),
+  }));
+  return {
+    status: 'ready',
+    reason: '',
+    members,
+    syncedAt: state.syncedAt,
+    lastCheckedAt: state.lastCheckedAt,
+    lastError: state.lastError,
+  };
 }
 
 // --- read-only view for the console -----------------------------------------

@@ -259,8 +259,12 @@ countdown:
 reminders:
   # 提醒卡 / 便签墙 (LEO-355). Sticky notes with no deadline that resurface on a
   # spaced-repetition schedule. A plain JSON array, rewritten whole on every
-  # edit. Private — never synced, sent to Feishu, or read by any workflow.
+  # edit. Private by default — never sent to Feishu or read by any workflow.
   store_path: "./data/memory/stickies.json"
+  # Opt-in team sharing (LEO-358), off by default. When true, the whole active
+  # board is pushed to Supabase for teammates to read (read-only). Turning it
+  # back off deletes your remote row, so teammates stop seeing the board.
+  share_with_team: false
 
 chat_analysis:
   enabled: true
