@@ -100,6 +100,7 @@ import {
   archiveSticky,
   listStickies,
   moveSticky,
+  resizeSticky,
   saveSticky,
   surfaceSticky,
   type StickyColor,
@@ -476,6 +477,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/stickies/surface') return sendJson(response, await surfaceStickyEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/stickies/archive') return sendJson(response, await archiveStickyEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/stickies/move') return sendJson(response, await moveStickyEntry(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/stickies/resize') return sendJson(response, await resizeStickyEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') return sendJson(response, await cancelRun(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/runs/rerun') return sendJson(response, await rerunWorkflow(options, await readJson(request)));
@@ -1076,6 +1078,22 @@ async function moveStickyEntry(options: UiServerOptions, body: unknown): Promise
   const config = loadConfig(options.configPath);
   const today = stickyToday(config, request.tz);
   const saved = moveSticky(config, id, x, y, today);
+  if (!saved) return { ok: false, error: '这张便签已经不在了。' };
+  return { ok: true, today, item: saved, items: listStickies(config, today) };
+}
+
+async function resizeStickyEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const id = String(request.id || '').trim();
+  if (!id) return { ok: false, error: 'id is required.' };
+  const w = Number(request.w);
+  const h = Number(request.h);
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return { ok: false, error: 'w and h must be numbers.' };
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = stickyToday(config, request.tz);
+  const saved = resizeSticky(config, id, w, h, today);
   if (!saved) return { ok: false, error: '这张便签已经不在了。' };
   return { ok: true, today, item: saved, items: listStickies(config, today) };
 }
