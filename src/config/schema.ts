@@ -584,6 +584,14 @@ export const AppConfigSchema = z.object({
       store_dir: z.string().default('./data/memory/journal'),
     })
     .default({ store_dir: './data/memory/journal' }),
+  reminders: z
+    .object({
+      // 提醒卡 / 便签墙 (LEO-355): one JSON file of sticky notes. Private, like
+      // the journal — never synced to the team, sent to Feishu, or read by any
+      // workflow/the chat sandbox. Lives under data/memory/ (gitignored runtime).
+      store_path: z.string().default('./data/memory/stickies.json'),
+    })
+    .default({ store_path: './data/memory/stickies.json' }),
   chat_analysis: z
     .object({
       enabled: z.boolean().default(true),

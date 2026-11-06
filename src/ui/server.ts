@@ -96,6 +96,14 @@ import {
   saveCountdown,
 } from '../countdown/store.js';
 import { deleteJournal, listJournal, readJournal, writeJournal, type JournalEntry, type JournalMeta, type JournalWeather } from '../todo/journal.js';
+import {
+  archiveSticky,
+  listStickies,
+  saveSticky,
+  surfaceSticky,
+  type StickyColor,
+  type SurfaceResponse,
+} from '../reminders/store.js';
 import { PLAN_ROW_COLORS, PLAN_ROW_TEXT_MAX, hasLaterRowState, recordTodoFeedback, resolveFeedbackDate, type TodoFeedbackEvent } from '../todo/feedback.js';
 import { formatCalendarDraftForFeishu, runCalendarDraft, testCalendarBridge } from '../calendar/bridge.js';
 import {
@@ -462,6 +470,10 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'GET' && url.pathname === '/api/journal/list') return sendJson(response, listJournalResponse(options));
     if (request.method === 'POST' && url.pathname === '/api/journal/save') return sendJson(response, await saveJournalEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/journal/delete') return sendJson(response, await deleteJournalEntry(options, await readJson(request)));
+    if (request.method === 'GET' && url.pathname === '/api/stickies') return sendJson(response, listStickiesResponse(options, url));
+    if (request.method === 'POST' && url.pathname === '/api/stickies/save') return sendJson(response, await saveStickyEntry(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/stickies/surface') return sendJson(response, await surfaceStickyEntry(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/stickies/archive') return sendJson(response, await archiveStickyEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') return sendJson(response, await cancelRun(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/runs/rerun') return sendJson(response, await rerunWorkflow(options, await readJson(request)));
@@ -1008,6 +1020,73 @@ async function deleteCountdownEntry(options: UiServerOptions, body: unknown): Pr
   if (!deleteCountdown(config, id)) return { ok: false, error: '这条倒数日已经不在了。' };
   const context = countdownContext(config, typeof request.tz === 'string' ? request.tz : null);
   return { ok: true, ...context, items: listCountdowns(config, context.today) };
+}
+
+/**
+ * 提醒卡 / 便签墙 (LEO-355). The board resolves against the caller's day: the
+ * Mac app reports its own zone so "today" matches the machine the person is
+ * looking at, exactly as the countdown API does. Private store — these four are
+ * its only readers/writers.
+ */
+function stickyToday(config: AppConfig, tz: unknown): string {
+  return typeof tz === 'string' && isKnownTimeZone(tz) ? todayInZone(tz) : todayInTimezone(config);
+}
+
+function listStickiesResponse(options: UiServerOptions, url: URL): Record<string, unknown> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = stickyToday(config, url.searchParams.get('tz'));
+  return { ok: true, today, items: listStickies(config, today) };
+}
+
+async function saveStickyEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const text = String(request.text || '').trim();
+  if (!text) return { ok: false, error: '便签需要一点内容。' };
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = stickyToday(config, request.tz);
+  const saved = saveSticky(
+    config,
+    {
+      ...(request.id ? { id: String(request.id).trim() } : {}),
+      text,
+      ...(typeof request.color === 'string' ? { color: request.color as StickyColor } : {}),
+    },
+    today,
+  );
+  return { ok: true, today, item: saved, items: listStickies(config, today) };
+}
+
+async function surfaceStickyEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const id = String(request.id || '').trim();
+  if (!id) return { ok: false, error: 'id is required.' };
+  const response = request.response;
+  if (response !== 'done' && response !== 'keep' && response !== 'ok') {
+    return { ok: false, error: 'response must be done/keep/ok.' };
+  }
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = stickyToday(config, request.tz);
+  const saved = surfaceSticky(config, id, response as SurfaceResponse, today);
+  if (!saved) return { ok: false, error: '这张便签已经不在了。' };
+  return { ok: true, today, item: saved, items: listStickies(config, today) };
+}
+
+async function archiveStickyEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const id = String(request.id || '').trim();
+  if (!id) return { ok: false, error: 'id is required.' };
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = stickyToday(config, request.tz);
+  if (!archiveSticky(config, id, today)) return { ok: false, error: '这张便签已经不在了。' };
+  return { ok: true, today, items: listStickies(config, today) };
 }
 
 /**
