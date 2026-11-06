@@ -118,6 +118,13 @@ export interface TeamCacheState {
    * is plenty for a 30-day window; one a minute is just waste.
    */
   lastPlanPurgeDate: string;
+  /**
+   * Payload hash of the sticky board we last uploaded, so an unchanged board is
+   * not re-sent every minute. Empty also means "nothing shared right now": when
+   * sharing is turned off we delete the remote row and clear this, and a later
+   * turn-on re-pushes because the hash no longer matches.
+   */
+  stickyBoardHash: string;
 }
 
 const EMPTY_STATE: TeamCacheState = {
@@ -133,6 +140,7 @@ const EMPTY_STATE: TeamCacheState = {
   planHistoryDays: 0,
   cycleVersions: {},
   lastPlanPurgeDate: '',
+  stickyBoardHash: '',
 };
 
 /** A fresh state object; the record fields are copied, never shared. */
@@ -159,6 +167,7 @@ export function readTeamCacheState(): TeamCacheState {
       // apply every row once and record its version — the right degradation.
       cycleVersions: asRecord(parsed.cycleVersions),
       lastPlanPurgeDate: asString(parsed.lastPlanPurgeDate),
+      stickyBoardHash: asString(parsed.stickyBoardHash),
     };
   } catch {
     return emptyState();
@@ -441,6 +450,80 @@ export function listCachedDailyPlans(ownerId: string): CachedDailyPlan[] {
     }
   }
   return plans.sort((left, right) => (left.date < right.date ? 1 : left.date > right.date ? -1 : 0));
+}
+
+// --- sticky boards (LEO-358) -------------------------------------------------
+
+export interface CachedStickyBoard {
+  /** Remote `updated_at`: when the owner's machine last pushed this board. */
+  updatedAt: string;
+  payload: Record<string, unknown>;
+}
+
+function teamCacheStickyPath(ownerId: string): string {
+  return path.join(teamCacheOwnerDir(ownerId), 'stickies.json');
+}
+
+/**
+ * Cache one teammate's shared sticky board under `<owner>/stickies.json`. Same
+ * guards as `writeCachedDailyPlan`: never our own row, never outside the cache
+ * tree. One file per owner — the board is a whole snapshot, overwritten each
+ * pull, so there is nothing to prune.
+ */
+export function writeCachedStickyBoard(
+  selfUserId: string,
+  ownerId: string,
+  updatedAt: string,
+  payload: Record<string, unknown>,
+): string {
+  if (!isUuid(ownerId)) throw new Error(`Refusing to cache a sticky board for a non-uuid owner: ${ownerId}`);
+  if (selfUserId && ownerId === selfUserId) {
+    throw new Error('Refusing to cache your own sticky board: the local store is the source of truth.');
+  }
+  const root = teamCacheDir();
+  const filePath = path.resolve(root, ownerId, 'stickies.json');
+  if (!isInside(root, filePath)) throw new Error(`Refusing to write outside the team cache: ${filePath}`);
+
+  const record: CachedStickyBoard = { updatedAt, payload };
+  writeFileAtomic(filePath, `${JSON.stringify(record, null, 2)}\n`);
+  return filePath;
+}
+
+/** One teammate's cached sticky board, or null. Never throws. */
+export function readCachedStickyBoard(ownerId: string): CachedStickyBoard | null {
+  if (!isUuid(ownerId)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(teamCacheStickyPath(ownerId), 'utf8')) as Partial<CachedStickyBoard>;
+    const payload = parsed.payload && typeof parsed.payload === 'object' && !Array.isArray(parsed.payload) ? parsed.payload : null;
+    if (!payload) return null;
+    return { updatedAt: asString(parsed.updatedAt), payload };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop cached sticky boards for owners not in `keep` — how un-sharing takes
+ * effect: a teammate who turned sharing off has no row to pull, so their board
+ * is removed here on the next reconcile. Returns how many were removed. Only
+ * `stickies.json` files, only inside the cache tree; cycles and daily plans are
+ * untouched.
+ */
+export function pruneCachedStickyBoards(keep: Set<string>): number {
+  const root = teamCacheDir();
+  let removed = 0;
+  for (const ownerId of listCachedOwners()) {
+    if (keep.has(ownerId)) continue;
+    const filePath = path.resolve(root, ownerId, 'stickies.json');
+    if (!isInside(root, filePath) || !fs.existsSync(filePath)) continue;
+    try {
+      fs.rmSync(filePath, { force: true });
+      removed += 1;
+    } catch {
+      // A file we cannot delete is disk clutter, not a sync failure.
+    }
+  }
+  return removed;
 }
 
 function isInside(root: string, candidate: string): boolean {

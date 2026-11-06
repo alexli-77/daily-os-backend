@@ -69,7 +69,7 @@ import { askClaudeOnce } from '../agent/claude-agent.js';
 import { fixedRowFor, scheduleDayView } from '../cycles/fixed-schedule.js';
 import { MAX_CYCLE_DAYS, MIN_CYCLE_DAYS, planNextCycle, type NextCyclePlan } from '../cycles/next.js';
 import { formatLocalCycleWriteback } from '../cycles/writeback.js';
-import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamDayState, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
+import { assertLocalCycleWriteTarget, pushLocalCycle, readTeamDayState, readTeamStickiesState, readTeamTodayState, readTeamViewState, startTeamSync, syncTeamOnce } from '../team/sync.js';
 import type { TeamSyncLoop } from '../team/sync.js';
 import { collectProgressCandidates, formatProgressCandidates } from '../progress/capture.js';
 import { analyzeChatContext, formatChatContextAnalysis } from '../chat/context-analysis.js';
@@ -559,6 +559,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     // network-free like /api/cycles/state; the 60s sync loop is what fills it.
     if (request.method === 'GET' && url.pathname === '/api/team/today') return sendJson(response, await readTeamTodayPage(options));
     if (request.method === 'GET' && url.pathname === '/api/team/day') return sendJson(response, await readTeamDayPage(options, url.searchParams.get('date')));
+    if (request.method === 'GET' && url.pathname === '/api/team/stickies') return sendJson(response, await readTeamStickiesPage(options));
     if (request.method === 'POST' && url.pathname === '/api/cycles/section') return sendJson(response, await saveCycleSection(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/cycles/close') return sendJson(response, await startCloseCycle(options, await readJson(request)));
     if (request.method === 'GET' && url.pathname === '/api/cycles/close') return sendJson(response, readCloseCycle(url.searchParams.get('id') || ''));
@@ -2091,6 +2092,14 @@ async function readTeamTodayPage(options: UiServerOptions): Promise<Record<strin
   applyEnv(env);
   const config = loadConfig(options.configPath);
   return { ok: true, ...(await readTeamTodayState(config)) };
+}
+
+/** Teammates' shared sticky boards (LEO-358), from the sync cache. */
+async function readTeamStickiesPage(options: UiServerOptions): Promise<Record<string, unknown>> {
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  return { ok: true, ...(await readTeamStickiesState(config)) };
 }
 
 /** Teammates' lists for one day (`?date=YYYY-MM-DD`, default today), from the sync cache. */

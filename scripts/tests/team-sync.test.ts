@@ -106,8 +106,11 @@ interface StubOptions {
   } | null;
   rows?: RemoteRow[];
   plans?: PlanRow[];
+  stickies?: Array<Record<string, unknown> & { owner: string; updated_at: string }>;
   /** false = the project never ran the daily_plans migration. */
   plansTable?: boolean;
+  /** false = the project never ran the stickies migration. */
+  stickiesTable?: boolean;
   members?: Array<{ userId: string; memberId: string; displayName: string }>;
 }
 
@@ -125,6 +128,7 @@ function makeStub(options: StubOptions = {}) {
         : options.session,
     rows: options.rows ? [...options.rows] : [],
     plans: options.plans ? [...options.plans] : [],
+    stickies: options.stickies ? [...options.stickies] : [],
     members: options.members || [
       { userId: SELF_ID, memberId: 'leon', displayName: 'Leon' },
       { userId: MATE_ID, memberId: 'penguin', displayName: '企鹅' },
@@ -170,11 +174,17 @@ function makeStub(options: StubOptions = {}) {
       // Two tables, same rules. `daily_plans` is keyed by plan_date where
       // `cycles` is keyed by cycle_id; everything else about them is identical.
       const isPlans = requestPath.startsWith('/rest/v1/daily_plans');
+      const isStickies = requestPath.startsWith('/rest/v1/stickies');
       if (isPlans && options.plansTable === false) {
         return new Response(JSON.stringify({ code: 'PGRST205', message: "Could not find the table 'public.daily_plans' in the schema cache" }), { status: 404 });
       }
-      const table = (isPlans ? stub.plans : stub.rows) as Array<Record<string, unknown> & { owner: string; updated_at: string }>;
-      const keyColumn = isPlans ? 'plan_date' : 'cycle_id';
+      if (isStickies && options.stickiesTable === false) {
+        return new Response(JSON.stringify({ code: 'PGRST205', message: "Could not find the table 'public.stickies' in the schema cache" }), { status: 404 });
+      }
+      // Three tables, same rules. `stickies` is keyed by owner alone (one board
+      // per person); `daily_plans` by plan_date, `cycles` by cycle_id.
+      const table = (isStickies ? stub.stickies : isPlans ? stub.plans : stub.rows) as Array<Record<string, unknown> & { owner: string; updated_at: string }>;
+      const keyColumn = isStickies ? 'owner' : isPlans ? 'plan_date' : 'cycle_id';
 
       if (method === 'POST') {
         const payload = (Array.isArray(body) ? body : [body]) as Array<Record<string, unknown> & { owner: string }>;
@@ -236,7 +246,7 @@ function bodyRequests(stub: Stub): Array<{ method: string; path: string }> {
   return stub.calls.filter((call) => call.method === 'GET' && call.path.includes('markdown'));
 }
 function planBodyRequests(stub: Stub): Array<{ method: string; path: string }> {
-  return stub.calls.filter((call) => call.method === 'GET' && call.path.includes('payload'));
+  return stub.calls.filter((call) => call.method === 'GET' && call.path.startsWith('/rest/v1/daily_plans') && call.path.includes('payload'));
 }
 function probeRequests(stub: Stub): Array<{ method: string; path: string }> {
   return stub.calls.filter((call) => call.method === 'GET' && !call.path.includes('markdown') && !call.path.includes('payload'));
@@ -347,6 +357,7 @@ async function main(): Promise<void> {
     await testSingleFlight();
     await testVersionedApply();
     await testRetention();
+    await testStickyBoards();
   } finally {
     bridge.setTeamSessionProviderForTests(null);
     process.chdir(originalCwd);
@@ -740,6 +751,81 @@ async function main(): Promise<void> {
     const withNewcomer = await sync.readTeamTodayState(config);
     const newcomer = withNewcomer.members.find((member) => member.userId === NEWCOMER_ID);
     check('a teammate with no plan yet is listed with plan: null', Boolean(newcomer) && newcomer?.plan === null, JSON.stringify(withNewcomer.members.map((m) => [m.label, Boolean(m.plan)])));
+  }
+
+  // --- 5b. sticky boards (LEO-358): opt-in share, read-only teammate view ---
+
+  async function testStickyBoards(): Promise<void> {
+    console.log('\n--- sticky boards ---');
+    fs.rmSync(teamCache(), { recursive: true, force: true });
+    const storePath = path.join(tmp, 'data', 'memory', 'stickies.json');
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify([
+        { id: 's1', text: '我的便签', color: 'yellow', box: 0, nextSurface: '2026-01-01', x: 10, y: 20, created_at: '2026-11-01T00:00:00.000Z', updated_at: '2026-11-01T00:00:00.000Z' },
+      ]),
+      'utf8',
+    );
+    const stickyPushes = (stub: Stub) => stub.calls.filter((c) => c.method === 'POST' && c.path.startsWith('/rest/v1/stickies'));
+
+    // Sharing off (the default): nothing is pushed, even with a board on disk.
+    const offStub = makeStub({ rows: [], stickies: [] });
+    bridge.setTeamSessionProviderForTests(offStub);
+    await sync.syncTeamOnce(config);
+    check('sharing off pushes no board', stickyPushes(offStub).length === 0, JSON.stringify(offStub.calls.map((c) => `${c.method} ${c.path}`)));
+
+    // Sharing on: the whole board is pushed once, and an unchanged tick is quiet.
+    const shareConfig = { ...config, reminders: { ...config.reminders, share_with_team: true } };
+    const onStub = makeStub({ rows: [], stickies: [] });
+    bridge.setTeamSessionProviderForTests(onStub);
+    await sync.syncTeamOnce(shareConfig);
+    const pushes = stickyPushes(onStub);
+    check('sharing on pushes the board once', pushes.length === 1, JSON.stringify(pushes.map((p) => p.path)));
+    check(
+      'the pushed row carries the items payload',
+      Boolean((pushes[0]?.body as Array<{ payload?: { items?: unknown[] } }>)?.[0]?.payload?.items?.length === 1),
+      JSON.stringify(pushes[0]?.body),
+    );
+    onStub.calls.length = 0;
+    await sync.syncTeamOnce(shareConfig);
+    check('an unchanged board is not re-pushed', stickyPushes(onStub).length === 0, JSON.stringify(onStub.calls.map((c) => `${c.method} ${c.path}`)));
+
+    // Turning sharing back off deletes the remote row so teammates stop seeing it.
+    onStub.calls.length = 0;
+    await sync.syncTeamOnce(config);
+    const deletes = onStub.calls.filter((c) => c.method === 'DELETE' && c.path.startsWith('/rest/v1/stickies'));
+    check('turning sharing off deletes my remote row', deletes.length === 1 && onStub.stickies.every((r) => r.owner !== SELF_ID), JSON.stringify(deletes.map((d) => d.path)));
+
+    // A teammate's shared board is pulled, cached, and read back read-only.
+    const mateStub = makeStub({
+      rows: [],
+      stickies: [{ owner: MATE_ID, payload: { items: [{ id: 'm1', text: '企鹅的便签', color: 'pink', x: 5, y: 5 }] }, updated_at: '2026-11-06T09:00:00.000Z' }],
+    });
+    bridge.setTeamSessionProviderForTests(mateStub);
+    await sync.syncTeamOnce(config);
+    const boardFile = path.join(teamCache(), MATE_ID, 'stickies.json');
+    check('a teammate board is pulled and cached', fs.existsSync(boardFile), boardFile);
+    const viewed = await sync.readTeamStickiesState(config);
+    const mate = viewed.members.find((m) => m.userId === MATE_ID);
+    check(
+      'readTeamStickiesState returns the teammate board',
+      Boolean((mate?.board?.payload as { items?: Array<{ text?: string }> })?.items?.[0]?.text === '企鹅的便签'),
+      JSON.stringify(mate),
+    );
+
+    // Un-sharing: the row disappears, so the cached board is pruned away.
+    mateStub.stickies.length = 0;
+    await sync.syncTeamOnce(config);
+    check('un-sharing prunes the cached teammate board', !fs.existsSync(boardFile), boardFile);
+    const afterUnshare = await sync.readTeamStickiesState(config);
+    check('the un-shared teammate shows no board', afterUnshare.members.find((m) => m.userId === MATE_ID)?.board == null, JSON.stringify(afterUnshare.members.map((m) => [m.label, Boolean(m.board)])));
+
+    // A project that never ran the migration degrades with a message, not a crash.
+    const noTable = makeStub({ rows: [], stickies: [], stickiesTable: false });
+    bridge.setTeamSessionProviderForTests(noTable);
+    const degraded = await sync.syncTeamOnce(shareConfig);
+    check('a missing stickies table is reported, not thrown', degraded.status === 'ok' && degraded.reason.includes('stickies'), JSON.stringify(degraded));
   }
 
   // --- 6. write guards ------------------------------------------------------
