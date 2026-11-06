@@ -256,6 +256,12 @@ countdown:
   # at the top of the morning card. Keep this local and private.
   store_path: "./data/memory/countdowns.json"
 
+reminders:
+  # 提醒卡 / 便签墙 (LEO-355). Sticky notes with no deadline that resurface on a
+  # spaced-repetition schedule. A plain JSON array, rewritten whole on every
+  # edit. Private — never synced, sent to Feishu, or read by any workflow.
+  store_path: "./data/memory/stickies.json"
+
 chat_analysis:
   enabled: true
   # manual: latest configured messages
