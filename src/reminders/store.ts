@@ -10,8 +10,13 @@ import { todayInTimezone } from '../utils/date.js';
  *
  * A sticky is a small jotting — a todo, an idea — with no deadline. Instead of
  * alerting on a date, each note resurfaces on its own schedule: spaced
- * repetition decides which notes "float up" to the top of the board on a given
- * day, so they come find you when you next open Daily OS rather than nagging.
+ * repetition decides which notes are "surfacing" on a given day, so they come
+ * find you when you next open Daily OS rather than nagging.
+ *
+ * Position is the user's, not the schedule's (LEO-356): notes live on a free
+ * canvas at `x,y` the user drags them to. Surfacing no longer re-lays-out the
+ * board — it drives a badge (💤 asleep → 🔔 awake) and the response row on the
+ * note in place. The Today-page hook carries the "N surfaced today" nudge.
  *
  * The scheme is a fixed Leitner ladder, not Anki grading: a note lives in one
  * of five boxes whose intervals grow `2 → 4 → 8 → 16 → 30` days. When a surfaced
@@ -44,6 +49,13 @@ export interface Sticky {
   box: number;
   /** `YYYY-MM-DD` in the user's timezone — the day this note next floats up. */
   nextSurface: string;
+  /**
+   * Canvas position (top-left of the tile, in points). Absent on notes written
+   * before the free canvas (LEO-356) and on notes the client has not placed
+   * yet; the client lays those out and persists a real position on first drag.
+   */
+  x?: number;
+  y?: number;
   created_at: string;
   updated_at: string;
   /** Set once the note is archived; archived notes drop off the active board. */
@@ -59,6 +71,13 @@ export interface StickyInput {
   id?: string;
   text: string;
   color?: StickyColor;
+  x?: number;
+  y?: number;
+}
+
+/** A finite number, or undefined — used to accept optional coordinates. */
+function finiteOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -106,12 +125,16 @@ function normalizeStored(value: unknown, today: string): Sticky | null {
   const now = new Date().toISOString();
   const nextSurface =
     typeof row.nextSurface === 'string' && isCalendarDate(row.nextSurface) ? row.nextSurface : today;
+  const x = finiteOrUndefined(row.x);
+  const y = finiteOrUndefined(row.y);
   return {
     id,
     text,
     color: normalizeColor(row.color),
     box: clampBox(typeof row.box === 'number' ? row.box : 0),
     nextSurface,
+    ...(x !== undefined ? { x } : {}),
+    ...(y !== undefined ? { y } : {}),
     created_at: typeof row.created_at === 'string' ? row.created_at : now,
     updated_at: typeof row.updated_at === 'string' ? row.updated_at : now,
     ...(typeof row.archived_at === 'string' && row.archived_at ? { archived_at: row.archived_at } : {}),
@@ -145,11 +168,17 @@ export function saveSticky(config: AppConfig, input: StickyInput, today = todayI
   const index = input.id ? items.findIndex((item) => item.id === input.id) : -1;
   const existing = index >= 0 ? items[index] : undefined;
 
+  const x = finiteOrUndefined(input.x);
+  const y = finiteOrUndefined(input.y);
+
   const saved: Sticky = existing
     ? {
         ...existing,
         text,
         color: input.color ? normalizeColor(input.color) : existing.color,
+        // The editor leaves position untouched; only drags move a note.
+        ...(x !== undefined ? { x } : {}),
+        ...(y !== undefined ? { y } : {}),
         updated_at: now,
       }
     : {
@@ -160,6 +189,10 @@ export function saveSticky(config: AppConfig, input: StickyInput, today = todayI
         // A note you just wrote does not need to resurface today — you just saw
         // it. Its first wake-up is one interval out.
         nextSurface: addDays(today, SURFACE_INTERVALS[0]),
+        // The client picks a free spot for a new note and sends it here; absent
+        // only if it did not, in which case the canvas lays it out.
+        ...(x !== undefined ? { x } : {}),
+        ...(y !== undefined ? { y } : {}),
         created_at: now,
         updated_at: now,
       };
@@ -201,6 +234,28 @@ export function surfaceSticky(
   items[index] = next;
   writeStickies(config, items);
   return next;
+}
+
+/**
+ * Move a note to `x,y` on the canvas (LEO-356). Only the position and
+ * `updated_at` change; the schedule is untouched. Archived or unknown notes,
+ * and non-finite coordinates, are refused.
+ */
+export function moveSticky(
+  config: AppConfig,
+  id: string,
+  x: number,
+  y: number,
+  today = todayInTimezone(config),
+): Sticky | null {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const items = readStickies(config, today);
+  const index = items.findIndex((item) => item.id === id);
+  if (index < 0 || items[index].archived_at) return null;
+  const now = new Date().toISOString();
+  items[index] = { ...items[index], x, y, updated_at: now };
+  writeStickies(config, items);
+  return items[index];
 }
 
 /** Archive a note by id — used by the board's delete/done control. */
