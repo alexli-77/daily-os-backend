@@ -99,6 +99,7 @@ import { deleteJournal, listJournal, readJournal, writeJournal, type JournalEntr
 import {
   archiveSticky,
   listStickies,
+  moveSticky,
   saveSticky,
   surfaceSticky,
   type StickyColor,
@@ -474,6 +475,7 @@ async function handleRequest(request: http.IncomingMessage, response: http.Serve
     if (request.method === 'POST' && url.pathname === '/api/stickies/save') return sendJson(response, await saveStickyEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/stickies/surface') return sendJson(response, await surfaceStickyEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/stickies/archive') return sendJson(response, await archiveStickyEntry(options, await readJson(request)));
+    if (request.method === 'POST' && url.pathname === '/api/stickies/move') return sendJson(response, await moveStickyEntry(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/today/resend') return sendJson(response, await resendLatestWorkflow(options));
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') return sendJson(response, await cancelRun(options, await readJson(request)));
     if (request.method === 'POST' && url.pathname === '/api/runs/rerun') return sendJson(response, await rerunWorkflow(options, await readJson(request)));
@@ -1054,9 +1056,27 @@ async function saveStickyEntry(options: UiServerOptions, body: unknown): Promise
       ...(request.id ? { id: String(request.id).trim() } : {}),
       text,
       ...(typeof request.color === 'string' ? { color: request.color as StickyColor } : {}),
+      ...(Number.isFinite(Number(request.x)) ? { x: Number(request.x) } : {}),
+      ...(Number.isFinite(Number(request.y)) ? { y: Number(request.y) } : {}),
     },
     today,
   );
+  return { ok: true, today, item: saved, items: listStickies(config, today) };
+}
+
+async function moveStickyEntry(options: UiServerOptions, body: unknown): Promise<Record<string, unknown>> {
+  const request = readRecord(body);
+  const id = String(request.id || '').trim();
+  if (!id) return { ok: false, error: 'id is required.' };
+  const x = Number(request.x);
+  const y = Number(request.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, error: 'x and y must be numbers.' };
+  const env = readEnvFile(options.envPath);
+  applyEnv(env);
+  const config = loadConfig(options.configPath);
+  const today = stickyToday(config, request.tz);
+  const saved = moveSticky(config, id, x, y, today);
+  if (!saved) return { ok: false, error: '这张便签已经不在了。' };
   return { ok: true, today, item: saved, items: listStickies(config, today) };
 }
 
